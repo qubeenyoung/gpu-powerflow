@@ -1,0 +1,14 @@
+numpy
+scipy
+pandas
+matplotlib
+tabulate
+pypower
+cupy-cuda12x
+pybind11
+torch
+jupyterlab 
+tqdm
+pandapower
+lxml
+matpowercaseframes

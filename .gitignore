@@ -1,0 +1,47 @@
+# Build directories
+build/
+build_*/
+
+# Datasets (too large for git)
+datasets/
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+*.so
+
+# C++ build artifacts
+*.o
+*.a
+*.d
+*.dSYM/
+
+# Debug dumps
+dump_*.mtx
+dump_*.txt
+
+# Profiling
+*.ncu-rep
+*.nsys-rep
+*.csv
+
+# Logs
+*.log
+
+# Temp
+tmp/
+runs/
+
+# OS
+.DS_Store
+Thumbs.db
