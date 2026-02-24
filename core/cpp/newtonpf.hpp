@@ -1,5 +1,6 @@
 #include <Eigen/Sparse>
 #include <Eigen/Dense>
+#include <vector>
 #include "nr_data.hpp"
 
 nr_data::NRResult
@@ -12,7 +13,43 @@ newtonPF(const nr_data::YbusType& ybus,  // 소영수정: const reference로 변
         const int32_t max_iter
       );
 
-void 
+/**
+ * @brief Batch Newton-Raphson 전력조류 계산 (N개 케이스 GPU 동시 처리)
+ *
+ * 동일한 Ybus/pv/pq를 공유하면서 N개의 서로 다른 Sbus/V0 케이스를 GPU에서
+ * 동시에 처리합니다. cuDSS Uniform Batch API를 활용하여 N개의 LU 분해 및
+ * Solve를 병렬로 실행합니다.
+ *
+ * GPU 파이프라인 (배치):
+ *   0. 초기화: N개 V0/Sbus GPU 업로드 (1회)
+ *   1. Batch Mismatch: N개 cuSPARSE SpMV + Mismatch 커널
+ *   2. Batch Jacobian: N개 Jacobian 병렬 계산 (FP32)
+ *   3. Batch Permutation: N개 Eigen→CSR 재배열
+ *   4. Batch LU 분해: cuDSS Uniform Batch Factorization
+ *   5. Batch Solve: cuDSS Uniform Batch Solve
+ *   6. Batch UpdateV: N개 FP64 Va/Vm 업데이트
+ *
+ * @param ybus      Ybus 행렬 (공통)
+ * @param sbus_vec  N개 Sbus 벡터
+ * @param V0_vec    N개 초기 전압 벡터
+ * @param pv        PV 버스 인덱스 (공통)
+ * @param pq        PQ 버스 인덱스 (공통)
+ * @param tolerance 수렴 허용 오차
+ * @param max_iter  최대 반복 횟수
+ * @return          N개 NRResult
+ */
+std::vector<nr_data::NRResult>
+newtonPF_batch(
+    const nr_data::YbusType& ybus,
+    const std::vector<nr_data::VectorXcd>& sbus_vec,
+    const std::vector<nr_data::VectorXcd>& V0_vec,
+    const nr_data::VectorXi32& pv,
+    const nr_data::VectorXi32& pq,
+    double tolerance = 1e-8,
+    int max_iter = 50
+);
+
+void
 mismatch(double &normF,
         nr_data::VectorXd &F,
         const nr_data::VectorXcd &V,

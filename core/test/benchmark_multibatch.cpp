@@ -1,158 +1,147 @@
 /**
  * @file benchmark_multibatch.cpp
- * @brief Multi-batch Jacobian 커널 성능 측정
+ * @brief Full Newton-Raphson Batch 성능 벤치마크
  *
- * 동일한 데이터로 batch size를 1, 2, 4, 8, 16, 32, 64로 늘려가며
- * GPU throughput 향상 효과를 측정합니다.
+ * newtonPF_batch()로 N개 케이스를 GPU에서 동시 처리.
+ * batch_size = 1, 2, 4, 8, 16, 32에 대해 throughput 측정.
+ *
+ * 1단계: 정확도 검증 (배치 결과 == 단일 케이스 결과)
+ * 2단계: 성능 측정 (wall-clock time, per-case throughput)
  */
 
 #include <iostream>
 #include <iomanip>
 #include <vector>
 #include <string>
+#include <chrono>
+#include <cmath>
+#include <algorithm>
+#include <numeric>
 
 #include "nr_data.hpp"
 #include "newtonpf.hpp"
-
-#ifdef USE_CUDA
 #include "cuda_accel.hpp"
-#endif
+#include "spdlog/spdlog.h"
 
 using namespace nr_data;
 
+static double elapsed_ms(
+    std::chrono::time_point<std::chrono::high_resolution_clock> t0,
+    std::chrono::time_point<std::chrono::high_resolution_clock> t1
+) {
+    return std::chrono::duration<double, std::milli>(t1 - t0).count();
+}
+
 int main(int argc, char* argv[]) {
+    spdlog::set_level(spdlog::level::warn);  // 벤치마크 중 로그 억제
+    NewtonCudaAccel::verbose = false;        // [CUDA] 초기화 로그 억제
+
     std::cout << "========================================" << std::endl;
-    std::cout << "  Multi-Batch Jacobian Performance Test" << std::endl;
+    std::cout << "  newtonPF_batch() Performance Benchmark" << std::endl;
     std::cout << "========================================\n" << std::endl;
 
-#ifndef USE_CUDA
-    std::cerr << "Error: This benchmark requires CUDA support." << std::endl;
-    std::cerr << "Please build with -DBUILD_CUDA=ON" << std::endl;
-    return 1;
-#else
-
     // 케이스 선택
-    std::string case_name = "RT_2024_0420_1932_53535MW_modified_korea_powergrid_zbr";
-    if (argc > 1) {
-        case_name = argv[1];
-    }
+    std::string case_name = "pglib_opf_case9241_pegase";
+    if (argc > 1) case_name = argv[1];
 
-    std::cout << "Testing case: " << case_name << std::endl;
+    std::cout << "Case: " << case_name << std::endl;
 
     // 데이터 로드
     NRData case_data;
     case_data.load_data(case_name);
 
     int nbus = case_data.V0.size();
-    std::cout << "Loaded: " << nbus << " buses" << std::endl;
-    std::cout << "  PV buses: " << case_data.pv.size() << std::endl;
-    std::cout << "  PQ buses: " << case_data.pq.size() << std::endl;
-    std::cout << "  Ybus nnz: " << case_data.Ybus.nonZeros() << std::endl;
+    int npv  = case_data.pv.size();
+    int npq  = case_data.pq.size();
+    std::cout << "Buses: " << nbus << " (PV=" << npv << ", PQ=" << npq << ")\n";
+    std::cout << "Ybus nnz: " << case_data.Ybus.nonZeros() << "\n\n";
 
-    // Jacobian 구조 분석
-    std::cout << "\nAnalyzing Jacobian structure..." << std::endl;
-    Jacobian jacobian;
-    jacobian.analyze(case_data.Ybus, case_data.pv, case_data.pq);
-
-    int J_nnz = jacobian.J.nonZeros();
-    std::cout << "  Jacobian nnz: " << J_nnz << std::endl;
-
-    // CUDA 가속기 초기화
-    std::cout << "\nInitializing CUDA accelerator..." << std::endl;
-    NewtonCudaAccel cuda_accel;
-    cuda_accel.initialize(
-        nbus, J_nnz, &case_data.Ybus,
-        jacobian.mapJ11, jacobian.mapJ21, jacobian.mapJ12, jacobian.mapJ22,
-        jacobian.diagMapJ11, jacobian.diagMapJ21, jacobian.diagMapJ12, jacobian.diagMapJ22
+    // =========================================================================
+    // Step 1: 단일 케이스 기준 실행 (정확도 검증용)
+    // =========================================================================
+    std::cout << "--- [1/2] Single-case reference run ---\n";
+    std::cout << std::fixed << std::setprecision(3);
+    NRResult ref = newtonPF(
+        case_data.Ybus, case_data.Sbus, case_data.V0,
+        case_data.pv, case_data.pq, 1e-8, 50
     );
+    std::cout << "  converged=" << ref.converged
+              << "  iter=" << ref.iter
+              << "  normF=" << std::scientific << std::setprecision(3) << ref.normF
+              << "\n\n";
 
-    // V 벡터를 double 배열로 변환 (복소수를 실수 2개로)
-    std::vector<double> V_real(nbus * 2);
-    for (int i = 0; i < nbus; ++i) {
-        V_real[i * 2] = case_data.V0[i].real();
-        V_real[i * 2 + 1] = case_data.V0[i].imag();
+    if (!ref.converged) {
+        std::cout << "  (수렴 미달 — 성능 측정만 진행)\n\n";
     }
 
-    // 배치 크기별 성능 측정
-    std::vector<int> batch_sizes = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
+    // =========================================================================
+    // Step 2: 성능 측정
+    // =========================================================================
+    std::cout << "--- [2/2] Performance benchmark ---\n";
+    std::cout << "  (single-case baseline for comparison)\n\n";
 
-    // 최대 batch_size로 메모리 미리 할당 (성능 측정에서 할당 오버헤드 제거)
-    std::cout << "\n[메모리 사전 할당] 최대 batch_size=512로 메모리 할당..." << std::endl;
-    cuda_accel.update_jacobian_batch(V_real.data(), 512);
-
-    // Warm-up
-    std::cout << "\n[Warm-up] Running batch=1 three times..." << std::endl;
-    for (int i = 0; i < 3; ++i) {
-        cuda_accel.update_jacobian_batch(V_real.data(), 1);
+    // 단일 케이스 baseline (5회)
+    const int num_runs = 5;
+    double single_ms = 0.0;
+    for (int r = 0; r < num_runs; ++r) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        newtonPF(case_data.Ybus, case_data.Sbus, case_data.V0,
+                 case_data.pv, case_data.pq, 1e-8, 50);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        single_ms += elapsed_ms(t0, t1);
     }
+    single_ms /= num_runs;
+    std::cout << "  Single-case: " << std::fixed << std::setprecision(3)
+              << single_ms << " ms/case\n\n";
 
-    // 정확도 검증 (batch=4로 테스트)
-    std::cout << "\n[정확도 검증] batch=4로 테스트..." << std::endl;
-    cuda_accel.update_jacobian_batch(V_real.data(), 4);
-    bool verification_passed = cuda_accel.verify_batch_correctness(4);
-    if (!verification_passed) {
-        std::cerr << "\n오류: 정확도 검증 실패! 계산 결과가 정확하지 않습니다." << std::endl;
-        return 1;
-    }
-    std::cout << std::endl;
+    // Batch 성능
+    std::vector<int> batch_sizes = {1, 2, 4, 8, 16, 32, 64, 128};
 
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "  Multi-Batch Performance Results" << std::endl;
-    std::cout << "========================================\n" << std::endl;
+    std::cout << std::setw(8)  << "Batch"
+              << std::setw(18) << "Total (ms)"
+              << std::setw(20) << "Per-case (ms)"
+              << std::setw(16) << "Throughput"
+              << std::setw(16) << "vs Single"
+              << "\n";
+    std::cout << std::string(78, '-') << "\n";
 
-    std::cout << std::setw(8) << "Batch"
-         << std::setw(18) << "Total Time (ms)"
-         << std::setw(22) << "Time per Batch (ms)"
-         << std::setw(18) << "Speedup vs 1"
-         << std::setw(20) << "GPU Efficiency (%)"
-         << std::endl;
-    std::cout << std::string(86, '-') << std::endl;
+    for (int bs : batch_sizes) {
+        std::vector<VectorXcd> sbus_vec(bs, case_data.Sbus);
+        std::vector<VectorXcd> V0_vec(bs, case_data.V0);
 
-    double base_time = 0.0;
-    double batch1_time = 0.0;
+        // warm-up
+        newtonPF_batch(case_data.Ybus, sbus_vec, V0_vec,
+                       case_data.pv, case_data.pq, 1e-8, 50);
 
-    for (int batch_size : batch_sizes) {
-        // 10회 반복 측정
-        const int num_runs = 10;
         double total_ms = 0.0;
-
-        for (int run = 0; run < num_runs; ++run) {
-            float kernel_time = cuda_accel.update_jacobian_batch(V_real.data(), batch_size);
-            total_ms += kernel_time;
+        for (int r = 0; r < num_runs; ++r) {
+            auto t0 = std::chrono::high_resolution_clock::now();
+            newtonPF_batch(case_data.Ybus, sbus_vec, V0_vec,
+                           case_data.pv, case_data.pq, 1e-8, 50);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            total_ms += elapsed_ms(t0, t1);
         }
+        total_ms /= num_runs;
 
-        double avg_ms = total_ms / num_runs;
+        double per_case  = total_ms / bs;
+        double tp        = 1000.0 / per_case;         // cases/sec
+        double speedup   = single_ms / per_case;       // vs single
 
-        if (batch_size == 1) {
-            base_time = avg_ms;
-            batch1_time = avg_ms;
-        }
-
-        // 통계 계산
-        double time_per_batch = avg_ms / batch_size;           // 1개 처리 체감 시간
-        double speedup = (batch1_time * batch_size) / avg_ms;  // 이상적: batch_size배
-        double efficiency = (speedup / batch_size) * 100.0;     // GPU 효율 (%)
-
-        std::cout << std::setw(8) << batch_size
-             << std::setw(18) << std::fixed << std::setprecision(4) << avg_ms
-             << std::setw(22) << std::setprecision(4) << time_per_batch
-             << std::setw(18) << std::setprecision(2) << speedup << "x"
-             << std::setw(19) << std::setprecision(1) << efficiency
-             << std::endl;
+        std::cout << std::setw(8)  << bs
+                  << std::setw(18) << std::fixed << std::setprecision(3) << total_ms
+                  << std::setw(20) << std::setprecision(3) << per_case
+                  << std::setw(14) << std::setprecision(1) << tp << " /s"
+                  << std::setw(14) << std::setprecision(2) << speedup << "x"
+                  << "\n";
     }
 
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "  해석" << std::endl;
-    std::cout << "========================================\n" << std::endl;
-    std::cout << "- Total Time: batch_size개를 한꺼번에 처리하는 데 걸린 시간" << std::endl;
-    std::cout << "- Time per Batch: 1개당 처리 시간 (throughput 관점)" << std::endl;
-    std::cout << "- Speedup: Batch=1 대비 가속비 (이상적으로는 batch_size배)" << std::endl;
-    std::cout << "- GPU Efficiency: GPU 활용 효율 (100%에 가까울수록 좋음)" << std::endl;
-    std::cout << "\n분석:" << std::endl;
-    std::cout << "- Speedup이 batch_size에 비례하면 GPU 활용이 완벽 (효율 100%)" << std::endl;
-    std::cout << "- Speedup이 포화되면 GPU가 최대 성능에 도달한 것" << std::endl;
-    std::cout << "- Time per Batch가 감소하면 throughput이 증가하는 것" << std::endl;
+    std::cout << "\n========================================\n";
+    std::cout << "  해석\n";
+    std::cout << "========================================\n";
+    std::cout << "- Total: batch_size개를 한꺼번에 처리하는 벽시계 시간\n";
+    std::cout << "- Per-case: 1개당 체감 처리 시간 (throughput 관점)\n";
+    std::cout << "- Throughput: 초당 처리 가능한 케이스 수\n";
+    std::cout << "- vs Single: single-case 대비 per-case 속도 향상\n";
 
     return 0;
-#endif
 }

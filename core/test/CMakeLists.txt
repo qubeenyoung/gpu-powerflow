@@ -15,3 +15,10 @@ target_compile_features(benchmark_multibatch PRIVATE cxx_std_17)
 add_executable(benchmark_atomic benchmark_atomic.cpp)
 target_link_libraries(benchmark_atomic PRIVATE newtonpf_core)
 target_compile_features(benchmark_atomic PRIVATE cxx_std_17)
+
+# --- 5. 세부 타이밍 벤치마크 실행 파일 ---
+add_executable(benchmark_detailed benchmark_detailed.cpp)
+target_link_libraries(benchmark_detailed PRIVATE newtonpf_core)
+target_compile_features(benchmark_detailed PRIVATE cxx_std_17)
+
+

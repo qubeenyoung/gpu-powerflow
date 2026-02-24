@@ -208,6 +208,11 @@ if(BUILD_TEST)
   target_link_libraries(benchmark_multibatch PRIVATE newtonpf_core)
   target_compile_features(benchmark_multibatch PRIVATE cxx_std_17)
 
+  # Batch 단계별 세부 타이밍 분석
+  add_executable(benchmark_batch_detailed test/benchmark_batch_detailed.cpp)
+  target_link_libraries(benchmark_batch_detailed PRIVATE newtonpf_core)
+  target_compile_features(benchmark_batch_detailed PRIVATE cxx_std_17)
+
   # atomicAdd 병목 정량화 벤치마크
   add_executable(benchmark_atomic test/benchmark_atomic.cpp)
   target_link_libraries(benchmark_atomic PRIVATE newtonpf_core)

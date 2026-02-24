@@ -221,10 +221,6 @@ BenchmarkResult benchmark_case(const string& case_name, const string& mode) {
 int main(int argc, char** argv) {
     string mode = "cpu";  // cpu or gpu
 
-    if (argc > 1) {
-        mode = argv[1];
-    }
-
 #ifdef USE_CUDA
     mode = "gpu";
 #endif
@@ -235,13 +231,28 @@ int main(int argc, char** argv) {
 
     string dataset_root = "/workspace/datasets/nr_dataset";
 
-    // 모든 케이스 찾기
+    // 커맨드라인 인자로 케이스명을 직접 지정 가능
+    // 사용법: ./benchmark_detailed [case1] [case2] ...
+    // 인자 없으면 전체 케이스 실행
     vector<string> cases;
-    for (const auto& entry : fs::directory_iterator(dataset_root)) {
-        if (entry.is_directory()) {
-            string case_name = entry.path().filename().string();
-            if (fs::exists(entry.path() / "Ybus.npz")) {
+    if (argc > 1) {
+        for (int i = 1; i < argc; ++i) {
+            string case_name = argv[i];
+            string case_path = dataset_root + "/" + case_name;
+            if (fs::exists(case_path + "/Ybus.npz")) {
                 cases.push_back(case_name);
+            } else {
+                cout << "[WARN] Case not found: " << case_name << endl;
+            }
+        }
+    } else {
+        // 모든 케이스 찾기
+        for (const auto& entry : fs::directory_iterator(dataset_root)) {
+            if (entry.is_directory()) {
+                string case_name = entry.path().filename().string();
+                if (fs::exists(entry.path() / "Ybus.npz")) {
+                    cases.push_back(case_name);
+                }
             }
         }
     }

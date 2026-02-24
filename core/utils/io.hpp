@@ -56,8 +56,23 @@ EigenSparseMatT load_complex_csc(const std::string& filename)
         throw std::runtime_error("NPZ 'data' and 'indices' array lengths do not match");
     }
 
-    Eigen::Map<EigenSparseMatCSC> mapped_mat(rows, cols, nnz, indptr_ptr, indices_ptr, data_ptr);
-    return EigenSparseMatT(mapped_mat);
+    // Build via triplets so unsorted inner indices are handled correctly.
+    // (Eigen::Map copy-constructor uses insertBackByOuterInner which requires
+    //  sorted indices within each outer — not guaranteed by scipy CSC files.)
+    using Triplet = Eigen::Triplet<std::complex<double>>;
+    std::vector<Triplet> trips;
+    trips.reserve(nnz);
+    for (long c = 0; c < cols; ++c) {
+        for (int32_t k = indptr_ptr[c]; k < indptr_ptr[c + 1]; ++k) {
+            trips.emplace_back(static_cast<int>(indices_ptr[k]),
+                               static_cast<int>(c),
+                               data_ptr[k]);
+        }
+    }
+    EigenSparseMatCSC mat(rows, cols);
+    mat.setFromTriplets(trips.begin(), trips.end());
+    mat.makeCompressed();
+    return EigenSparseMatT(mat);
 }
 
 template <typename T>
