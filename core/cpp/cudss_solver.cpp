@@ -968,4 +968,70 @@ void CuDSSSolver::factorizeAndSolveSeqBatchFP32(float* d_b_batch, float* d_x_bat
     }
 }
 
+// ============================================================================
+// 진단용 API 구현
+// ============================================================================
+
+void CuDSSSolver::setIRSteps(int n) {
+    checkCudss(
+        cudssConfigSet(config_, CUDSS_CONFIG_IR_N_STEPS, &n, sizeof(n)),
+        "IR_N_STEPS 설정"
+    );
+}
+
+void CuDSSSolver::factorizeAndSolveUBatchFP32_timed(
+    float* d_b_batch, float* d_x_batch,
+    float& refact_ms, float& solve_ms)
+{
+    if (!analyzed_ubatch_) {
+        throw std::runtime_error("analyzePatternUBatch()를 먼저 호출해야 합니다");
+    }
+
+    // b 복사 (외부 → 내부)
+    if (d_b_batch != d_b_batch_) {
+        checkCuda(cudaMemcpy(d_b_batch_, d_b_batch,
+                             rows_ * batch_size_ * sizeof(float), cudaMemcpyDeviceToDevice),
+                  "b_batch 복사 (timed)");
+    }
+
+    int bs_int = batch_size_;
+    checkCudss(
+        cudssConfigSet(config_, CUDSS_CONFIG_UBATCH_SIZE, &bs_int, sizeof(bs_int)),
+        "UBATCH_SIZE 설정 (timed)"
+    );
+
+    // REFACTORIZATION 타이밍
+    cudaEventRecord(start_event_);
+    checkCudss(
+        cudssExecute(handle_, CUDSS_PHASE_REFACTORIZATION, config_, solver_data_ubatch_,
+                     mat_A_ubatch_, mat_x_ubatch_, mat_b_ubatch_),
+        "cudssExecute REFACTORIZATION (timed)"
+    );
+    cudaEventRecord(stop_event_);
+    cudaEventSynchronize(stop_event_);
+    cudaEventElapsedTime(&refact_ms, start_event_, stop_event_);
+
+    // SOLVE 타이밍
+    cudaEventRecord(start_event_);
+    checkCudss(
+        cudssExecute(handle_, CUDSS_PHASE_SOLVE, config_, solver_data_ubatch_,
+                     mat_A_ubatch_, mat_x_ubatch_, mat_b_ubatch_),
+        "cudssExecute SOLVE (timed)"
+    );
+    cudaEventRecord(stop_event_);
+    cudaEventSynchronize(stop_event_);
+    cudaEventElapsedTime(&solve_ms, start_event_, stop_event_);
+
+    // x 출력 복사
+    if (d_x_batch != d_x_batch_) {
+        checkCuda(cudaMemcpy(d_x_batch, d_x_batch_,
+                             cols_ * batch_size_ * sizeof(float), cudaMemcpyDeviceToDevice),
+                  "x_batch 복사 (timed)");
+    }
+
+    // UBATCH_SIZE 리셋
+    int zero_int = 0;
+    cudssConfigSet(config_, CUDSS_CONFIG_UBATCH_SIZE, &zero_int, sizeof(zero_int));
+}
+
 #endif // USE_CUDSS

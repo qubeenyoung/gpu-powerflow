@@ -21,4 +21,7 @@ add_executable(benchmark_detailed benchmark_detailed.cpp)
 target_link_libraries(benchmark_detailed PRIVATE newtonpf_core)
 target_compile_features(benchmark_detailed PRIVATE cxx_std_17)
 
-
+# --- 6. cuDSS solver 병목 진단 ---
+add_executable(diagnose_solver diagnose_solver.cpp)
+target_link_libraries(diagnose_solver PRIVATE newtonpf_core)
+target_compile_features(diagnose_solver PRIVATE cxx_std_17)

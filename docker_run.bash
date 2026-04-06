@@ -1,0 +1,1 @@
+docker run -it --gpus all --shm-size=16g --name graphopf -v "$(pwd):/workspace" graphopf:latest bash

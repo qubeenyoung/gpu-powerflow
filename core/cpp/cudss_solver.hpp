@@ -146,6 +146,29 @@ public:
     /** Batch x 벡터 GPU 버퍼 포인터 (FP32, [cols_ * batch_size]) */
     float* getBatchXBuffer() { return d_x_batch_; }
 
+    // =========================================================================
+    // 진단용 API
+    // =========================================================================
+
+    /**
+     * @brief Iterative Refinement 횟수 설정
+     * @param n  0=비활성화, 1~N=refinement 횟수 (default: cuDSS 내부 기본값)
+     *           analyzePattern() 전/후 어느 시점에도 호출 가능
+     */
+    void setIRSteps(int n);
+
+    /**
+     * @brief UBatch REFACTORIZATION / SOLVE를 분리해서 타이밍 측정
+     * @param d_b_batch  GPU, [rows_ * batch_size], FP32 (b 벡터들)
+     * @param d_x_batch  GPU, [cols_ * batch_size], FP32 (x 출력)
+     * @param[out] refact_ms  REFACTORIZATION 시간 (ms)
+     * @param[out] solve_ms   SOLVE 시간 (ms)
+     */
+    void factorizeAndSolveUBatchFP32_timed(
+        float* d_b_batch, float* d_x_batch,
+        float& refact_ms, float& solve_ms
+    );
+
 private:
     // cuDSS 핸들 (FP32)
     cudssHandle_t handle_;
