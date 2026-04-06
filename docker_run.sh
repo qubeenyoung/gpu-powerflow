@@ -1,1 +1,0 @@
-docker run -it --gpus all --shm-size=16g --name powerflow --cap-add=SYS_PTRACE -v "$(pwd):/workspace" powerflow:latest bash
