@@ -1,0 +1,52 @@
+{
+  "implementation": "cpp_optimized",
+  "summary": {
+    "algorithm": "optimized",
+    "analyze_sec": 9.1e-05,
+    "backend": "cpu",
+    "benchmark.analyze.avg_sec": 9.1e-05,
+    "benchmark.analyze.count": 1,
+    "benchmark.analyze.total_sec": 9.1e-05,
+    "benchmark.solve.avg_sec": 0.000144,
+    "benchmark.solve.count": 1,
+    "benchmark.solve.total_sec": 0.000144,
+    "benchmark.total.avg_sec": 0.000236,
+    "benchmark.total.count": 1,
+    "benchmark.total.total_sec": 0.000236,
+    "buses": 118,
+    "case_name": "118_ieee",
+    "case_stem": "pglib_opf_case118_ieee",
+    "dump_case_name": "case118_ieee",
+    "elapsed_sec": 0.000236,
+    "final_mismatch": 6.148338002329e-11,
+    "implementation": "cpp_optimized",
+    "iterations": 4,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 1.00256361749,
+    "pq": 64,
+    "pv": 53,
+    "repeat_idx": 1,
+    "solve_sec": 0.000144,
+    "success": true
+  },
+  "timing_entries": [
+    {
+      "elapsed_sec": 9.1e-05,
+      "iter_idx": 1,
+      "op_name": "analyze",
+      "tag": "benchmark"
+    },
+    {
+      "elapsed_sec": 0.000144,
+      "iter_idx": 1,
+      "op_name": "solve",
+      "tag": "benchmark"
+    },
+    {
+      "elapsed_sec": 0.000236,
+      "iter_idx": 1,
+      "op_name": "total",
+      "tag": "benchmark"
+    }
+  ]
+}

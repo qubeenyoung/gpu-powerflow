@@ -1,0 +1,52 @@
+{
+  "implementation": "cpp_pypowerlike",
+  "summary": {
+    "algorithm": "pypower_like",
+    "analyze_sec": 0.000576,
+    "backend": "cpu",
+    "benchmark.analyze.avg_sec": 0.000576,
+    "benchmark.analyze.count": 1,
+    "benchmark.analyze.total_sec": 0.000576,
+    "benchmark.solve.avg_sec": 0.170707,
+    "benchmark.solve.count": 1,
+    "benchmark.solve.total_sec": 0.170707,
+    "benchmark.total.avg_sec": 0.171283,
+    "benchmark.total.count": 1,
+    "benchmark.total.total_sec": 0.171283,
+    "buses": 8387,
+    "case_name": "8387_pegase",
+    "case_stem": "pglib_opf_case8387_pegase",
+    "dump_case_name": "case8387_pegase",
+    "elapsed_sec": 0.171283,
+    "final_mismatch": 1.483652090073e-11,
+    "implementation": "cpp_pypowerlike",
+    "iterations": 6,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 1.22556678508,
+    "pq": 6522,
+    "pv": 1864,
+    "repeat_idx": 2,
+    "solve_sec": 0.170707,
+    "success": true
+  },
+  "timing_entries": [
+    {
+      "elapsed_sec": 0.000576,
+      "iter_idx": 2,
+      "op_name": "analyze",
+      "tag": "benchmark"
+    },
+    {
+      "elapsed_sec": 0.170707,
+      "iter_idx": 2,
+      "op_name": "solve",
+      "tag": "benchmark"
+    },
+    {
+      "elapsed_sec": 0.171283,
+      "iter_idx": 2,
+      "op_name": "total",
+      "tag": "benchmark"
+    }
+  ]
+}

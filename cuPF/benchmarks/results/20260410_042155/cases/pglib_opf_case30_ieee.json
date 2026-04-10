@@ -1,0 +1,11 @@
+{
+  "base_mva": 100.0,
+  "case_stem": "pglib_opf_case30_ieee",
+  "n_bus": 30,
+  "n_pq": 24,
+  "n_pv": 5,
+  "n_ref": 1,
+  "short_case_name": "case30_ieee",
+  "source_path": "/workspace/datasets/pf_dataset/pglib_opf_case30_ieee.mat",
+  "ybus_nnz": 112
+}

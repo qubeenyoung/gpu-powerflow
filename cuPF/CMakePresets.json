@@ -1,0 +1,102 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "cpu-release",
+      "inherits": "base",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "cuda-release",
+      "inherits": "base",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "WITH_CUDA": "ON"
+      }
+    },
+    {
+      "name": "cuda-timing",
+      "inherits": "cuda-release",
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-DCUPF_ENABLE_LOG -DCUPF_ENABLE_TIMING",
+        "CMAKE_CUDA_FLAGS": "-DCUPF_ENABLE_LOG -DCUPF_ENABLE_TIMING"
+      }
+    },
+    {
+      "name": "py-release",
+      "inherits": "base",
+      "cacheVariables": {
+        "BUILD_PYTHON_BINDINGS": "ON"
+      }
+    },
+    {
+      "name": "bench-release",
+      "inherits": "base",
+      "cacheVariables": {
+        "BUILD_BENCHMARKS": "ON",
+        "BUILD_NAIVE_CPU": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "cpu-release",
+      "configurePreset": "cpu-release"
+    },
+    {
+      "name": "cuda-release",
+      "configurePreset": "cuda-release"
+    },
+    {
+      "name": "cuda-timing",
+      "configurePreset": "cuda-timing"
+    },
+    {
+      "name": "py-release",
+      "configurePreset": "py-release"
+    },
+    {
+      "name": "bench-release",
+      "configurePreset": "bench-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "cpu-release",
+      "configurePreset": "cpu-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "cuda-release",
+      "configurePreset": "cuda-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "cuda-timing",
+      "configurePreset": "cuda-timing",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

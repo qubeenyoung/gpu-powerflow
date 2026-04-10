@@ -1,0 +1,11 @@
+{
+  "base_mva": 100.0,
+  "case_stem": "pglib_opf_case8387_pegase",
+  "n_bus": 8387,
+  "n_pq": 6522,
+  "n_pv": 1864,
+  "n_ref": 1,
+  "short_case_name": "case8387_pegase",
+  "source_path": "/workspace/datasets/pf_dataset/pglib_opf_case8387_pegase.mat",
+  "ybus_nnz": 34377
+}

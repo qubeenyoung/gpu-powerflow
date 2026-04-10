@@ -1,0 +1,232 @@
+{
+  "case_name": "8387_pegase",
+  "implementation": "pypower",
+  "summary": {
+    "case_name": "8387_pegase",
+    "case_stem": "pglib_opf_case8387_pegase",
+    "elapsed_sec": 0.2351853847503662,
+    "final_mismatch": 1.548287886787847e-11,
+    "implementation": "pypower",
+    "iterations": 6,
+    "newtonpf.init_index.avg_sec": 1.4308840036392212e-05,
+    "newtonpf.init_index.count": 1,
+    "newtonpf.init_index.total_sec": 1.4308840036392212e-05,
+    "newtonpf.jacobian.avg_sec": 0.012690131242076555,
+    "newtonpf.jacobian.count": 6,
+    "newtonpf.jacobian.total_sec": 0.07614078745245934,
+    "newtonpf.mismatch.avg_sec": 0.00018164808196680888,
+    "newtonpf.mismatch.count": 7,
+    "newtonpf.mismatch.total_sec": 0.001271536573767662,
+    "newtonpf.solve.avg_sec": 0.02335697691887617,
+    "newtonpf.solve.count": 6,
+    "newtonpf.solve.total_sec": 0.14014186151325703,
+    "newtonpf.update_voltage.avg_sec": 0.00042717841764291126,
+    "newtonpf.update_voltage.count": 6,
+    "newtonpf.update_voltage.total_sec": 0.0025630705058574677,
+    "repeat_idx": 1,
+    "runpf.build_Sbus.avg_sec": 0.0002942904829978943,
+    "runpf.build_Sbus.count": 1,
+    "runpf.build_Sbus.total_sec": 0.0002942904829978943,
+    "runpf.build_Ybus.avg_sec": 0.010824054479598999,
+    "runpf.build_Ybus.count": 1,
+    "runpf.build_Ybus.total_sec": 0.010824054479598999,
+    "runpf.bus_indexing.avg_sec": 0.0033709462732076645,
+    "runpf.bus_indexing.count": 1,
+    "runpf.bus_indexing.total_sec": 0.0033709462732076645,
+    "runpf.load_case_data.avg_sec": 0.0018927119672298431,
+    "runpf.load_case_data.count": 1,
+    "runpf.load_case_data.total_sec": 0.0018927119672298431,
+    "runpf.newtonpf.avg_sec": 0.2202986143529415,
+    "runpf.newtonpf.count": 1,
+    "runpf.newtonpf.total_sec": 0.2202986143529415,
+    "success": true
+  },
+  "timing_entries": [
+    {
+      "elapsed_sec": 0.0018927119672298431,
+      "iter_idx": 0,
+      "op_name": "load_case_data",
+      "tag": "runpf"
+    },
+    {
+      "elapsed_sec": 0.0033709462732076645,
+      "iter_idx": 0,
+      "op_name": "bus_indexing",
+      "tag": "runpf"
+    },
+    {
+      "elapsed_sec": 0.010824054479598999,
+      "iter_idx": 0,
+      "op_name": "build_Ybus",
+      "tag": "runpf"
+    },
+    {
+      "elapsed_sec": 0.0002942904829978943,
+      "iter_idx": 0,
+      "op_name": "build_Sbus",
+      "tag": "runpf"
+    },
+    {
+      "elapsed_sec": 1.4308840036392212e-05,
+      "iter_idx": 0,
+      "op_name": "init_index",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0001643206924200058,
+      "iter_idx": 0,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.012298120185732841,
+      "iter_idx": 1,
+      "op_name": "jacobian",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.023660341277718544,
+      "iter_idx": 1,
+      "op_name": "solve",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0005262680351734161,
+      "iter_idx": 1,
+      "op_name": "update_voltage",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0001932084560394287,
+      "iter_idx": 1,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.01315169595181942,
+      "iter_idx": 2,
+      "op_name": "jacobian",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.023317784070968628,
+      "iter_idx": 2,
+      "op_name": "solve",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0004910584539175034,
+      "iter_idx": 2,
+      "op_name": "update_voltage",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.00018374063074588776,
+      "iter_idx": 2,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.012758268043398857,
+      "iter_idx": 3,
+      "op_name": "jacobian",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.023449202999472618,
+      "iter_idx": 3,
+      "op_name": "solve",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0003887787461280823,
+      "iter_idx": 3,
+      "op_name": "update_voltage",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.00018842890858650208,
+      "iter_idx": 3,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.012502828612923622,
+      "iter_idx": 4,
+      "op_name": "jacobian",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.022967824712395668,
+      "iter_idx": 4,
+      "op_name": "solve",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0003834385424852371,
+      "iter_idx": 4,
+      "op_name": "update_voltage",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.00017989054322242737,
+      "iter_idx": 4,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.012806156650185585,
+      "iter_idx": 5,
+      "op_name": "jacobian",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.02349444292485714,
+      "iter_idx": 5,
+      "op_name": "solve",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.00039017945528030396,
+      "iter_idx": 5,
+      "op_name": "update_voltage",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.00018039904534816742,
+      "iter_idx": 5,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.01262371800839901,
+      "iter_idx": 6,
+      "op_name": "jacobian",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.02325226552784443,
+      "iter_idx": 6,
+      "op_name": "solve",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0003833472728729248,
+      "iter_idx": 6,
+      "op_name": "update_voltage",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.00018154829740524292,
+      "iter_idx": 6,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.2202986143529415,
+      "iter_idx": 0,
+      "op_name": "newtonpf",
+      "tag": "runpf"
+    }
+  ]
+}

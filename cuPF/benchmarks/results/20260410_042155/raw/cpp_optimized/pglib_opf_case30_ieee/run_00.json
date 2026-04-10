@@ -1,0 +1,212 @@
+{
+  "implementation": "cpp_optimized",
+  "summary": {
+    "CPU.analyze.buildJacobianCSC.avg_sec": 1.1e-05,
+    "CPU.analyze.buildJacobianCSC.count": 1,
+    "CPU.analyze.buildJacobianCSC.total_sec": 1.1e-05,
+    "CPU.analyze.kluSymbolic.avg_sec": 3.7e-05,
+    "CPU.analyze.kluSymbolic.count": 1,
+    "CPU.analyze.kluSymbolic.total_sec": 3.7e-05,
+    "CPU.analyze.remapJacobianMaps.avg_sec": 3e-06,
+    "CPU.analyze.remapJacobianMaps.count": 1,
+    "CPU.analyze.remapJacobianMaps.total_sec": 3e-06,
+    "CPU.analyze.storeYbus.avg_sec": 0.0,
+    "CPU.analyze.storeYbus.count": 1,
+    "CPU.analyze.storeYbus.total_sec": 0.0,
+    "CPU.solve.factorize.avg_sec": 1.65e-05,
+    "CPU.solve.factorize.count": 4,
+    "CPU.solve.factorize.total_sec": 6.6e-05,
+    "CPU.solve.solve.avg_sec": 7.5e-07,
+    "CPU.solve.solve.count": 4,
+    "CPU.solve.solve.total_sec": 3e-06,
+    "NR.analyze.backend.avg_sec": 0.0001,
+    "NR.analyze.backend.count": 1,
+    "NR.analyze.backend.total_sec": 0.0001,
+    "NR.analyze.jacobianBuilder.avg_sec": 3.4e-05,
+    "NR.analyze.jacobianBuilder.count": 1,
+    "NR.analyze.jacobianBuilder.total_sec": 3.4e-05,
+    "NR.analyze.total.avg_sec": 0.000186,
+    "NR.analyze.total.count": 1,
+    "NR.analyze.total.total_sec": 0.000186,
+    "NR.computeMismatch.avg_sec": 4e-07,
+    "NR.computeMismatch.count": 5,
+    "NR.computeMismatch.total_sec": 2e-06,
+    "NR.iteration.total.avg_sec": 7.08e-05,
+    "NR.iteration.total.count": 5,
+    "NR.iteration.total.total_sec": 0.000354,
+    "NR.solve.downloadV.avg_sec": 0.0,
+    "NR.solve.downloadV.count": 1,
+    "NR.solve.downloadV.total_sec": 0.0,
+    "NR.solve.initialize.avg_sec": 1.7e-05,
+    "NR.solve.initialize.count": 1,
+    "NR.solve.initialize.total_sec": 1.7e-05,
+    "NR.solve.total.avg_sec": 0.000453,
+    "NR.solve.total.count": 1,
+    "NR.solve.total.total_sec": 0.000453,
+    "NR.solveLinearSystem.avg_sec": 3.85e-05,
+    "NR.solveLinearSystem.count": 4,
+    "NR.solveLinearSystem.total_sec": 0.000154,
+    "NR.updateJacobian.avg_sec": 1.5e-06,
+    "NR.updateJacobian.count": 4,
+    "NR.updateJacobian.total_sec": 6e-06,
+    "NR.updateVoltage.avg_sec": 6e-06,
+    "NR.updateVoltage.count": 4,
+    "NR.updateVoltage.total_sec": 2.4e-05,
+    "algorithm": "optimized",
+    "analyze_sec": 0.000327,
+    "backend": "cpu",
+    "buses": 30,
+    "case_name": "case30_ieee",
+    "case_stem": "pglib_opf_case30_ieee",
+    "dump_case_name": "case30_ieee",
+    "elapsed_sec": 0.000802,
+    "final_mismatch": 7.898295547308e-15,
+    "implementation": "cpp_optimized",
+    "iterations": 4,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.341154734562,
+    "pq": 24,
+    "pv": 5,
+    "repeat_idx": 0,
+    "solve_sec": 0.000474,
+    "success": true
+  },
+  "timing_entries": [
+    {
+      "avg_sec": 1.1e-05,
+      "count": 1,
+      "elapsed_sec": 1.1e-05,
+      "iter_idx": 0,
+      "op_name": "analyze.buildJacobianCSC",
+      "tag": "CPU"
+    },
+    {
+      "avg_sec": 3.7e-05,
+      "count": 1,
+      "elapsed_sec": 3.7e-05,
+      "iter_idx": 0,
+      "op_name": "analyze.kluSymbolic",
+      "tag": "CPU"
+    },
+    {
+      "avg_sec": 3e-06,
+      "count": 1,
+      "elapsed_sec": 3e-06,
+      "iter_idx": 0,
+      "op_name": "analyze.remapJacobianMaps",
+      "tag": "CPU"
+    },
+    {
+      "avg_sec": 0.0,
+      "count": 1,
+      "elapsed_sec": 0.0,
+      "iter_idx": 0,
+      "op_name": "analyze.storeYbus",
+      "tag": "CPU"
+    },
+    {
+      "avg_sec": 1.65e-05,
+      "count": 4,
+      "elapsed_sec": 6.6e-05,
+      "iter_idx": 0,
+      "op_name": "solve.factorize",
+      "tag": "CPU"
+    },
+    {
+      "avg_sec": 7.5e-07,
+      "count": 4,
+      "elapsed_sec": 3e-06,
+      "iter_idx": 0,
+      "op_name": "solve.solve",
+      "tag": "CPU"
+    },
+    {
+      "avg_sec": 0.0001,
+      "count": 1,
+      "elapsed_sec": 0.0001,
+      "iter_idx": 0,
+      "op_name": "analyze.backend",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 3.4e-05,
+      "count": 1,
+      "elapsed_sec": 3.4e-05,
+      "iter_idx": 0,
+      "op_name": "analyze.jacobianBuilder",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 0.000186,
+      "count": 1,
+      "elapsed_sec": 0.000186,
+      "iter_idx": 0,
+      "op_name": "analyze.total",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 4e-07,
+      "count": 5,
+      "elapsed_sec": 2e-06,
+      "iter_idx": 0,
+      "op_name": "computeMismatch",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 7.08e-05,
+      "count": 5,
+      "elapsed_sec": 0.000354,
+      "iter_idx": 0,
+      "op_name": "iteration.total",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 0.0,
+      "count": 1,
+      "elapsed_sec": 0.0,
+      "iter_idx": 0,
+      "op_name": "solve.downloadV",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 1.7e-05,
+      "count": 1,
+      "elapsed_sec": 1.7e-05,
+      "iter_idx": 0,
+      "op_name": "solve.initialize",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 0.000453,
+      "count": 1,
+      "elapsed_sec": 0.000453,
+      "iter_idx": 0,
+      "op_name": "solve.total",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 3.85e-05,
+      "count": 4,
+      "elapsed_sec": 0.000154,
+      "iter_idx": 0,
+      "op_name": "solveLinearSystem",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 1.5e-06,
+      "count": 4,
+      "elapsed_sec": 6e-06,
+      "iter_idx": 0,
+      "op_name": "updateJacobian",
+      "tag": "NR"
+    },
+    {
+      "avg_sec": 6e-06,
+      "count": 4,
+      "elapsed_sec": 2.4e-05,
+      "iter_idx": 0,
+      "op_name": "updateVoltage",
+      "tag": "NR"
+    }
+  ]
+}
