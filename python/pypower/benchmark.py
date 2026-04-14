@@ -18,8 +18,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT)
     parser.add_argument("--run-name", default=datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"))
     parser.add_argument("--cases", nargs="*", default=list(TARGET_CASES))
-    parser.add_argument("--warmup", type=int, default=0)
-    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--mode", choices=("end2end", "operators"), default="end2end")
+    parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--emit-timing-log", action="store_true")
     return parser.parse_args()
 
@@ -41,6 +42,7 @@ def main() -> None:
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "results_root": str(run_root),
         "cases": list(args.cases),
+        "mode": args.mode,
         "warmup": args.warmup,
         "repeats": args.repeats,
         "emit_timing_log": args.emit_timing_log,
@@ -48,6 +50,7 @@ def main() -> None:
     write_json(run_root / "manifest.json", manifest)
 
     rows: list[dict[str, object]] = []
+    collect_operator_timing = args.mode == "operators"
 
     for case_name in args.cases:
         resolved_case_stem = case_stem(case_name)
@@ -55,8 +58,8 @@ def main() -> None:
         for _ in range(args.warmup):
             my_runpf(
                 casedata=case_name,
-                log_pf=True,
-                log_newtonpf=True,
+                log_pf=collect_operator_timing,
+                log_newtonpf=collect_operator_timing,
                 print_results=False,
                 emit_timing_log=False,
                 emit_status=False,
@@ -65,16 +68,17 @@ def main() -> None:
         for repeat_idx in range(args.repeats):
             result = my_runpf(
                 casedata=case_name,
-                log_pf=True,
-                log_newtonpf=True,
+                log_pf=collect_operator_timing,
+                log_newtonpf=collect_operator_timing,
                 print_results=False,
                 emit_timing_log=args.emit_timing_log,
                 emit_status=False,
             )
-            summary = summarize_entries(result.timing_entries)
+            summary = summarize_entries(result.timing_entries) if collect_operator_timing else {}
             flat_summary = flatten_summary(summary)
 
             row = {
+                "measurement_mode": args.mode,
                 "case_stem": resolved_case_stem,
                 "case_path": str(result.case_path),
                 "repeat_idx": repeat_idx,

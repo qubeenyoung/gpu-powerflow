@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       zlib1g-dev tree jq \
       libcudss0-dev-cuda-12 \
       libsuperlu-dev \
+      libhypre-dev \
       && rm -rf /var/lib/apt/lists/*
 
 # 2. Compiler selection

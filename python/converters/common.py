@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from os import environ
 from pathlib import Path
 import json
 
@@ -18,9 +19,11 @@ from pypower.makeYbus import makeYbus
 from scipy.io import mmwrite
 
 
-MAT_DATASET_ROOT = Path("/workspace/datasets/pf_dataset")
-NR_DATASET_ROOT = Path("/workspace/datasets/nr_dataset")
-CUPF_DUMP_ROOT = Path("/workspace/datasets/cuPF_datasets")
+DATASETS_ROOT = Path(environ.get("CUPF_DATASETS_ROOT", "/workspace/datasets"))
+PGLIB_OPF_DATASET_ROOT = Path(environ.get("PGLIB_OPF_DATASET_ROOT", str(DATASETS_ROOT / "pglib-opf")))
+MAT_DATASET_ROOT = Path(environ.get("MAT_DATASET_ROOT", str(PGLIB_OPF_DATASET_ROOT / "pf_dataset")))
+NR_DATASET_ROOT = Path(environ.get("NR_DATASET_ROOT", str(PGLIB_OPF_DATASET_ROOT / "nr_dataset")))
+CUPF_DUMP_ROOT = Path(environ.get("CUPF_DUMP_ROOT", str(PGLIB_OPF_DATASET_ROOT / "cuPF_datasets")))
 TARGET_CASES = (
     "118_ieee",
     "793_goc",
@@ -61,17 +64,30 @@ def case_stem(case_name: str) -> str:
 
 
 def short_case_name(case_name: str) -> str:
-    stem = case_stem(case_name)
+    stem = Path(case_name).stem
     if stem.startswith("pglib_opf_"):
         return stem.removeprefix("pglib_opf_")
     return stem
 
 
-def mat_case_path(case_name: str) -> Path:
-    path = MAT_DATASET_ROOT / f"{case_stem(case_name)}.mat"
-    if not path.exists():
-        raise FileNotFoundError(f"MAT case not found: {path}")
-    return path
+def mat_case_path(case_name: str, mat_root: str | Path = MAT_DATASET_ROOT) -> Path:
+    root = Path(mat_root)
+    raw_path = Path(case_name)
+    candidates = []
+
+    if raw_path.exists():
+        return raw_path
+    if raw_path.suffix == ".mat":
+        candidates.append(root / raw_path.name)
+    else:
+        candidates.append(root / f"{raw_path.stem}.mat")
+    candidates.append(root / f"{case_stem(case_name)}.mat")
+
+    for path in candidates:
+        if path.exists():
+            return path
+
+    raise FileNotFoundError(f"MAT case not found: {candidates[-1]}")
 
 
 def ensure_branch_result_columns(ppc: dict) -> dict:
@@ -89,9 +105,10 @@ def ensure_branch_result_columns(ppc: dict) -> dict:
 
 def preprocess_case(
     case_name: str,
+    mat_root: str | Path = MAT_DATASET_ROOT,
 ) -> PreprocessedCase:
-    case_path = mat_case_path(case_name)
-    stem = case_stem(case_name)
+    case_path = mat_case_path(case_name, mat_root=mat_root)
+    stem = case_path.stem
     short_name = short_case_name(case_name)
 
     ppc = loadcase(str(case_path))
@@ -205,5 +222,5 @@ def save_cupf_dump(
     return case_dir
 
 
-def all_mat_case_names() -> list[str]:
-    return sorted(path.stem for path in MAT_DATASET_ROOT.glob("pglib_opf_case*.mat"))
+def all_mat_case_names(mat_root: str | Path = MAT_DATASET_ROOT) -> list[str]:
+    return sorted(path.stem for path in Path(mat_root).glob("*.mat"))

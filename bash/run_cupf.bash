@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="/workspace/cuPF"
+ROOT_DIR="/workspace/v2"
 DEFAULT_CASE_DIR="/workspace/v1/core/dumps/case30_ieee"
 
 PRESET="cpu-release"

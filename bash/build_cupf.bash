@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="/workspace/cuPF"
+ROOT_DIR="/workspace/v2"
 DEFAULT_PRESET="cpu-release"
 PRESET="${DEFAULT_PRESET}"
 RUN_TESTS=0
@@ -85,7 +85,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ! -d "${ROOT_DIR}" ]]; then
-  echo "cuPF source directory not found: ${ROOT_DIR}" >&2
+  echo "v2 source directory not found: ${ROOT_DIR}" >&2
   exit 1
 fi
 

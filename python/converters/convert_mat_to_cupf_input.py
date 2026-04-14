@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .common import CUPF_DUMP_ROOT, TARGET_CASES, preprocess_case, save_cupf_dump
+from .common import CUPF_DUMP_ROOT, MAT_DATASET_ROOT, TARGET_CASES, preprocess_case, save_cupf_dump
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convert .mat cases to cuPF dump_case_loader input format.")
+    parser.add_argument("--input-root", type=Path, default=MAT_DATASET_ROOT)
     parser.add_argument("--output-root", type=Path, default=CUPF_DUMP_ROOT)
     parser.add_argument(
         "--cases",
@@ -22,7 +23,7 @@ def main() -> None:
     args = parse_args()
 
     for case_name in args.cases:
-        case_data = preprocess_case(case_name)
+        case_data = preprocess_case(case_name, mat_root=args.input_root)
         output_dir = save_cupf_dump(case_data, output_root=args.output_root)
         print(f"[OK] {case_data.case_stem} -> {output_dir}")
 

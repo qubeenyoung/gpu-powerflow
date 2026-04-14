@@ -22,7 +22,7 @@ from pypower.idx_brch import PF, PT, QF, QT
 from pypower.idx_bus import VA, VM
 from pypower.idx_gen import GEN_BUS, GEN_STATUS, PG, QG, VG
 
-from ..converters.common import case_stem, mat_case_path
+from ..converters.common import mat_case_path
 from .newtonpf import NewtonPfResult, my_newtonpf
 from .timer import BlockTimer, TimingEntry, TimingLog
 
@@ -53,7 +53,7 @@ def my_runpf(
         casedata = "118_ieee"
 
     case_path = mat_case_path(casedata)
-    resolved_case_stem = case_stem(casedata)
+    resolved_case_stem = case_path.stem
 
     ppopt = ppoption(ppopt)
     ppopt["TIMING"] = log_newtonpf
