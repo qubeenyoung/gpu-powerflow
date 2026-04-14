@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.004074,
+    "backend": "cuda",
+    "buses": 793,
+    "case_name": "case793_goc",
+    "compute": "mixed",
+    "dump_case_name": "case793_goc",
+    "elapsed_sec": 0.018164,
+    "final_mismatch": 1.804992953179e-12,
+    "implementation": "cuda_edge",
+    "iterations": 6,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 1.161718975814,
+    "measurement_mode": "end2end",
+    "pq": 704,
+    "profile": "cuda_edge",
+    "pv": 88,
+    "repeat_idx": 1,
+    "solve_sec": 0.014089,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

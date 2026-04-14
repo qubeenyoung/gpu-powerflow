@@ -1,0 +1,510 @@
+{
+  "benchmark_binaries": {
+    "end2end": "/workspace/exp/20260412_2/mt/build/mt_16/end2end/benchmarks/cupf_case_benchmark",
+    "operators": "/workspace/exp/20260412_2/mt/build/mt_16/operators/benchmarks/cupf_case_benchmark"
+  },
+  "build_dirs": {
+    "end2end": "/workspace/exp/20260412_2/mt/build/mt_16/end2end",
+    "operators": "/workspace/exp/20260412_2/mt/build/mt_16/operators"
+  },
+  "cases": [
+    "case30_ieee",
+    "case118_ieee",
+    "case793_goc",
+    "case1354_pegase",
+    "case2746wop_k",
+    "case4601_goc",
+    "case8387_pegase",
+    "case9241_pegase"
+  ],
+  "commands": [
+    {
+      "cmd": [
+        "cmake",
+        "-S",
+        "/workspace/cuPF",
+        "-B",
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DWITH_CUDA=ON",
+        "-DENABLE_LOG=OFF",
+        "-DENABLE_TIMING=OFF",
+        "-DENABLE_NVTX=OFF",
+        "-DCUPF_CUDSS_REORDERING_ALG=DEFAULT",
+        "-DCUPF_CUDSS_ENABLE_MT=ON",
+        "-DCUPF_CUDSS_HOST_NTHREADS=16",
+        "-DCUPF_CUDSS_ND_NLEVELS=AUTO",
+        "-DBUILD_BENCHMARKS=ON",
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_PYTHON_BINDINGS=OFF"
+      ],
+      "cwd": "/workspace",
+      "name": "cmake_configure_end2end"
+    },
+    {
+      "cmd": [
+        "cmake",
+        "--build",
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end",
+        "--target",
+        "cupf_case_benchmark",
+        "-j",
+        "32"
+      ],
+      "cwd": "/workspace",
+      "name": "cmake_build_end2end"
+    },
+    {
+      "cmd": [
+        "cmake",
+        "-S",
+        "/workspace/cuPF",
+        "-B",
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DWITH_CUDA=ON",
+        "-DENABLE_LOG=OFF",
+        "-DENABLE_TIMING=ON",
+        "-DENABLE_NVTX=ON",
+        "-DCUPF_CUDSS_REORDERING_ALG=DEFAULT",
+        "-DCUPF_CUDSS_ENABLE_MT=ON",
+        "-DCUPF_CUDSS_HOST_NTHREADS=16",
+        "-DCUPF_CUDSS_ND_NLEVELS=AUTO",
+        "-DBUILD_BENCHMARKS=ON",
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_PYTHON_BINDINGS=OFF"
+      ],
+      "cwd": "/workspace",
+      "name": "cmake_configure_operators"
+    },
+    {
+      "cmd": [
+        "cmake",
+        "--build",
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators",
+        "--target",
+        "cupf_case_benchmark",
+        "-j",
+        "32"
+      ],
+      "cwd": "/workspace",
+      "name": "cmake_build_operators"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case30_ieee",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case30_ieee"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case118_ieee",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case118_ieee"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case793_goc",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case793_goc"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case1354_pegase",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case1354_pegase"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case2746wop_k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case2746wop_k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case4601_goc",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case4601_goc"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case8387_pegase",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case8387_pegase"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case9241_pegase",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case9241_pegase"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case30_ieee",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case30_ieee"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case118_ieee",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case118_ieee"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case793_goc",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case793_goc"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case1354_pegase",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case1354_pegase"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case2746wop_k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case2746wop_k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case4601_goc",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case4601_goc"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case8387_pegase",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case8387_pegase"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260412_2/mt/build/mt_16/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/cuPF_benchmark_dumps/case9241_pegase",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case9241_pegase"
+    }
+  ],
+  "created_at_utc": "2026-04-12T09:33:17.804149+00:00",
+  "cudss_enable_mt": true,
+  "cudss_host_nthreads": "16",
+  "cudss_ld_preload": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+  "cudss_nd_nlevels": "AUTO",
+  "cudss_reordering_alg": "DEFAULT",
+  "cudss_threading_lib": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+  "dataset_root": "/workspace/datasets/cuPF_benchmark_dumps",
+  "environment": {
+    "cmake": "cmake version 3.22.1\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).",
+    "created_on": "359f21289ad1",
+    "cxx": "c++ (Ubuntu 12.3.0-1ubuntu1~22.04.2) 12.3.0\nCopyright (C) 2022 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+    "git": {
+      "branch": "refactor/main",
+      "commit": "c28479587a4fc9b6cbcf3faf9a6b0e6fb3ecfe5a",
+      "status_short": "M ../README.md\n M ../bash/build_cupf.bash\n M ../bash/run_cupf.bash\n M ../python/README.md\n M ../python/pypower/benchmark.py\nD  ../v2/.gitignore\nD  ../v2/CMakeLists.txt\nD  ../v2/CMakePresets.json\nD  ../v2/README.md\nD  ../v2/benchmarks/README.md\nD  ../v2/benchmarks/cpp/cupf_case_benchmark.cpp\nD  ../v2/benchmarks/results/20260410_042155/README.md\nD  ../v2/benchmarks/results/20260410_042155/SUMMARY.md\nD  ../v2/benchmarks/results/20260410_042155/cases/pglib_opf_case30_ieee.json\nD  ../v2/benchmarks/results/20260410_042155/manifest.json\nD  ../v2/benchmarks/results/20260410_042155/raw/cpp_optimized/pglib_opf_case30_ieee/run_00.json\nD  ../v2/benchmarks/results/20260410_042155/raw/cpp_pypowerlike/pglib_opf_case30_ieee/run_00.json\nD  ../v2/benchmarks/results/20260410_042155/raw/pypower/pglib_opf_case30_ieee/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/README.md\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/SUMMARY.md\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/cases/pglib_opf_case118_ieee.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/cases/pglib_opf_case4601_goc.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/cases/pglib_opf_case9241_pegase.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/manifest.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_optimized/pglib_opf_case118_ieee/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_optimized/pglib_opf_case118_ieee/run_01.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_optimized/pglib_opf_case118_ieee/run_02.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_optimized/pglib_opf_case4601_goc/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_optimized/pglib_opf_case4601_goc/run_01.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_optimized/pglib_opf_case4601_goc/run_02.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_optimized/pglib_opf_case9241_pegase/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_optimized/pglib_opf_case9241_pegase/run_01.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_optimized/pglib_opf_case9241_pegase/run_02.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_pypowerlike/pglib_opf_case118_ieee/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_pypowerlike/pglib_opf_case118_ieee/run_01.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_pypowerlike/pglib_opf_case118_ieee/run_02.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_pypowerlike/pglib_opf_case4601_goc/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_pypowerlike/pglib_opf_case4601_goc/run_01.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_pypowerlike/pglib_opf_case4601_goc/run_02.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_pypowerlike/pglib_opf_case9241_pegase/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_pypowerlike/pglib_opf_case9241_pegase/run_01.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/cpp_pypowerlike/pglib_opf_case9241_pegase/run_02.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/pypower/pglib_opf_case118_ieee/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/pypower/pglib_opf_case118_ieee/run_01.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/pypower/pglib_opf_case118_ieee/run_02.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/pypower/pglib_opf_case4601_goc/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/pypower/pglib_opf_case4601_goc/run_01.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/pypower/pglib_opf_case4601_goc/run_02.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/pypower/pglib_opf_case9241_pegase/run_00.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/pypower/pglib_opf_case9241_pegase/run_01.json\nD  ../v2/benchmarks/results/optimized_fix_check_20260409/raw/pypower/pglib_opf_case9241_pegase/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/README.md\nD  ../v2/benchmarks/results/selected_cases_20260409/SUMMARY.md\nD  ../v2/benchmarks/results/selected_cases_20260409/cases/pglib_opf_case118_ieee.json\nD  ../v2/benchmarks/results/selected_cases_20260409/cases/pglib_opf_case1354_pegase.json\nD  ../v2/benchmarks/results/selected_cases_20260409/cases/pglib_opf_case2746wop_k.json\nD  ../v2/benchmarks/results/selected_cases_20260409/cases/pglib_opf_case4601_goc.json\nD  ../v2/benchmarks/results/selected_cases_20260409/cases/pglib_opf_case793_goc.json\nD  ../v2/benchmarks/results/selected_cases_20260409/cases/pglib_opf_case8387_pegase.json\nD  ../v2/benchmarks/results/selected_cases_20260409/cases/pglib_opf_case9241_pegase.json\nD  ../v2/benchmarks/results/selected_cases_20260409/manifest.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case118_ieee/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case118_ieee/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case118_ieee/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case1354_pegase/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case1354_pegase/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case1354_pegase/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case2746wop_k/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case2746wop_k/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case2746wop_k/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case4601_goc/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case4601_goc/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case4601_goc/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case793_goc/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case793_goc/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case793_goc/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case8387_pegase/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case8387_pegase/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case8387_pegase/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case9241_pegase/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case9241_pegase/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_optimized/pglib_opf_case9241_pegase/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case118_ieee/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case118_ieee/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case118_ieee/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case1354_pegase/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case1354_pegase/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case1354_pegase/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case2746wop_k/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case2746wop_k/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case2746wop_k/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case4601_goc/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case4601_goc/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case4601_goc/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case793_goc/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case793_goc/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case793_goc/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case8387_pegase/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case8387_pegase/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case8387_pegase/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case9241_pegase/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case9241_pegase/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/cpp_pypowerlike/pglib_opf_case9241_pegase/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case118_ieee/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case118_ieee/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case118_ieee/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case1354_pegase/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case1354_pegase/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case1354_pegase/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case2746wop_k/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case2746wop_k/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case2746wop_k/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case4601_goc/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case4601_goc/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case4601_goc/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case793_goc/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case793_goc/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case793_goc/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case8387_pegase/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case8387_pegase/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case8387_pegase/run_02.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case9241_pegase/run_00.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case9241_pegase/run_01.json\nD  ../v2/benchmarks/results/selected_cases_20260409/raw/pypower/pglib_opf_case9241_pegase/run_02.json\nD  ../v2/benchmarks/run_benchmarks.py\nD  ../v2/bindings/pybind_module.cpp\nD  ../v2/cpp/inc/newton_solver/backend/cpu_backend.hpp\nD  ../v2/cpp/inc/newton_solver/backend/cuda_backend.hpp\nD  ../v2/cpp/inc/newton_solver/backend/i_backend.hpp\nD  ../v2/cpp/inc/newton_solver/backend/naive_cpu_backend.hpp\nD  ../v2/cpp/inc/newton_solver/core/jacobian_builder.hpp\nD  ../v2/cpp/inc/newton_solver/core/jacobian_types.hpp\nD  ../v2/cpp/inc/newton_solver/core/newton_solver.hpp\nD  ../v2/cpp/inc/newton_solver/core/newton_solver_types.hpp\nD  ../v2/cpp/inc/utils/cuda_utils.hpp\nD  ../v2/cpp/inc/utils/dump.hpp\nD  ../v2/cpp/inc/utils/logger.hpp\nD  ../v2/cpp/inc/utils/timer.hpp\nD  ../v2/cpp/src/newton_solver/backend/cpp/compute_mismatch.cpp\nD  ../v2/cpp/src/newton_solver/backend/cpp/cpu_backend_impl.hpp\nD  ../v2/cpp/src/newton_solver/backend/cpp/initialize.cpp\nD  ../v2/cpp/src/newton_solver/backend/cpp/klu_solver.cpp\nD  ../v2/cpp/src/newton_solver/backend/cpp/update_jacobian.cpp\nD  ../v2/cpp/src/newton_solver/backend/cpp_naive/naive_cpu_backend_impl.hpp\nD  ../v2/cpp/src/newton_solver/backend/cpp_naive/naive_initialize.cpp\nD  ../v2/cpp/src/newton_solver/backend/cpp_naive/naive_jacobian.cpp\nD  ../v2/cpp/src/newton_solver/backend/cpp_naive/naive_solver.cpp\nD  ../v2/cpp/src/newton_solver/backend/cuda/compute_mismatch.cu\nD  ../v2/cpp/src/newton_solver/backend/cuda/cuda_backend_impl.hpp\nD  ../v2/cpp/src/newton_solver/backend/cuda/cudss_solver.cpp\nD  ../v2/cpp/src/newton_solver/backend/cuda/initialize.cpp\nD  ../v2/cpp/src/newton_solver/backend/cuda/update_jacobian.cu\nD  ../v2/cpp/src/newton_solver/core/jacobian_builder.cpp\nD  ../v2/cpp/src/newton_solver/core/newton_solver.cpp\nD  ../v2/docs/backend/cpu.md\nD  ../v2/docs/backend/cuda.md\nD  ../v2/docs/backend/interface.md\nD  ../v2/docs/bindings.md\nD  ../v2/docs/core/jacobian_builder.md\nD  ../v2/docs/core/newton_solver.md\nD  ../v2/docs/core/types.md\nD  ../v2/docs/overview.md\nD  ../v2/docs/utils/overview.md\nD  ../v2/pyproject.toml\nD  ../v2/tests/cpp/dump_case_loader.cpp\nD  ../v2/tests/cpp/dump_case_loader.hpp\nD  ../v2/tests/cpp/test_solve_dump_case.cpp\n?? ./"
+    },
+    "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2023 NVIDIA Corporation\nBuilt on Tue_Aug_15_22:02:13_PDT_2023\nCuda compilation tools, release 12.2, V12.2.140\nBuild cuda_12.2.r12.2/compiler.33191640_0",
+    "nvidia_smi": "NVIDIA A10, 535.274.02\nNVIDIA A10, 535.274.02\nNVIDIA A10, 535.274.02\nNVIDIA A10, 535.274.02",
+    "platform": "Linux-5.15.0-163-generic-x86_64-with-glibc2.35",
+    "python": "3.10.12 (main, Aug 15 2025, 14:32:43) [GCC 11.4.0]"
+  },
+  "max_iter": 50,
+  "measurement_modes": [
+    "end2end",
+    "operators"
+  ],
+  "profile_specs": [
+    {
+      "backend": "cuda",
+      "compute": "mixed",
+      "cupf_profile": "cuda_mixed_edge",
+      "implementation": "cuda_edge",
+      "jacobian": "edge_based",
+      "name": "cuda_edge",
+      "runner": "cupf"
+    }
+  ],
+  "profiles": [
+    "cuda_edge"
+  ],
+  "repeats": 10,
+  "results_root": "/workspace/exp/20260412_2/mt/results/cuda_edge_mt_mt_16",
+  "run_name": "cuda_edge_mt_mt_16",
+  "script_path": "/workspace/cuPF/benchmarks/run_benchmarks.py",
+  "tolerance": 1e-08,
+  "warmup": 1,
+  "workspace_root": "/workspace"
+}

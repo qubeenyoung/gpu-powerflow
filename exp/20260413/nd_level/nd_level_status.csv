@@ -1,0 +1,9 @@
+label,status,source_exp,run_dir,note
+auto,completed,20260412,/workspace/exp/20260412/nd_level/results/cuda_edge_nd_auto,manifest and aggregate results available
+nd_5,completed,20260413,/workspace/exp/20260413/nd_level/results/cuda_edge_nd_nd_5,manifest and aggregate results available
+nd_6,completed,20260413,/workspace/exp/20260413/nd_level/results/cuda_edge_nd_nd_6,manifest and aggregate results available
+nd_7,completed,20260413,/workspace/exp/20260413/nd_level/results/cuda_edge_nd_nd_7,manifest and aggregate results available
+nd_8,completed,20260412,/workspace/exp/20260412/nd_level/results/cuda_edge_nd_nd_8,manifest and aggregate results available
+nd_9,completed,20260412,/workspace/exp/20260412/nd_level/results/cuda_edge_nd_nd_9,manifest and aggregate results available
+nd_10,completed,20260412,/workspace/exp/20260412/nd_level/results/cuda_edge_nd_nd_10,manifest and aggregate results available
+nd_11,completed,20260412,/workspace/exp/20260412/nd_level/results/cuda_edge_nd_nd_11,manifest and aggregate results available

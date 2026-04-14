@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.011645,
+    "backend": "cpu",
+    "buses": 10189,
+    "case_name": "Base_MIOHIN_76GW",
+    "compute": "fp64",
+    "dump_case_name": "Base_MIOHIN_76GW",
+    "elapsed_sec": 0.084862,
+    "final_mismatch": 7.494354309944e-12,
+    "implementation": "cpp",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.05334083387815,
+    "measurement_mode": "end2end",
+    "pq": 9998,
+    "profile": "cpp",
+    "pv": 190,
+    "repeat_idx": 5,
+    "solve_sec": 0.073216,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

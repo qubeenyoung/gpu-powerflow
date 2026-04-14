@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.017064,
+    "backend": "cuda",
+    "buses": 2746,
+    "case_name": "case2746wop_k",
+    "compute": "mixed",
+    "dump_case_name": "case2746wop_k",
+    "elapsed_sec": 0.019547,
+    "final_mismatch": 4.186351265645e-10,
+    "implementation": "cuda_edge",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.5067134061182,
+    "measurement_mode": "end2end",
+    "pq": 2396,
+    "profile": "cuda_edge",
+    "pv": 349,
+    "repeat_idx": 5,
+    "solve_sec": 0.002482,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

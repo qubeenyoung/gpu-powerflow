@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.028737,
+    "backend": "cuda",
+    "buses": 7336,
+    "case_name": "Base_Texas_66GW",
+    "compute": "mixed",
+    "dump_case_name": "Base_Texas_66GW",
+    "elapsed_sec": 0.035081,
+    "final_mismatch": 1.692615987623e-11,
+    "implementation": "cuda_edge",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.2290447115571,
+    "measurement_mode": "end2end",
+    "pq": 7096,
+    "profile": "cuda_edge",
+    "pv": 239,
+    "repeat_idx": 6,
+    "solve_sec": 0.006343,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

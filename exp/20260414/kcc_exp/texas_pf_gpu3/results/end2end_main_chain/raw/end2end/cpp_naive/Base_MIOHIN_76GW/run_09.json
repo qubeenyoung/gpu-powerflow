@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.000742,
+    "backend": "cpu",
+    "buses": 10189,
+    "case_name": "Base_MIOHIN_76GW",
+    "compute": "fp64",
+    "dump_case_name": "Base_MIOHIN_76GW",
+    "elapsed_sec": 0.213951,
+    "final_mismatch": 7.581057191752e-12,
+    "implementation": "cpp_naive",
+    "iterations": 5,
+    "jacobian": "pypower_like",
+    "max_abs_v_delta_from_v0": 0.05334083387815,
+    "measurement_mode": "end2end",
+    "pq": 9998,
+    "profile": "cpp_naive",
+    "pv": 190,
+    "repeat_idx": 9,
+    "solve_sec": 0.213209,
+    "source_profile": "cpp_pypowerlike",
+    "success": true
+  },
+  "timing_entries": []
+}

@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 2.1e-05,
+    "backend": "cpu",
+    "buses": 30,
+    "case_name": "case30_ieee",
+    "compute": "fp64",
+    "dump_case_name": "case30_ieee",
+    "elapsed_sec": 6.7e-05,
+    "final_mismatch": 1.221902438322e-14,
+    "implementation": "cpp",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.341154734562,
+    "measurement_mode": "end2end",
+    "pq": 24,
+    "profile": "cpp",
+    "pv": 5,
+    "repeat_idx": 8,
+    "solve_sec": 4.6e-05,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

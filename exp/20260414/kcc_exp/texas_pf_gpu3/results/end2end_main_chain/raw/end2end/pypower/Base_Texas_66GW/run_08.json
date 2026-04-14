@@ -1,0 +1,26 @@
+{
+  "summary": {
+    "analyze_sec": "",
+    "backend": "python",
+    "buses": "",
+    "case_name": "Base_Texas_66GW",
+    "case_stem": "pglib_opf_caseBase_Texas_66GW",
+    "compute": "fp64",
+    "dump_case_name": "",
+    "elapsed_sec": 0.17129549570381641,
+    "final_mismatch": 6.520117779018619e-12,
+    "implementation": "pypower",
+    "iterations": 4,
+    "jacobian": "pypower",
+    "max_abs_v_delta_from_v0": "",
+    "measurement_mode": "end2end",
+    "pq": "",
+    "profile": "pypower",
+    "pv": "",
+    "repeat_idx": 8,
+    "solve_sec": "",
+    "source_profile": "pypower",
+    "success": true
+  },
+  "timing_entries": []
+}

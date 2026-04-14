@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.008716,
+    "backend": "cpu",
+    "buses": 6717,
+    "case_name": "Texas7k_20220923",
+    "compute": "fp64",
+    "dump_case_name": "Texas7k_20220923",
+    "elapsed_sec": 0.036374,
+    "final_mismatch": 3.877894193309e-12,
+    "implementation": "cpp",
+    "iterations": 4,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.01575196529895,
+    "measurement_mode": "end2end",
+    "pq": 6127,
+    "profile": "cpp",
+    "pv": 589,
+    "repeat_idx": 8,
+    "solve_sec": 0.027657,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

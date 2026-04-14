@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.003855,
+    "backend": "cpu",
+    "buses": 2746,
+    "case_name": "case2746wop_k",
+    "compute": "fp64",
+    "dump_case_name": "case2746wop_k",
+    "elapsed_sec": 0.011979,
+    "final_mismatch": 5.405607988541e-12,
+    "implementation": "cpp",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.5067134061369,
+    "measurement_mode": "end2end",
+    "pq": 2396,
+    "profile": "cpp",
+    "pv": 349,
+    "repeat_idx": 0,
+    "solve_sec": 0.008123,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

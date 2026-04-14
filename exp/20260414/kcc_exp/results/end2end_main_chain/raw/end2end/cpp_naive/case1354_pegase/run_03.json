@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 1e-05,
+    "backend": "cpu",
+    "buses": 1354,
+    "case_name": "case1354_pegase",
+    "compute": "fp64",
+    "dump_case_name": "case1354_pegase",
+    "elapsed_sec": 0.019269,
+    "final_mismatch": 2.743706727289e-12,
+    "implementation": "cpp_naive",
+    "iterations": 6,
+    "jacobian": "pypower_like",
+    "max_abs_v_delta_from_v0": 0.9675246266079,
+    "measurement_mode": "end2end",
+    "pq": 1094,
+    "profile": "cpp_naive",
+    "pv": 259,
+    "repeat_idx": 3,
+    "solve_sec": 0.019258,
+    "source_profile": "cpp_pypowerlike",
+    "success": true
+  },
+  "timing_entries": []
+}

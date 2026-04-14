@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.035474,
+    "backend": "cuda",
+    "buses": 10189,
+    "case_name": "Base_MIOHIN_76GW",
+    "compute": "mixed",
+    "dump_case_name": "Base_MIOHIN_76GW",
+    "elapsed_sec": 0.040877,
+    "final_mismatch": 9.400968892237e-10,
+    "implementation": "cuda_edge",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.05334083387947,
+    "measurement_mode": "end2end",
+    "pq": 9998,
+    "profile": "cuda_edge",
+    "pv": 190,
+    "repeat_idx": 4,
+    "solve_sec": 0.005403,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

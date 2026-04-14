@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.049248,
+    "backend": "cuda",
+    "buses": 2000,
+    "case_name": "case_ACTIVSg2000",
+    "compute": "mixed",
+    "dump_case_name": "case_ACTIVSg2000",
+    "elapsed_sec": 0.051485,
+    "final_mismatch": 3.248780332307e-09,
+    "implementation": "cuda_edge",
+    "iterations": 4,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.02916330897566,
+    "measurement_mode": "end2end",
+    "pq": 1608,
+    "profile": "cuda_edge",
+    "pv": 391,
+    "repeat_idx": 0,
+    "solve_sec": 0.002237,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

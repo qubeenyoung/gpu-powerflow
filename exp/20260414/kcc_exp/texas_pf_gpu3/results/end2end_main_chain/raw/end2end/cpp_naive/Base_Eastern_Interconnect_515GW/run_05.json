@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.001071,
+    "backend": "cpu",
+    "buses": 78478,
+    "case_name": "Base_Eastern_Interconnect_515GW",
+    "compute": "fp64",
+    "dump_case_name": "Base_Eastern_Interconnect_515GW",
+    "elapsed_sec": 3.04618,
+    "final_mismatch": 2.325428738459e-11,
+    "implementation": "cpp_naive",
+    "iterations": 6,
+    "jacobian": "pypower_like",
+    "max_abs_v_delta_from_v0": 0.2269152465433,
+    "measurement_mode": "end2end",
+    "pq": 76439,
+    "profile": "cpp_naive",
+    "pv": 2038,
+    "repeat_idx": 5,
+    "solve_sec": 3.045109,
+    "source_profile": "cpp_pypowerlike",
+    "success": true
+  },
+  "timing_entries": []
+}

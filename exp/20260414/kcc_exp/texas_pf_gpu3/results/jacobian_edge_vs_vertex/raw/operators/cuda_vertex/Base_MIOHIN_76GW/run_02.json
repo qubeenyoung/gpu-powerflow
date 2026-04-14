@@ -1,0 +1,188 @@
+{
+  "summary": {
+    "CUDA.analyze.cudss32.analysis.avg_sec": 0.029241,
+    "CUDA.analyze.cudss32.analysis.count": 1,
+    "CUDA.analyze.cudss32.analysis.total_sec": 0.029241,
+    "CUDA.analyze.cudss32.setup.avg_sec": 0.001551,
+    "CUDA.analyze.cudss32.setup.count": 1,
+    "CUDA.analyze.cudss32.setup.total_sec": 0.001551,
+    "CUDA.solve.factorization32.avg_sec": 0.000832,
+    "CUDA.solve.factorization32.count": 1,
+    "CUDA.solve.factorization32.total_sec": 0.000832,
+    "CUDA.solve.refactorization32.avg_sec": 0.000756,
+    "CUDA.solve.refactorization32.count": 3,
+    "CUDA.solve.refactorization32.total_sec": 0.002268,
+    "CUDA.solve.rhsPrepare.avg_sec": 4.15e-05,
+    "CUDA.solve.rhsPrepare.count": 4,
+    "CUDA.solve.rhsPrepare.total_sec": 0.000166,
+    "CUDA.solve.solve32.avg_sec": 0.0002965,
+    "CUDA.solve.solve32.count": 4,
+    "CUDA.solve.solve32.total_sec": 0.001186,
+    "NR.analyze.jacobian_builder.avg_sec": 0.004163,
+    "NR.analyze.jacobian_builder.count": 1,
+    "NR.analyze.jacobian_builder.total_sec": 0.004163,
+    "NR.analyze.linear_solve.avg_sec": 0.030796,
+    "NR.analyze.linear_solve.count": 1,
+    "NR.analyze.linear_solve.total_sec": 0.030796,
+    "NR.analyze.storage_prepare.avg_sec": 0.0005,
+    "NR.analyze.storage_prepare.count": 1,
+    "NR.analyze.storage_prepare.total_sec": 0.0005,
+    "NR.analyze.total.avg_sec": 0.035461,
+    "NR.analyze.total.count": 1,
+    "NR.analyze.total.total_sec": 0.035461,
+    "NR.iteration.jacobian.avg_sec": 2.775e-05,
+    "NR.iteration.jacobian.count": 4,
+    "NR.iteration.jacobian.total_sec": 0.000111,
+    "NR.iteration.linear_solve.avg_sec": 0.00111675,
+    "NR.iteration.linear_solve.count": 4,
+    "NR.iteration.linear_solve.total_sec": 0.004467,
+    "NR.iteration.mismatch.avg_sec": 6.32e-05,
+    "NR.iteration.mismatch.count": 5,
+    "NR.iteration.mismatch.total_sec": 0.000316,
+    "NR.iteration.total.avg_sec": 0.0009972,
+    "NR.iteration.total.count": 5,
+    "NR.iteration.total.total_sec": 0.004986,
+    "NR.iteration.voltage_update.avg_sec": 2.1e-05,
+    "NR.iteration.voltage_update.count": 4,
+    "NR.iteration.voltage_update.total_sec": 8.4e-05,
+    "NR.solve.download.avg_sec": 4.5e-05,
+    "NR.solve.download.count": 1,
+    "NR.solve.download.total_sec": 4.5e-05,
+    "NR.solve.total.avg_sec": 0.005511,
+    "NR.solve.total.count": 1,
+    "NR.solve.total.total_sec": 0.005511,
+    "NR.solve.upload.avg_sec": 0.000476,
+    "NR.solve.upload.count": 1,
+    "NR.solve.upload.total_sec": 0.000476,
+    "analyze_sec": 0.035462,
+    "backend": "cuda",
+    "buses": 10189,
+    "case_name": "Base_MIOHIN_76GW",
+    "compute": "mixed",
+    "dump_case_name": "Base_MIOHIN_76GW",
+    "elapsed_sec": 0.040975,
+    "final_mismatch": 1.507463043282e-09,
+    "implementation": "cuda_vertex",
+    "iterations": 5,
+    "jacobian": "vertex_based",
+    "max_abs_v_delta_from_v0": 0.05334083387807,
+    "measurement_mode": "operators",
+    "pq": 9998,
+    "profile": "cuda_vertex",
+    "pv": 190,
+    "repeat_idx": 2,
+    "solve_sec": 0.005512,
+    "source_profile": "cuda_mixed_vertex",
+    "success": true
+  },
+  "timing_entries": [
+    {
+      "avg_sec": 0.029241,
+      "count": 1,
+      "name": "CUDA.analyze.cudss32.analysis",
+      "total_sec": 0.029241
+    },
+    {
+      "avg_sec": 0.001551,
+      "count": 1,
+      "name": "CUDA.analyze.cudss32.setup",
+      "total_sec": 0.001551
+    },
+    {
+      "avg_sec": 0.000832,
+      "count": 1,
+      "name": "CUDA.solve.factorization32",
+      "total_sec": 0.000832
+    },
+    {
+      "avg_sec": 0.000756,
+      "count": 3,
+      "name": "CUDA.solve.refactorization32",
+      "total_sec": 0.002268
+    },
+    {
+      "avg_sec": 4.15e-05,
+      "count": 4,
+      "name": "CUDA.solve.rhsPrepare",
+      "total_sec": 0.000166
+    },
+    {
+      "avg_sec": 0.0002965,
+      "count": 4,
+      "name": "CUDA.solve.solve32",
+      "total_sec": 0.001186
+    },
+    {
+      "avg_sec": 0.004163,
+      "count": 1,
+      "name": "NR.analyze.jacobian_builder",
+      "total_sec": 0.004163
+    },
+    {
+      "avg_sec": 0.030796,
+      "count": 1,
+      "name": "NR.analyze.linear_solve",
+      "total_sec": 0.030796
+    },
+    {
+      "avg_sec": 0.0005,
+      "count": 1,
+      "name": "NR.analyze.storage_prepare",
+      "total_sec": 0.0005
+    },
+    {
+      "avg_sec": 0.035461,
+      "count": 1,
+      "name": "NR.analyze.total",
+      "total_sec": 0.035461
+    },
+    {
+      "avg_sec": 2.775e-05,
+      "count": 4,
+      "name": "NR.iteration.jacobian",
+      "total_sec": 0.000111
+    },
+    {
+      "avg_sec": 0.00111675,
+      "count": 4,
+      "name": "NR.iteration.linear_solve",
+      "total_sec": 0.004467
+    },
+    {
+      "avg_sec": 6.32e-05,
+      "count": 5,
+      "name": "NR.iteration.mismatch",
+      "total_sec": 0.000316
+    },
+    {
+      "avg_sec": 0.0009972,
+      "count": 5,
+      "name": "NR.iteration.total",
+      "total_sec": 0.004986
+    },
+    {
+      "avg_sec": 2.1e-05,
+      "count": 4,
+      "name": "NR.iteration.voltage_update",
+      "total_sec": 8.4e-05
+    },
+    {
+      "avg_sec": 4.5e-05,
+      "count": 1,
+      "name": "NR.solve.download",
+      "total_sec": 4.5e-05
+    },
+    {
+      "avg_sec": 0.005511,
+      "count": 1,
+      "name": "NR.solve.total",
+      "total_sec": 0.005511
+    },
+    {
+      "avg_sec": 0.000476,
+      "count": 1,
+      "name": "NR.solve.upload",
+      "total_sec": 0.000476
+    }
+  ]
+}

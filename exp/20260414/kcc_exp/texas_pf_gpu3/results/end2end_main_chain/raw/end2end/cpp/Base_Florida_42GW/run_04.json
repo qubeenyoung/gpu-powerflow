@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.008012,
+    "backend": "cpu",
+    "buses": 5658,
+    "case_name": "Base_Florida_42GW",
+    "compute": "fp64",
+    "dump_case_name": "Base_Florida_42GW",
+    "elapsed_sec": 0.037156,
+    "final_mismatch": 5.235145650317e-12,
+    "implementation": "cpp",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.0503355075813,
+    "measurement_mode": "end2end",
+    "pq": 5553,
+    "profile": "cpp",
+    "pv": 104,
+    "repeat_idx": 4,
+    "solve_sec": 0.029144,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

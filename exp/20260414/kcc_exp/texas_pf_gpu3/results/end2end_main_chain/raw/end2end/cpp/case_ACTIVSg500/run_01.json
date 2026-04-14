@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.000421,
+    "backend": "cpu",
+    "buses": 500,
+    "case_name": "case_ACTIVSg500",
+    "compute": "fp64",
+    "dump_case_name": "case_ACTIVSg500",
+    "elapsed_sec": 0.001402,
+    "final_mismatch": 3.478689418726e-11,
+    "implementation": "cpp",
+    "iterations": 4,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.03058561719037,
+    "measurement_mode": "end2end",
+    "pq": 444,
+    "profile": "cpp",
+    "pv": 55,
+    "repeat_idx": 1,
+    "solve_sec": 0.000981,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

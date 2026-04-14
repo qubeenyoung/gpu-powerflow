@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.033641,
+    "backend": "cuda",
+    "buses": 6717,
+    "case_name": "Texas7k_20220923",
+    "compute": "mixed",
+    "dump_case_name": "Texas7k_20220923",
+    "elapsed_sec": 0.037788,
+    "final_mismatch": 6.930645601891e-11,
+    "implementation": "cuda_edge",
+    "iterations": 4,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.01575196529917,
+    "measurement_mode": "end2end",
+    "pq": 6127,
+    "profile": "cuda_edge",
+    "pv": 589,
+    "repeat_idx": 7,
+    "solve_sec": 0.004147,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

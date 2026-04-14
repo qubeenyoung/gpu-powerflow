@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 6.3e-05,
+    "backend": "cpu",
+    "buses": 7336,
+    "case_name": "Base_Texas_66GW",
+    "compute": "fp64",
+    "dump_case_name": "Base_Texas_66GW",
+    "elapsed_sec": 0.127414,
+    "final_mismatch": 2.51798581985e-12,
+    "implementation": "cpp_naive",
+    "iterations": 5,
+    "jacobian": "pypower_like",
+    "max_abs_v_delta_from_v0": 0.2290447115587,
+    "measurement_mode": "end2end",
+    "pq": 7096,
+    "profile": "cpp_naive",
+    "pv": 239,
+    "repeat_idx": 9,
+    "solve_sec": 0.12735,
+    "source_profile": "cpp_pypowerlike",
+    "success": true
+  },
+  "timing_entries": []
+}

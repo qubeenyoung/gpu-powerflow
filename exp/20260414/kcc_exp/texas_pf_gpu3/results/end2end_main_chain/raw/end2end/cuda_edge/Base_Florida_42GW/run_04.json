@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.023869,
+    "backend": "cuda",
+    "buses": 5658,
+    "case_name": "Base_Florida_42GW",
+    "compute": "mixed",
+    "dump_case_name": "Base_Florida_42GW",
+    "elapsed_sec": 0.027443,
+    "final_mismatch": 2.578868923964e-10,
+    "implementation": "cuda_edge",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.05033550758087,
+    "measurement_mode": "end2end",
+    "pq": 5553,
+    "profile": "cuda_edge",
+    "pv": 104,
+    "repeat_idx": 4,
+    "solve_sec": 0.003574,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

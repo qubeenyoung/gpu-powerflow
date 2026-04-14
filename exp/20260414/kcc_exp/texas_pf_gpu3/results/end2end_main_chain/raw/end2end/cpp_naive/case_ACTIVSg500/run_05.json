@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 4e-06,
+    "backend": "cpu",
+    "buses": 500,
+    "case_name": "case_ACTIVSg500",
+    "compute": "fp64",
+    "dump_case_name": "case_ACTIVSg500",
+    "elapsed_sec": 0.004373,
+    "final_mismatch": 3.478008101171e-11,
+    "implementation": "cpp_naive",
+    "iterations": 4,
+    "jacobian": "pypower_like",
+    "max_abs_v_delta_from_v0": 0.03058561719037,
+    "measurement_mode": "end2end",
+    "pq": 444,
+    "profile": "cpp_naive",
+    "pv": 55,
+    "repeat_idx": 5,
+    "solve_sec": 0.004369,
+    "source_profile": "cpp_pypowerlike",
+    "success": true
+  },
+  "timing_entries": []
+}

@@ -1,0 +1,26 @@
+{
+  "summary": {
+    "analyze_sec": "",
+    "backend": "python",
+    "buses": "",
+    "case_name": "MemphisCase2026_Mar7",
+    "case_stem": "pglib_opf_caseMemphisCase2026_Mar7",
+    "compute": "fp64",
+    "dump_case_name": "",
+    "elapsed_sec": 0.015371276065707207,
+    "final_mismatch": 5.963778581004823e-12,
+    "implementation": "pypower",
+    "iterations": 2,
+    "jacobian": "pypower",
+    "max_abs_v_delta_from_v0": "",
+    "measurement_mode": "end2end",
+    "pq": "",
+    "profile": "pypower",
+    "pv": "",
+    "repeat_idx": 0,
+    "solve_sec": "",
+    "source_profile": "pypower",
+    "success": true
+  },
+  "timing_entries": []
+}

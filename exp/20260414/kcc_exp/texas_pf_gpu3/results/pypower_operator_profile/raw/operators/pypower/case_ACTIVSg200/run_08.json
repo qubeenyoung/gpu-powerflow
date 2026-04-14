@@ -1,0 +1,147 @@
+{
+  "summary": {
+    "analyze_sec": "",
+    "backend": "python",
+    "buses": "",
+    "case_name": "case_ACTIVSg200",
+    "case_stem": "pglib_opf_case_ACTIVSg200",
+    "compute": "fp64",
+    "dump_case_name": "",
+    "elapsed_sec": 0.007808195427060127,
+    "final_mismatch": 2.52435225500669e-13,
+    "implementation": "pypower",
+    "iterations": 2,
+    "jacobian": "pypower",
+    "max_abs_v_delta_from_v0": "",
+    "measurement_mode": "operators",
+    "newtonpf.init_index.avg_sec": 1.115165650844574e-05,
+    "newtonpf.init_index.count": 1,
+    "newtonpf.init_index.total_sec": 1.115165650844574e-05,
+    "newtonpf.jacobian.avg_sec": 0.0020712874829769135,
+    "newtonpf.jacobian.count": 2,
+    "newtonpf.jacobian.total_sec": 0.004142574965953827,
+    "newtonpf.mismatch.avg_sec": 3.849777082602183e-05,
+    "newtonpf.mismatch.count": 3,
+    "newtonpf.mismatch.total_sec": 0.00011549331247806549,
+    "newtonpf.solve.avg_sec": 0.0005967617034912109,
+    "newtonpf.solve.count": 2,
+    "newtonpf.solve.total_sec": 0.0011935234069824219,
+    "newtonpf.update_voltage.avg_sec": 2.6475638151168823e-05,
+    "newtonpf.update_voltage.count": 2,
+    "newtonpf.update_voltage.total_sec": 5.2951276302337646e-05,
+    "pq": "",
+    "profile": "pypower",
+    "pv": "",
+    "repeat_idx": 8,
+    "runpf.build_Sbus.avg_sec": 0.00011811219155788422,
+    "runpf.build_Sbus.count": 1,
+    "runpf.build_Sbus.total_sec": 0.00011811219155788422,
+    "runpf.build_Ybus.avg_sec": 0.001117601990699768,
+    "runpf.build_Ybus.count": 1,
+    "runpf.build_Ybus.total_sec": 0.001117601990699768,
+    "runpf.bus_indexing.avg_sec": 0.0006654728204011917,
+    "runpf.bus_indexing.count": 1,
+    "runpf.bus_indexing.total_sec": 0.0006654728204011917,
+    "runpf.load_case_data.avg_sec": 0.0011211838573217392,
+    "runpf.load_case_data.count": 1,
+    "runpf.load_case_data.total_sec": 0.0011211838573217392,
+    "runpf.newtonpf.avg_sec": 0.005560180172324181,
+    "runpf.newtonpf.count": 1,
+    "runpf.newtonpf.total_sec": 0.005560180172324181,
+    "solve_sec": 0.005560180172324181,
+    "source_profile": "pypower",
+    "success": true
+  },
+  "timing_entries": [
+    {
+      "elapsed_sec": 0.0011211838573217392,
+      "iter_idx": 0,
+      "op_name": "load_case_data",
+      "tag": "runpf"
+    },
+    {
+      "elapsed_sec": 0.0006654728204011917,
+      "iter_idx": 0,
+      "op_name": "bus_indexing",
+      "tag": "runpf"
+    },
+    {
+      "elapsed_sec": 0.001117601990699768,
+      "iter_idx": 0,
+      "op_name": "build_Ybus",
+      "tag": "runpf"
+    },
+    {
+      "elapsed_sec": 0.00011811219155788422,
+      "iter_idx": 0,
+      "op_name": "build_Sbus",
+      "tag": "runpf"
+    },
+    {
+      "elapsed_sec": 1.115165650844574e-05,
+      "iter_idx": 0,
+      "op_name": "init_index",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 3.1132251024246216e-05,
+      "iter_idx": 0,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0020277313888072968,
+      "iter_idx": 1,
+      "op_name": "jacobian",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0006035808473825455,
+      "iter_idx": 1,
+      "op_name": "solve",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 2.633035182952881e-05,
+      "iter_idx": 1,
+      "op_name": "update_voltage",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 4.209950566291809e-05,
+      "iter_idx": 1,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.00211484357714653,
+      "iter_idx": 2,
+      "op_name": "jacobian",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.0005899425595998764,
+      "iter_idx": 2,
+      "op_name": "solve",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 2.6620924472808838e-05,
+      "iter_idx": 2,
+      "op_name": "update_voltage",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 4.2261555790901184e-05,
+      "iter_idx": 2,
+      "op_name": "mismatch",
+      "tag": "newtonpf"
+    },
+    {
+      "elapsed_sec": 0.005560180172324181,
+      "iter_idx": 0,
+      "op_name": "newtonpf",
+      "tag": "runpf"
+    }
+  ]
+}

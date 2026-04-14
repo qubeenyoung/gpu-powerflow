@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.012805,
+    "backend": "cpu",
+    "buses": 1354,
+    "case_name": "case1354_pegase",
+    "compute": "fp64",
+    "dump_case_name": "case1354_pegase",
+    "elapsed_sec": 0.017512,
+    "final_mismatch": 3.984390782696e-12,
+    "implementation": "cpp",
+    "iterations": 6,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.9675246266079,
+    "measurement_mode": "end2end",
+    "pq": 1094,
+    "profile": "cpp",
+    "pv": 259,
+    "repeat_idx": 3,
+    "solve_sec": 0.004706,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

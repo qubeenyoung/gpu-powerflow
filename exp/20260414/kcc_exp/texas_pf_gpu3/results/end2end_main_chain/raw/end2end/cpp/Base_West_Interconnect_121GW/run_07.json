@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.032735,
+    "backend": "cpu",
+    "buses": 20758,
+    "case_name": "Base_West_Interconnect_121GW",
+    "compute": "fp64",
+    "dump_case_name": "Base_West_Interconnect_121GW",
+    "elapsed_sec": 0.158697,
+    "final_mismatch": 1.282485816127e-10,
+    "implementation": "cpp",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.04032063151691,
+    "measurement_mode": "end2end",
+    "pq": 19991,
+    "profile": "cpp",
+    "pv": 766,
+    "repeat_idx": 7,
+    "solve_sec": 0.125962,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

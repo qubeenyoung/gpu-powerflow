@@ -1,0 +1,130 @@
+{
+  "dataset_root": "/workspace/datasets/cuPF_datasets",
+  "case_dir": "/workspace/datasets/cuPF_datasets/case2746wop_k",
+  "case_name": "case2746wop_k",
+  "benchmark_kind": "cudss_linear_system",
+  "mode": "full",
+  "linear_system_origin": "V0 Newton step",
+  "rhs_definition": "b = -F(V0)",
+  "matrix_definition": "J = dF/dx at V0",
+  "matrix_precision": "float32",
+  "rhs_precision": "float32",
+  "jacobian": "edge_based",
+  "warmup": 3,
+  "repeats": 10,
+  "buses": 2746,
+  "ybus_nnz": 9344,
+  "pv": 349,
+  "pq": 2396,
+  "linear_dim": 5141,
+  "linear_nnz": 32445,
+  "build_system_sec": 0.0016602170000000001,
+  "analysis_sec": 0.026456627999999999,
+  "no_analysis_sec_mean": 0.00043284480571746827,
+  "mismatch_inf": 9.2817830297685902,
+  "rhs_inf": 9.2817830297685902,
+  "runs": [
+    {
+      "repeat_idx": 0,
+      "factorization_sec": 0.00026931199431419375,
+      "solve_sec": 0.00014643199741840363,
+      "total_sec": 0.00041574400663375855,
+      "residual_inf": 0,
+      "relative_residual_inf": 0,
+      "solution_inf": 0
+    },
+    {
+      "repeat_idx": 1,
+      "factorization_sec": 0.00044236800074577335,
+      "solve_sec": 0.00014540800452232362,
+      "total_sec": 0.00058777600526809697,
+      "residual_inf": 0,
+      "relative_residual_inf": 0,
+      "solution_inf": 0
+    },
+    {
+      "repeat_idx": 2,
+      "factorization_sec": 0.00027033600211143492,
+      "solve_sec": 0.00014540800452232362,
+      "total_sec": 0.00041574400663375855,
+      "residual_inf": 0,
+      "relative_residual_inf": 0,
+      "solution_inf": 0
+    },
+    {
+      "repeat_idx": 3,
+      "factorization_sec": 0.00027033600211143492,
+      "solve_sec": 0.00014540800452232362,
+      "total_sec": 0.00041574400663375855,
+      "residual_inf": 0,
+      "relative_residual_inf": 0,
+      "solution_inf": 0
+    },
+    {
+      "repeat_idx": 4,
+      "factorization_sec": 0.00027033600211143492,
+      "solve_sec": 0.00014540800452232362,
+      "total_sec": 0.00041574400663375855,
+      "residual_inf": 0,
+      "relative_residual_inf": 0,
+      "solution_inf": 0
+    },
+    {
+      "repeat_idx": 5,
+      "factorization_sec": 0.00026931199431419375,
+      "solve_sec": 0.00014540800452232362,
+      "total_sec": 0.00041471999883651732,
+      "residual_inf": 0,
+      "relative_residual_inf": 0,
+      "solution_inf": 0
+    },
+    {
+      "repeat_idx": 6,
+      "factorization_sec": 0.00027136000990867615,
+      "solve_sec": 0.00014540800452232362,
+      "total_sec": 0.00041676801443099978,
+      "residual_inf": 0,
+      "relative_residual_inf": 0,
+      "solution_inf": 0
+    },
+    {
+      "repeat_idx": 7,
+      "factorization_sec": 0.00026931199431419375,
+      "solve_sec": 0.00014540800452232362,
+      "total_sec": 0.00041471999883651732,
+      "residual_inf": 0,
+      "relative_residual_inf": 0,
+      "solution_inf": 0
+    },
+    {
+      "repeat_idx": 8,
+      "factorization_sec": 0.00027033600211143492,
+      "solve_sec": 0.00014643199741840363,
+      "total_sec": 0.00041676801443099978,
+      "residual_inf": 0,
+      "relative_residual_inf": 0,
+      "solution_inf": 0
+    },
+    {
+      "repeat_idx": 9,
+      "factorization_sec": 0.00027033600211143492,
+      "solve_sec": 0.0001443839967250824,
+      "total_sec": 0.00041471999883651732,
+      "residual_inf": 0.0010480984983781,
+      "relative_residual_inf": 0.00011291995245058328,
+      "solution_inf": 0.45050296187400818
+    }
+  ],
+  "summary": {
+    "analysis_sec": 0.026456627999999999,
+    "factorization_sec_mean": 0.00028733440041542058,
+    "no_analysis_sec_mean": 0.00043284480571746827,
+    "solve_sec_mean": 0.00014551040232181546,
+    "total_sec_mean": 0.00043284480571746827,
+    "factorization_sec_min": 0.00026931199431419375,
+    "solve_sec_min": 0.0001443839967250824,
+    "total_sec_min": 0.00041471999883651732,
+    "residual_inf_max": 0.0010480984983781,
+    "relative_residual_inf_max": 0.00011291995245058328
+  }
+}

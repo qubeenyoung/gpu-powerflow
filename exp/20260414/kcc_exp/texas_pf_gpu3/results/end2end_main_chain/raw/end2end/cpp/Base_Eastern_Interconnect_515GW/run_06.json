@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.115499,
+    "backend": "cpu",
+    "buses": 78478,
+    "case_name": "Base_Eastern_Interconnect_515GW",
+    "compute": "fp64",
+    "dump_case_name": "Base_Eastern_Interconnect_515GW",
+    "elapsed_sec": 0.963386,
+    "final_mismatch": 3.363926647793e-11,
+    "implementation": "cpp",
+    "iterations": 6,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.2269152465431,
+    "measurement_mode": "end2end",
+    "pq": 76439,
+    "profile": "cpp",
+    "pv": 2038,
+    "repeat_idx": 6,
+    "solve_sec": 0.847886,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

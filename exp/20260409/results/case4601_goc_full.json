@@ -1,0 +1,71 @@
+{
+  "dataset_root": "/workspace/datasets/cuPF_datasets",
+  "case_dir": "/workspace/datasets/cuPF_datasets/case4601_goc",
+  "case_name": "case4601_goc",
+  "benchmark_kind": "cudss_linear_system",
+  "mode": "full",
+  "linear_system_origin": "V0 Newton step",
+  "rhs_definition": "b = -F(V0)",
+  "matrix_definition": "J = dF/dx at V0",
+  "matrix_precision": "float32",
+  "rhs_precision": "float32",
+  "jacobian": "edge_based",
+  "warmup": 1,
+  "repeats": 3,
+  "buses": 4601,
+  "ybus_nnz": 17211,
+  "pv": 132,
+  "pq": 4468,
+  "linear_dim": 9068,
+  "linear_nnz": 66674,
+  "build_system_sec": 0.003062497,
+  "analysis_sec_mean": 0.029175450000000002,
+  "no_analysis_sec_mean": 0.00080779966666666772,
+  "mismatch_inf": 15.807000000000013,
+  "rhs_inf": 15.807000000000013,
+  "runs": [
+    {
+      "repeat_idx": 0,
+      "analysis_sec": 0.029889375999999999,
+      "factorization_sec": 0.00058961799999999998,
+      "solve_sec": 0.000223639,
+      "total_sec": 0.030702693,
+      "residual_inf": 0.00069464693485565832,
+      "relative_residual_inf": 4.3945526339954308e-05,
+      "solution_inf": 1.613308310508728
+    },
+    {
+      "repeat_idx": 1,
+      "analysis_sec": 0.028889531999999999,
+      "factorization_sec": 0.00058205699999999997,
+      "solve_sec": 0.000223329,
+      "total_sec": 0.029694958,
+      "residual_inf": 0.00036033923120259992,
+      "relative_residual_inf": 2.2796180882052233e-05,
+      "solution_inf": 1.6133019924163818
+    },
+    {
+      "repeat_idx": 2,
+      "analysis_sec": 0.028747442000000002,
+      "factorization_sec": 0.00058066699999999999,
+      "solve_sec": 0.00022393900000000001,
+      "total_sec": 0.029552098000000002,
+      "residual_inf": 0.00087117061780439542,
+      "relative_residual_inf": 5.5112963737862636e-05,
+      "solution_inf": 1.6133216619491577
+    }
+  ],
+  "summary": {
+    "analysis_sec_mean": 0.029175450000000002,
+    "factorization_sec_mean": 0.00058411400000000005,
+    "no_analysis_sec_mean": 0.00080779966666666772,
+    "solve_sec_mean": 0.00022363566666666666,
+    "total_sec_mean": 0.029983249666666666,
+    "analysis_sec_min": 0.028747442000000002,
+    "factorization_sec_min": 0.00058066699999999999,
+    "solve_sec_min": 0.000223329,
+    "total_sec_min": 0.029552098000000002,
+    "residual_inf_max": 0.00087117061780439542,
+    "relative_residual_inf_max": 5.5112963737862636e-05
+  }
+}

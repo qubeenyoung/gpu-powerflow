@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.001551,
+    "backend": "cpu",
+    "buses": 20758,
+    "case_name": "Base_West_Interconnect_121GW",
+    "compute": "fp64",
+    "dump_case_name": "Base_West_Interconnect_121GW",
+    "elapsed_sec": 0.405734,
+    "final_mismatch": 4.025764644203e-11,
+    "implementation": "cpp_naive",
+    "iterations": 5,
+    "jacobian": "pypower_like",
+    "max_abs_v_delta_from_v0": 0.04032063151691,
+    "measurement_mode": "end2end",
+    "pq": 19991,
+    "profile": "cpp_naive",
+    "pv": 766,
+    "repeat_idx": 6,
+    "solve_sec": 0.404183,
+    "source_profile": "cpp_pypowerlike",
+    "success": true
+  },
+  "timing_entries": []
+}

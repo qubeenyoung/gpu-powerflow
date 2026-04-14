@@ -1,0 +1,12 @@
+cases,final_mismatch_max,profile,rows,run_name,success_all
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",5.425149218751812e-10,pypower,80,pypower_operator_profile,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",5.425693783145e-10,cpp,80,end2end_main_chain,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",5.425077054255e-10,cpp_naive,80,end2end_main_chain,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",3.688385903991e-09,cuda_edge,80,end2end_main_chain,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",5.425149218751812e-10,pypower,80,end2end_main_chain,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",4.537929587656e-09,cuda_edge,80,cuda_edge_ablation_operators,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",5.425495608335e-10,cuda_fp64_edge,80,cuda_edge_ablation_operators,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",9.77692817851e-09,cuda_wo_cudss,80,cuda_edge_ablation_operators,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",8.022681158293e-09,cuda_wo_jacobian,80,cuda_edge_ablation_operators,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",3.177430540902e-09,cuda_edge,80,jacobian_edge_vs_vertex,True
+"case118_ieee,case1354_pegase,case2746wop_k,case30_ieee,case4601_goc,case793_goc,case8387_pegase,case9241_pegase",9.688938207297e-09,cuda_vertex,80,jacobian_edge_vs_vertex,True

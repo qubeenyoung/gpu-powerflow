@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 1.9e-05,
+    "backend": "cpu",
+    "buses": 2746,
+    "case_name": "case2746wop_k",
+    "compute": "fp64",
+    "dump_case_name": "case2746wop_k",
+    "elapsed_sec": 0.033181,
+    "final_mismatch": 7.484325521004e-12,
+    "implementation": "cpp_naive",
+    "iterations": 5,
+    "jacobian": "pypower_like",
+    "max_abs_v_delta_from_v0": 0.5067134061369,
+    "measurement_mode": "end2end",
+    "pq": 2396,
+    "profile": "cpp_naive",
+    "pv": 349,
+    "repeat_idx": 8,
+    "solve_sec": 0.033162,
+    "source_profile": "cpp_pypowerlike",
+    "success": true
+  },
+  "timing_entries": []
+}

@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 8e-06,
+    "backend": "cpu",
+    "buses": 993,
+    "case_name": "MemphisCase2026_Mar7",
+    "compute": "fp64",
+    "dump_case_name": "MemphisCase2026_Mar7",
+    "elapsed_sec": 0.006745,
+    "final_mismatch": 5.977355574888e-12,
+    "implementation": "cpp_naive",
+    "iterations": 3,
+    "jacobian": "pypower_like",
+    "max_abs_v_delta_from_v0": 6.383030315605e-05,
+    "measurement_mode": "end2end",
+    "pq": 805,
+    "profile": "cpp_naive",
+    "pv": 187,
+    "repeat_idx": 1,
+    "solve_sec": 0.006736,
+    "source_profile": "cpp_pypowerlike",
+    "success": true
+  },
+  "timing_entries": []
+}

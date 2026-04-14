@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 4.6e-05,
+    "backend": "cpu",
+    "buses": 5658,
+    "case_name": "Base_Florida_42GW",
+    "compute": "fp64",
+    "dump_case_name": "Base_Florida_42GW",
+    "elapsed_sec": 0.092886,
+    "final_mismatch": 4.992570245074e-12,
+    "implementation": "cpp_naive",
+    "iterations": 5,
+    "jacobian": "pypower_like",
+    "max_abs_v_delta_from_v0": 0.0503355075813,
+    "measurement_mode": "end2end",
+    "pq": 5553,
+    "profile": "cpp_naive",
+    "pv": 104,
+    "repeat_idx": 7,
+    "solve_sec": 0.092839,
+    "source_profile": "cpp_pypowerlike",
+    "success": true
+  },
+  "timing_entries": []
+}

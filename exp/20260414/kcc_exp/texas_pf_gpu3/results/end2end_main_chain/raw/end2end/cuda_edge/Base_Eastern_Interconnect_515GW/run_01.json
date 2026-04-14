@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.22235,
+    "backend": "cuda",
+    "buses": 78478,
+    "case_name": "Base_Eastern_Interconnect_515GW",
+    "compute": "mixed",
+    "dump_case_name": "Base_Eastern_Interconnect_515GW",
+    "elapsed_sec": 0.269434,
+    "final_mismatch": 1.528412174601e-09,
+    "implementation": "cuda_edge",
+    "iterations": 6,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.2269152464491,
+    "measurement_mode": "end2end",
+    "pq": 76439,
+    "profile": "cuda_edge",
+    "pv": 2038,
+    "repeat_idx": 1,
+    "solve_sec": 0.047084,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

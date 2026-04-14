@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.104316,
+    "backend": "cuda",
+    "buses": 20758,
+    "case_name": "Base_West_Interconnect_121GW",
+    "compute": "mixed",
+    "dump_case_name": "Base_West_Interconnect_121GW",
+    "elapsed_sec": 0.118698,
+    "final_mismatch": 2.636116068836e-09,
+    "implementation": "cuda_edge",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 0.04032063153963,
+    "measurement_mode": "end2end",
+    "pq": 19991,
+    "profile": "cuda_edge",
+    "pv": 766,
+    "repeat_idx": 1,
+    "solve_sec": 0.014381,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

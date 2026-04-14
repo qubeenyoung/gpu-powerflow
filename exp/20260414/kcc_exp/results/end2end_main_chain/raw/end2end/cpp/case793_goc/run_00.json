@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.000885,
+    "backend": "cpu",
+    "buses": 793,
+    "case_name": "case793_goc",
+    "compute": "fp64",
+    "dump_case_name": "case793_goc",
+    "elapsed_sec": 0.002966,
+    "final_mismatch": 5.425693783145e-10,
+    "implementation": "cpp",
+    "iterations": 5,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 1.161718975861,
+    "measurement_mode": "end2end",
+    "pq": 704,
+    "profile": "cpp",
+    "pv": 88,
+    "repeat_idx": 0,
+    "solve_sec": 0.00208,
+    "source_profile": "cpu_fp64_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "analyze_sec": 0.017821,
+    "backend": "cuda",
+    "buses": 993,
+    "case_name": "MemphisCase2026_Mar7",
+    "compute": "mixed",
+    "dump_case_name": "MemphisCase2026_Mar7",
+    "elapsed_sec": 0.018806,
+    "final_mismatch": 5.187262923147e-12,
+    "implementation": "cuda_edge",
+    "iterations": 3,
+    "jacobian": "edge_based",
+    "max_abs_v_delta_from_v0": 6.383030323752e-05,
+    "measurement_mode": "end2end",
+    "pq": 805,
+    "profile": "cuda_edge",
+    "pv": 187,
+    "repeat_idx": 3,
+    "solve_sec": 0.000985,
+    "source_profile": "cuda_mixed_edge",
+    "success": true
+  },
+  "timing_entries": []
+}

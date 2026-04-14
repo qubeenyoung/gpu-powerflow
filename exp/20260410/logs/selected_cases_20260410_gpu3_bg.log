@@ -1,0 +1,43 @@
+[case] preparing 118_ieee
+[run] pypower case=118_ieee warmup=1 repeats=10
+[run] cpp_pypowerlike case=118_ieee backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_optimized case=118_ieee backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_edge case=118_ieee backend=cuda jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_vertex case=118_ieee backend=cuda jacobian=vertex_based warmup=1 repeats=10
+[case] preparing 793_goc
+[run] pypower case=793_goc warmup=1 repeats=10
+[run] cpp_pypowerlike case=793_goc backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_optimized case=793_goc backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_edge case=793_goc backend=cuda jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_vertex case=793_goc backend=cuda jacobian=vertex_based warmup=1 repeats=10
+[case] preparing 1354_pegase
+[run] pypower case=1354_pegase warmup=1 repeats=10
+[run] cpp_pypowerlike case=1354_pegase backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_optimized case=1354_pegase backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_edge case=1354_pegase backend=cuda jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_vertex case=1354_pegase backend=cuda jacobian=vertex_based warmup=1 repeats=10
+[case] preparing 2746wop_k
+[run] pypower case=2746wop_k warmup=1 repeats=10
+[run] cpp_pypowerlike case=2746wop_k backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_optimized case=2746wop_k backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_edge case=2746wop_k backend=cuda jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_vertex case=2746wop_k backend=cuda jacobian=vertex_based warmup=1 repeats=10
+[case] preparing 4601_goc
+[run] pypower case=4601_goc warmup=1 repeats=10
+[run] cpp_pypowerlike case=4601_goc backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_optimized case=4601_goc backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_edge case=4601_goc backend=cuda jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_vertex case=4601_goc backend=cuda jacobian=vertex_based warmup=1 repeats=10
+[case] preparing 8387_pegase
+[run] pypower case=8387_pegase warmup=1 repeats=10
+[run] cpp_pypowerlike case=8387_pegase backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_optimized case=8387_pegase backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_edge case=8387_pegase backend=cuda jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_vertex case=8387_pegase backend=cuda jacobian=vertex_based warmup=1 repeats=10
+[case] preparing 9241_pegase
+[run] pypower case=9241_pegase warmup=1 repeats=10
+[run] cpp_pypowerlike case=9241_pegase backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_optimized case=9241_pegase backend=cpu jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_edge case=9241_pegase backend=cuda jacobian=edge_based warmup=1 repeats=10
+[run] cpp_cuda_vertex case=9241_pegase backend=cuda jacobian=vertex_based warmup=1 repeats=10
+[OK] benchmark run created at /workspace/exp/20260410/results/selected_cases_20260410_gpu3_bg
