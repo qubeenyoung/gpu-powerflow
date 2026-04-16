@@ -1,0 +1,8 @@
+{
+  "cuda_visible_devices": "3",
+  "cudss_host_nthreads": "AUTO",
+  "cudss_mt_enabled": true,
+  "cudss_threading_lib": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+  "physical_gpu_note": "CUDA_VISIBLE_DEVICES=3 exposes physical GPU 3 as local device 0.",
+  "run_name": "texas_gpu3_mt_auto_r10"
+}

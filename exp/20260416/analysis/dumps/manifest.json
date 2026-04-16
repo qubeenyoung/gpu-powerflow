@@ -1,0 +1,87 @@
+{
+  "binary": "/workspace/exp/20260416/analysis/build/dump_cudss_reorder_data",
+  "dataset_root": "/workspace/datasets/matpower8.1/cuPF_datasets",
+  "nd_nlevels": "AUTO",
+  "outputs": [
+    {
+      "case": "case118",
+      "elimination_tree_len": 1023,
+      "jacobian_dim": 181,
+      "jacobian_nnz": 1051,
+      "n_bus": 118,
+      "n_pq": 64,
+      "n_pv": 53,
+      "output_dir": "/workspace/exp/20260416/analysis/dumps/target_100/case118",
+      "perm_reorder_col_len": 181,
+      "perm_reorder_row_len": 181,
+      "target_bus": 100
+    },
+    {
+      "case": "case_ACTIVSg500",
+      "elimination_tree_len": 1023,
+      "jacobian_dim": 943,
+      "jacobian_nnz": 6275,
+      "n_bus": 500,
+      "n_pq": 444,
+      "n_pv": 55,
+      "output_dir": "/workspace/exp/20260416/analysis/dumps/target_500/case_ACTIVSg500",
+      "perm_reorder_col_len": 943,
+      "perm_reorder_row_len": 943,
+      "target_bus": 500
+    },
+    {
+      "case": "case1197",
+      "elimination_tree_len": 1023,
+      "jacobian_dim": 2392,
+      "jacobian_nnz": 14344,
+      "n_bus": 1197,
+      "n_pq": 1196,
+      "n_pv": 0,
+      "output_dir": "/workspace/exp/20260416/analysis/dumps/target_1000/case1197",
+      "perm_reorder_col_len": 2392,
+      "perm_reorder_row_len": 2392,
+      "target_bus": 1000
+    },
+    {
+      "case": "case6468rte",
+      "elimination_tree_len": 1023,
+      "jacobian_dim": 12643,
+      "jacobian_nnz": 87845,
+      "n_bus": 6468,
+      "n_pq": 6176,
+      "n_pv": 291,
+      "output_dir": "/workspace/exp/20260416/analysis/dumps/target_5000/case6468rte",
+      "perm_reorder_col_len": 12643,
+      "perm_reorder_row_len": 12643,
+      "target_bus": 5000
+    }
+  ],
+  "reordering_alg": "DEFAULT",
+  "selected_cases": [
+    {
+      "case": "case118",
+      "case_dir": "/workspace/datasets/matpower8.1/cuPF_datasets/case118",
+      "n_bus": 118,
+      "target_bus": 100
+    },
+    {
+      "case": "case_ACTIVSg500",
+      "case_dir": "/workspace/datasets/matpower8.1/cuPF_datasets/case_ACTIVSg500",
+      "n_bus": 500,
+      "target_bus": 500
+    },
+    {
+      "case": "case1197",
+      "case_dir": "/workspace/datasets/matpower8.1/cuPF_datasets/case1197",
+      "n_bus": 1197,
+      "target_bus": 1000
+    },
+    {
+      "case": "case6468rte",
+      "case_dir": "/workspace/datasets/matpower8.1/cuPF_datasets/case6468rte",
+      "n_bus": 6468,
+      "target_bus": 5000
+    }
+  ],
+  "selection_policy": "smallest n_bus >= target_bus"
+}

@@ -1,0 +1,4 @@
+build/
+results/**/raw/
+__pycache__/
+*.pyc

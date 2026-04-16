@@ -1,0 +1,17 @@
+{
+  "case": "case_ACTIVSg500",
+  "target_bus_label": "500",
+  "case_dir": "/workspace/datasets/matpower8.1/cuPF_datasets/case_ACTIVSg500",
+  "matrix_kind": "newton_jacobian_edge_based_at_v0",
+  "cudss_phase": "CUDSS_PHASE_REORDERING",
+  "reordering_alg": "DEFAULT",
+  "nd_nlevels": "AUTO",
+  "n_bus": 500,
+  "n_pv": 55,
+  "n_pq": 444,
+  "jacobian_dim": 943,
+  "jacobian_nnz": 6275,
+  "perm_reorder_row_len": 943,
+  "perm_reorder_col_len": 943,
+  "elimination_tree_len": 1023
+}

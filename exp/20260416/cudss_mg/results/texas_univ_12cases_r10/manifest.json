@@ -1,0 +1,983 @@
+{
+  "benchmark_binaries": {
+    "baseline_end2end": "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+    "baseline_operators": "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+    "mg_end2end": "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+    "mg_operators": "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark"
+  },
+  "build_root": "/workspace/exp/20260416/cudss_mg/build",
+  "cases": [
+    "case_ACTIVSg200",
+    "case_ACTIVSg500",
+    "MemphisCase2026_Mar7",
+    "case_ACTIVSg2000",
+    "Base_Florida_42GW",
+    "Texas7k_20220923",
+    "Base_Texas_66GW",
+    "Base_MIOHIN_76GW",
+    "Base_West_Interconnect_121GW",
+    "case_ACTIVSg25k",
+    "case_ACTIVSg70k",
+    "Base_Eastern_Interconnect_515GW"
+  ],
+  "commands": [
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg200",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_case_ACTIVSg200"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg500",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_case_ACTIVSg500"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/MemphisCase2026_Mar7",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_MemphisCase2026_Mar7"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg2000",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_case_ACTIVSg2000"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Florida_42GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_Base_Florida_42GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Texas7k_20220923",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_Texas7k_20220923"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Texas_66GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_Base_Texas_66GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_MIOHIN_76GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_Base_MIOHIN_76GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_West_Interconnect_121GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_Base_West_Interconnect_121GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg25k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_case_ACTIVSg25k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg70k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_case_ACTIVSg70k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Eastern_Interconnect_515GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_end2end_cuda_edge_Base_Eastern_Interconnect_515GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg200",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_case_ACTIVSg200"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg500",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_case_ACTIVSg500"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/MemphisCase2026_Mar7",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_MemphisCase2026_Mar7"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg2000",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_case_ACTIVSg2000"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Florida_42GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_Base_Florida_42GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Texas7k_20220923",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_Texas7k_20220923"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Texas_66GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_Base_Texas_66GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_MIOHIN_76GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_Base_MIOHIN_76GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_West_Interconnect_121GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_Base_West_Interconnect_121GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg25k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_case_ACTIVSg25k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg70k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_case_ACTIVSg70k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Eastern_Interconnect_515GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_end2end_cuda_edge_Base_Eastern_Interconnect_515GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg200",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_case_ACTIVSg200"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg500",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_case_ACTIVSg500"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/MemphisCase2026_Mar7",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_MemphisCase2026_Mar7"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg2000",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_case_ACTIVSg2000"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Florida_42GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_Base_Florida_42GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Texas7k_20220923",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_Texas7k_20220923"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Texas_66GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_Base_Texas_66GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_MIOHIN_76GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_Base_MIOHIN_76GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_West_Interconnect_121GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_Base_West_Interconnect_121GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg25k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_case_ACTIVSg25k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg70k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_case_ACTIVSg70k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/baseline/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Eastern_Interconnect_515GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_baseline_operators_cuda_edge_Base_Eastern_Interconnect_515GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg200",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_case_ACTIVSg200"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg500",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_case_ACTIVSg500"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/MemphisCase2026_Mar7",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_MemphisCase2026_Mar7"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg2000",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_case_ACTIVSg2000"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Florida_42GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_Base_Florida_42GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Texas7k_20220923",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_Texas7k_20220923"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Texas_66GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_Base_Texas_66GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_MIOHIN_76GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_Base_MIOHIN_76GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_West_Interconnect_121GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_Base_West_Interconnect_121GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg25k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_case_ACTIVSg25k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg70k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_case_ACTIVSg70k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/cudss_mg/build/mg/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Eastern_Interconnect_515GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "name": "run_mg_operators_cuda_edge_Base_Eastern_Interconnect_515GW"
+    }
+  ],
+  "created_at_utc": "2026-04-16T04:12:15.331851+00:00",
+  "cuda_visible_devices": "",
+  "cudss_enable_mt": false,
+  "cudss_host_nthreads": "AUTO",
+  "cudss_nd_nlevels": "AUTO",
+  "cudss_reordering_alg": "DEFAULT",
+  "cupf_root": "/workspace/cuPF",
+  "dataset_root": "/workspace/datasets/texas_univ_cases/cuPF_datasets",
+  "environment": {
+    "cmake": "cmake version 3.22.1\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).",
+    "created_on": "359f21289ad1",
+    "cuda_visible_devices": "",
+    "cudss_threading_lib": "",
+    "cxx": "c++ (Ubuntu 12.3.0-1ubuntu1~22.04.2) 12.3.0\nCopyright (C) 2022 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+    "git": {
+      "branch": "master",
+      "commit": "78117cc120fb4958ff9ac7c648c4e4c5f5c0aae4",
+      "status_short": "M cuPF/CMakeLists.txt\n M cuPF/cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.cpp\n M cuPF/cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.cpp\n M cuPF/cpp/src/newton_solver/ops/linear_solve/cudss_config.hpp\n M cuPF/pyproject.toml"
+    },
+    "ld_library_path": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib:/usr/local/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
+    "ld_preload": "",
+    "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2023 NVIDIA Corporation\nBuilt on Tue_Aug_15_22:02:13_PDT_2023\nCuda compilation tools, release 12.2, V12.2.140\nBuild cuda_12.2.r12.2/compiler.33191640_0",
+    "nvidia_smi": "0, NVIDIA A10, 535.274.02, 23028 MiB\n1, NVIDIA A10, 535.274.02, 23028 MiB\n2, NVIDIA A10, 535.274.02, 23028 MiB\n3, NVIDIA A10, 535.274.02, 23028 MiB",
+    "platform": "Linux-5.15.0-163-generic-x86_64-with-glibc2.35",
+    "python": "3.10.12 (main, Aug 15 2025, 14:32:43) [GCC 11.4.0]"
+  },
+  "max_iter": 50,
+  "measurement_modes": [
+    "end2end",
+    "operators"
+  ],
+  "mg_device_indices": "0,1",
+  "profiles": [
+    "cuda_edge"
+  ],
+  "repeats": 10,
+  "results_root": "/workspace/exp/20260416/cudss_mg/results/texas_univ_12cases_r10",
+  "run_name": "texas_univ_12cases_r10",
+  "script_path": "/workspace/exp/20260416/cudss_mg/run_cudss_mg_benchmark.py",
+  "tolerance": 1e-08,
+  "variants": [
+    "baseline",
+    "mg"
+  ],
+  "warmup": 1,
+  "workspace_root": "/workspace"
+}

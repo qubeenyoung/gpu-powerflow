@@ -1,0 +1,5 @@
+target_bus,case,n_bus,n_pv,n_pq,jacobian_dim,jacobian_nnz,perm_reorder_row_len,perm_reorder_col_len,elimination_tree_len,output_dir
+100,case118,118,53,64,181,1051,181,181,1023,/workspace/exp/20260416/analysis/dumps/target_100/case118
+500,case_ACTIVSg500,500,55,444,943,6275,943,943,1023,/workspace/exp/20260416/analysis/dumps/target_500/case_ACTIVSg500
+1000,case1197,1197,0,1196,2392,14344,2392,2392,1023,/workspace/exp/20260416/analysis/dumps/target_1000/case1197
+5000,case6468rte,6468,291,6176,12643,87845,12643,12643,1023,/workspace/exp/20260416/analysis/dumps/target_5000/case6468rte

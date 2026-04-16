@@ -1,0 +1,1266 @@
+{
+  "benchmark_binaries": {
+    "end2end": "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+    "operators": "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark"
+  },
+  "build_dirs": {
+    "end2end": "/workspace/exp/20260416/modified/build/end2end",
+    "operators": "/workspace/exp/20260416/modified/build/operators"
+  },
+  "cases": [
+    "case_ACTIVSg200",
+    "case_ACTIVSg500",
+    "MemphisCase2026_Mar7",
+    "case_ACTIVSg2000",
+    "Base_Florida_42GW",
+    "Texas7k_20220923",
+    "Base_Texas_66GW",
+    "Base_MIOHIN_76GW",
+    "Base_West_Interconnect_121GW",
+    "case_ACTIVSg25k",
+    "case_ACTIVSg70k",
+    "Base_Eastern_Interconnect_515GW"
+  ],
+  "commands": [
+    {
+      "cmd": [
+        "cmake",
+        "-S",
+        "/workspace/cuPF",
+        "-B",
+        "/workspace/exp/20260416/modified/build/end2end",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DWITH_CUDA=ON",
+        "-DENABLE_LOG=OFF",
+        "-DENABLE_DUMP=OFF",
+        "-DENABLE_TIMING=OFF",
+        "-DENABLE_NVTX=OFF",
+        "-DCUPF_CUDSS_REORDERING_ALG=DEFAULT",
+        "-DCUPF_CUDSS_ENABLE_MT=ON",
+        "-DCUPF_CUDSS_HOST_NTHREADS=AUTO",
+        "-DCUPF_CUDSS_ND_NLEVELS=AUTO",
+        "-DBUILD_BENCHMARKS=ON",
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_PYTHON_BINDINGS=OFF"
+      ],
+      "cwd": "/workspace",
+      "name": "cmake_configure_end2end"
+    },
+    {
+      "cmd": [
+        "cmake",
+        "--build",
+        "/workspace/exp/20260416/modified/build/end2end",
+        "--target",
+        "cupf_case_benchmark",
+        "-j",
+        "32"
+      ],
+      "cwd": "/workspace",
+      "name": "cmake_build_end2end"
+    },
+    {
+      "cmd": [
+        "cmake",
+        "-S",
+        "/workspace/cuPF",
+        "-B",
+        "/workspace/exp/20260416/modified/build/operators",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DWITH_CUDA=ON",
+        "-DENABLE_LOG=OFF",
+        "-DENABLE_DUMP=OFF",
+        "-DENABLE_TIMING=ON",
+        "-DENABLE_NVTX=ON",
+        "-DCUPF_CUDSS_REORDERING_ALG=DEFAULT",
+        "-DCUPF_CUDSS_ENABLE_MT=ON",
+        "-DCUPF_CUDSS_HOST_NTHREADS=AUTO",
+        "-DCUPF_CUDSS_ND_NLEVELS=AUTO",
+        "-DBUILD_BENCHMARKS=ON",
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_PYTHON_BINDINGS=OFF"
+      ],
+      "cwd": "/workspace",
+      "name": "cmake_configure_operators"
+    },
+    {
+      "cmd": [
+        "cmake",
+        "--build",
+        "/workspace/exp/20260416/modified/build/operators",
+        "--target",
+        "cupf_case_benchmark",
+        "-j",
+        "32"
+      ],
+      "cwd": "/workspace",
+      "name": "cmake_build_operators"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg200",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case_ACTIVSg200"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg200",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_case_ACTIVSg200"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg500",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case_ACTIVSg500"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg500",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_case_ACTIVSg500"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/MemphisCase2026_Mar7",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_MemphisCase2026_Mar7"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/MemphisCase2026_Mar7",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_MemphisCase2026_Mar7"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg2000",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case_ACTIVSg2000"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg2000",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_case_ACTIVSg2000"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Florida_42GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_Base_Florida_42GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Florida_42GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_Base_Florida_42GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Texas7k_20220923",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_Texas7k_20220923"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Texas7k_20220923",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_Texas7k_20220923"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Texas_66GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_Base_Texas_66GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Texas_66GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_Base_Texas_66GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_MIOHIN_76GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_Base_MIOHIN_76GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_MIOHIN_76GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_Base_MIOHIN_76GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_West_Interconnect_121GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_Base_West_Interconnect_121GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_West_Interconnect_121GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_Base_West_Interconnect_121GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg25k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case_ACTIVSg25k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg25k",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_case_ACTIVSg25k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg70k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_case_ACTIVSg70k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg70k",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_case_ACTIVSg70k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Eastern_Interconnect_515GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_Base_Eastern_Interconnect_515GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/end2end/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Eastern_Interconnect_515GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_end2end_cuda_edge_modified_Base_Eastern_Interconnect_515GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg200",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case_ACTIVSg200"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg200",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_case_ACTIVSg200"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg500",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case_ACTIVSg500"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg500",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_case_ACTIVSg500"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/MemphisCase2026_Mar7",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_MemphisCase2026_Mar7"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/MemphisCase2026_Mar7",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_MemphisCase2026_Mar7"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg2000",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case_ACTIVSg2000"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg2000",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_case_ACTIVSg2000"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Florida_42GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_Base_Florida_42GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Florida_42GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_Base_Florida_42GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Texas7k_20220923",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_Texas7k_20220923"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Texas7k_20220923",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_Texas7k_20220923"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Texas_66GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_Base_Texas_66GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Texas_66GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_Base_Texas_66GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_MIOHIN_76GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_Base_MIOHIN_76GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_MIOHIN_76GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_Base_MIOHIN_76GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_West_Interconnect_121GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_Base_West_Interconnect_121GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_West_Interconnect_121GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_Base_West_Interconnect_121GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg25k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case_ACTIVSg25k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg25k",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_case_ACTIVSg25k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg70k",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_case_ACTIVSg70k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/case_ACTIVSg70k",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_case_ACTIVSg70k"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Eastern_Interconnect_515GW",
+        "--profile",
+        "cuda_mixed_edge",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_Base_Eastern_Interconnect_515GW"
+    },
+    {
+      "cmd": [
+        "/workspace/exp/20260416/modified/build/operators/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/datasets/texas_univ_cases/cuPF_datasets/Base_Eastern_Interconnect_515GW",
+        "--profile",
+        "cuda_mixed_edge_modified",
+        "--warmup",
+        "1",
+        "--repeats",
+        "10",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50"
+      ],
+      "cwd": "/workspace",
+      "env": {
+        "CUDSS_THREADING_LIB": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "LD_PRELOAD": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0"
+      },
+      "name": "run_operators_cuda_edge_modified_Base_Eastern_Interconnect_515GW"
+    }
+  ],
+  "created_at_utc": "2026-04-16T05:11:53.421854+00:00",
+  "cudss_enable_mt": true,
+  "cudss_host_nthreads": "AUTO",
+  "cudss_ld_preload": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+  "cudss_nd_nlevels": "AUTO",
+  "cudss_reordering_alg": "DEFAULT",
+  "cudss_threading_lib": "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+  "dataset_root": "/workspace/datasets/texas_univ_cases/cuPF_datasets",
+  "dump_residuals": false,
+  "environment": {
+    "cmake": "cmake version 3.22.1\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).",
+    "created_on": "359f21289ad1",
+    "cxx": "c++ (Ubuntu 12.3.0-1ubuntu1~22.04.2) 12.3.0\nCopyright (C) 2022 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+    "git": {
+      "branch": "master",
+      "commit": "78117cc120fb4958ff9ac7c648c4e4c5f5c0aae4",
+      "status_short": "M CMakeLists.txt\n M benchmarks/cpp/cupf_case_benchmark.cpp\n M benchmarks/run_benchmarks.py\n M bindings/pybind_cupf.cpp\n M cpp/inc/newton_solver/core/execution_plan.hpp\n M cpp/inc/newton_solver/core/newton_solver.hpp\n M cpp/inc/newton_solver/core/newton_solver_types.hpp\n M cpp/inc/newton_solver/ops/op_interfaces.hpp\n M cpp/src/newton_solver/core/newton_solver.cpp\n M cpp/src/newton_solver/ops/linear_solve/cpu_klu.cpp\n M cpp/src/newton_solver/ops/linear_solve/cpu_klu.hpp\n M cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.cpp\n M cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.hpp\n M cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.cpp\n M cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.hpp\n M cpp/src/newton_solver/ops/linear_solve/cudss_config.hpp\n M cpp/src/newton_solver/reference/cpu_superlu_solve.cpp\n M cpp/src/newton_solver/reference/cpu_superlu_solve.hpp\n M pyproject.toml\n M python/cupf/__init__.py\n M tests/test_cpu_solver.cpp"
+    },
+    "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2023 NVIDIA Corporation\nBuilt on Tue_Aug_15_22:02:13_PDT_2023\nCuda compilation tools, release 12.2, V12.2.140\nBuild cuda_12.2.r12.2/compiler.33191640_0",
+    "nvidia_smi": "NVIDIA A10, 535.274.02\nNVIDIA A10, 535.274.02\nNVIDIA A10, 535.274.02\nNVIDIA A10, 535.274.02",
+    "platform": "Linux-5.15.0-163-generic-x86_64-with-glibc2.35",
+    "python": "3.10.12 (main, Aug 15 2025, 14:32:43) [GCC 11.4.0]"
+  },
+  "max_iter": 50,
+  "measurement_modes": [
+    "end2end",
+    "operators"
+  ],
+  "profile_specs": [
+    {
+      "algorithm": "standard",
+      "backend": "cuda",
+      "compute": "mixed",
+      "cupf_profile": "cuda_mixed_edge",
+      "implementation": "cuda_edge",
+      "jacobian": "edge_based",
+      "name": "cuda_edge",
+      "runner": "cupf"
+    },
+    {
+      "algorithm": "modified",
+      "backend": "cuda",
+      "compute": "mixed",
+      "cupf_profile": "cuda_mixed_edge_modified",
+      "implementation": "cuda_edge_modified",
+      "jacobian": "edge_based",
+      "name": "cuda_edge_modified",
+      "runner": "cupf"
+    }
+  ],
+  "profiles": [
+    "cuda_edge",
+    "cuda_edge_modified"
+  ],
+  "repeats": 10,
+  "residual_dump_root": "",
+  "results_root": "/workspace/exp/20260416/modified/results/texas_gpu3_mt_auto_r10",
+  "run_name": "texas_gpu3_mt_auto_r10",
+  "script_path": "/workspace/cuPF/benchmarks/run_benchmarks.py",
+  "tolerance": 1e-08,
+  "warmup": 1,
+  "workspace_root": "/workspace"
+}

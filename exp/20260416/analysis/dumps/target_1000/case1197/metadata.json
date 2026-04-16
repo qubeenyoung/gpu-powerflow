@@ -1,0 +1,17 @@
+{
+  "case": "case1197",
+  "target_bus_label": "1000",
+  "case_dir": "/workspace/datasets/matpower8.1/cuPF_datasets/case1197",
+  "matrix_kind": "newton_jacobian_edge_based_at_v0",
+  "cudss_phase": "CUDSS_PHASE_REORDERING",
+  "reordering_alg": "DEFAULT",
+  "nd_nlevels": "AUTO",
+  "n_bus": 1197,
+  "n_pv": 0,
+  "n_pq": 1196,
+  "jacobian_dim": 2392,
+  "jacobian_nnz": 14344,
+  "perm_reorder_row_len": 2392,
+  "perm_reorder_col_len": 2392,
+  "elimination_tree_len": 1023
+}
