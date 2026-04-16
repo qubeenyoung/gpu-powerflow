@@ -83,6 +83,20 @@ TEST(CpuSolverSmoke, EdgeBasedCase30Converges)
     (void)run_solver(options);
 }
 
+TEST(CpuSolverSmoke, ModifiedEdgeBasedCase30Converges)
+{
+    if (!std::filesystem::exists(kCase30IeeePath)) {
+        GTEST_SKIP() << "dump case not available at " << kCase30IeeePath;
+    }
+
+    NewtonOptions options;
+    options.backend = BackendKind::CPU;
+    options.compute = ComputePolicy::FP64;
+    options.algorithm = NewtonAlgorithm::Modified;
+
+    (void)run_solver(options);
+}
+
 #ifdef CUPF_WITH_CUDA
 TEST(CudaSolverSmoke, MixedCase30Converges)
 {

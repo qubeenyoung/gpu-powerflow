@@ -2,32 +2,27 @@
 
 from ._cupf import (
     BackendKind,
-    PrecisionMode,
+    ComputePolicy,
     JacobianBuilderType,
-    MismatchKernel,
-    JacobianKernel,
-    LinearSolveKernel,
-    VoltageKernel,
+    NewtonAlgorithm,
     NRConfig,
-    KernelChoice,
     NewtonOptions,
-    NRResultF64,
-    NRResultF32,
+    NRResult,
     NewtonSolver,
 )
 
+PrecisionMode = ComputePolicy
+NRResultF64 = NRResult
+
 __all__ = [
     "BackendKind",
+    "ComputePolicy",
     "PrecisionMode",
     "JacobianBuilderType",
-    "MismatchKernel",
-    "JacobianKernel",
-    "LinearSolveKernel",
-    "VoltageKernel",
+    "NewtonAlgorithm",
     "NRConfig",
-    "KernelChoice",
     "NewtonOptions",
+    "NRResult",
     "NRResultF64",
-    "NRResultF32",
     "NewtonSolver",
 ]

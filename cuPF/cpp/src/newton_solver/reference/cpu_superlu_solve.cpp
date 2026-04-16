@@ -13,7 +13,8 @@
 //   5. B.Store → dx 복사 (SuperLU가 B를 in-place로 갱신하므로 B.Store에 결과 있음)
 //   6. 모든 SuperMatrix 자원 해제 (Destroy_*)
 //
-// analyze() 는 no-op: symbolic 분석이 run() 내부 dgssv()에 포함되어 있음.
+// analyze() 와 factorize() 는 no-op: symbolic/numeric factorization이
+// solve() 내부 dgssv()에 포함되어 있음.
 // ---------------------------------------------------------------------------
 
 #include "cpu_superlu_solve.hpp"
@@ -39,15 +40,21 @@ void CpuLinearSolveSuperLU::analyze(const AnalyzeContext& ctx)
 }
 
 
-void CpuLinearSolveSuperLU::run(IterationContext& ctx)
+void CpuLinearSolveSuperLU::factorize(IterationContext& ctx)
+{
+    (void)ctx;
+}
+
+
+void CpuLinearSolveSuperLU::solve(IterationContext& ctx)
 {
     (void)ctx;
 
     if (storage_.J.rows() != storage_.dimF || storage_.J.cols() != storage_.dimF) {
-        throw std::runtime_error("CpuLinearSolveSuperLU::run: Jacobian shape does not match dimF");
+        throw std::runtime_error("CpuLinearSolveSuperLU::solve: Jacobian shape does not match dimF");
     }
     if (storage_.J.nonZeros() <= 0) {
-        throw std::runtime_error("CpuLinearSolveSuperLU::run: Jacobian is empty");
+        throw std::runtime_error("CpuLinearSolveSuperLU::solve: Jacobian is empty");
     }
 
     newton_solver::utils::ScopedTimer timer("CPU.naive.solve.superlu");
@@ -98,7 +105,7 @@ void CpuLinearSolveSuperLU::run(IterationContext& ctx)
         Destroy_SuperNode_Matrix(&L);
         Destroy_CompCol_Matrix(&U);
         throw std::runtime_error(
-            "CpuLinearSolveSuperLU::run: SuperLU dgssv failed, info=" +
+            "CpuLinearSolveSuperLU::solve: SuperLU dgssv failed, info=" +
             std::to_string(info));
     }
 

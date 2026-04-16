@@ -61,6 +61,7 @@ struct ProfileConfig {
     std::string backend;
     std::string compute;
     std::string jacobian;
+    std::string algorithm = "standard";
     bool reference_pypowerlike = false;
     bool hybrid_cuda_mixed_edge = false;
     bool use_cpu_naive_jacobian = false;
@@ -85,7 +86,7 @@ void print_usage(const char* argv0)
         << "Usage: " << argv0
         << " [--case-dir PATH]"
         << " [--profile cpp_pypowerlike|cpu_fp64_edge|cuda_mixed_edge|cuda_mixed_vertex|cuda_fp64_edge|cuda_fp64_vertex"
-        << "|cuda_mixed_edge_cpu_naive_jacobian|cuda_mixed_edge_cpu_superlu]"
+        << "|cuda_mixed_edge_cpu_naive_jacobian|cuda_mixed_edge_cpu_superlu|<core_profile>_modified]"
         << " [--tolerance FLOAT] [--max-iter INT] [--warmup INT] [--repeats INT]"
         << " [--dump-residuals] [--dump-dir PATH]\n";
 }
@@ -137,12 +138,36 @@ std::filesystem::path repeat_dump_dir(const std::filesystem::path& root, int32_t
     return root / name.str();
 }
 
+bool consume_suffix(std::string& value, std::string_view suffix)
+{
+    if (value.size() < suffix.size()) {
+        return false;
+    }
+    const auto offset = value.size() - suffix.size();
+    if (value.compare(offset, suffix.size(), suffix.data(), suffix.size()) != 0) {
+        return false;
+    }
+    value.erase(offset);
+    return true;
+}
+
 ProfileConfig parse_profile(const std::string& profile)
 {
     ProfileConfig cfg;
     cfg.profile = profile;
+    cfg.options.algorithm = NewtonAlgorithm::Standard;
 
-    if (profile == "cpp_pypowerlike") {
+    std::string base_profile = profile;
+    const bool modified = consume_suffix(base_profile, "_modified");
+    if (modified) {
+        cfg.algorithm = "modified";
+        cfg.options.algorithm = NewtonAlgorithm::Modified;
+    }
+
+    if (base_profile == "cpp_pypowerlike") {
+        if (modified) {
+            throw std::runtime_error("cpp_pypowerlike_modified is not supported by this reference path");
+        }
 #ifndef CUPF_WITH_SUPERLU
         throw std::runtime_error("cpp_pypowerlike requires SuperLU support");
 #else
@@ -159,7 +184,7 @@ ProfileConfig parse_profile(const std::string& profile)
     }
 
     cfg.implementation = profile;
-    if (profile == "cpu_fp64_edge") {
+    if (base_profile == "cpu_fp64_edge") {
         cfg.backend = "cpu";
         cfg.compute = "fp64";
         cfg.jacobian = "edge_based";
@@ -168,7 +193,7 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
-    if (profile == "cuda_mixed_edge") {
+    if (base_profile == "cuda_mixed_edge") {
         cfg.backend = "cuda";
         cfg.compute = "mixed";
         cfg.jacobian = "edge_based";
@@ -177,7 +202,10 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
-    if (profile == "cuda_mixed_edge_cpu_naive_jacobian") {
+    if (base_profile == "cuda_mixed_edge_cpu_naive_jacobian") {
+        if (modified) {
+            throw std::runtime_error("cuda_mixed_edge_cpu_naive_jacobian_modified is not supported");
+        }
 #if !defined(CUPF_WITH_CUDA) || !defined(CUPF_WITH_SUPERLU)
         throw std::runtime_error("cuda_mixed_edge_cpu_naive_jacobian requires CUDA and SuperLU support");
 #else
@@ -193,7 +221,10 @@ ProfileConfig parse_profile(const std::string& profile)
         return cfg;
 #endif
     }
-    if (profile == "cuda_mixed_edge_cpu_superlu") {
+    if (base_profile == "cuda_mixed_edge_cpu_superlu") {
+        if (modified) {
+            throw std::runtime_error("cuda_mixed_edge_cpu_superlu_modified is not supported");
+        }
 #if !defined(CUPF_WITH_CUDA) || !defined(CUPF_WITH_SUPERLU)
         throw std::runtime_error("cuda_mixed_edge_cpu_superlu requires CUDA and SuperLU support");
 #else
@@ -209,7 +240,7 @@ ProfileConfig parse_profile(const std::string& profile)
         return cfg;
 #endif
     }
-    if (profile == "cuda_mixed_vertex") {
+    if (base_profile == "cuda_mixed_vertex") {
         cfg.backend = "cuda";
         cfg.compute = "mixed";
         cfg.jacobian = "vertex_based";
@@ -218,7 +249,7 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.options.jacobian_builder = JacobianBuilderType::VertexBased;
         return cfg;
     }
-    if (profile == "cuda_fp64_edge") {
+    if (base_profile == "cuda_fp64_edge") {
         cfg.backend = "cuda";
         cfg.compute = "fp64";
         cfg.jacobian = "edge_based";
@@ -227,7 +258,7 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
-    if (profile == "cuda_fp64_vertex") {
+    if (base_profile == "cuda_fp64_vertex") {
         cfg.backend = "cuda";
         cfg.compute = "fp64";
         cfg.jacobian = "vertex_based";
@@ -776,6 +807,7 @@ int main(int argc, char** argv)
                 << "backend=" << profile.backend << ' '
                 << "compute=" << profile.compute << ' '
                 << "jacobian=" << profile.jacobian << ' '
+                << "algorithm=" << profile.algorithm << ' '
                 << "repeat=" << repeat << ' '
                 << "success=" << run.success << ' '
                 << "iterations=" << run.iterations << ' '

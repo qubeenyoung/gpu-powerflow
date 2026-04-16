@@ -13,11 +13,12 @@
 //
 // Built by PlanBuilder::build(options) — never constructed directly.
 //
-// NR hot path:
+// Standard NR hot path:
 //   plan.mismatch->run(ctx);
 //   if (ctx.converged) break;
 //   plan.jacobian->run(ctx);
-//   plan.linear_solve->run(ctx);
+//   plan.linear_solve->factorize(ctx);
+//   plan.linear_solve->solve(ctx);
 //   plan.voltage_update->run(ctx);
 // ---------------------------------------------------------------------------
 struct ExecutionPlan {

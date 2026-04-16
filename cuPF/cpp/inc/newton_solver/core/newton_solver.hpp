@@ -57,9 +57,15 @@ private:
     // analyze stage 실행: storage 준비 → linear_solve symbolic 분석
     void run_analyze_stages(const AnalyzeContext& ctx);
 
-    // NR 반복 루프: mismatch → jacobian → linear_solve → voltage_update
+    // NR 반복 루프: options_.algorithm에 따라 standard 또는 modified 스케줄 실행
     // 반환값: 실제 수행한 반복 횟수
     int32_t run_iteration_stages(IterationContext& ctx);
+
+    // 기존 NR 스케줄: mismatch → jacobian → factorize → solve → voltage_update
+    int32_t run_standard_iteration_stages(IterationContext& ctx);
+
+    // Modified 스케줄: factorize 한 번에 solve/update를 최대 두 번 실행
+    int32_t run_modified_iteration_stages(IterationContext& ctx);
 
     NewtonOptions   options_;
     ExecutionPlan   plan_;

@@ -50,6 +50,18 @@ PYBIND11_MODULE(_cupf, m)
         .value("Mixed", ComputePolicy::Mixed)
         .export_values();
 
+    py::enum_<JacobianBuilderType>(m, "JacobianBuilderType",
+        "Jacobian 희소 구조 및 값 산포 방식.")
+        .value("EdgeBased",   JacobianBuilderType::EdgeBased)
+        .value("VertexBased", JacobianBuilderType::VertexBased)
+        .export_values();
+
+    py::enum_<NewtonAlgorithm>(m, "NewtonAlgorithm",
+        "Newton-Raphson 반복 스케줄.")
+        .value("Standard", NewtonAlgorithm::Standard)
+        .value("Modified", NewtonAlgorithm::Modified)
+        .export_values();
+
     // -----------------------------------------------------------------------
     // 설정 구조체 바인딩
     // -----------------------------------------------------------------------
@@ -64,12 +76,16 @@ PYBIND11_MODULE(_cupf, m)
 
     py::class_<NewtonOptions>(m, "NewtonOptions",
         "solver 생성자에 전달하는 설정.\n"
-        "backend와 compute policy만 선택한다.")
+        "backend, compute policy, Jacobian builder, Newton 스케줄을 선택한다.")
         .def(py::init<>())
         .def_readwrite("backend", &NewtonOptions::backend,
             "연산 백엔드 (BackendKind.CPU 또는 BackendKind.CUDA)")
         .def_readwrite("compute", &NewtonOptions::compute,
-            "내부 계산 정밀도 정책 (ComputePolicy.FP64 또는 ComputePolicy.Mixed)");
+            "내부 계산 정밀도 정책 (ComputePolicy.FP64 또는 ComputePolicy.Mixed)")
+        .def_readwrite("jacobian_builder", &NewtonOptions::jacobian_builder,
+            "Jacobian 빌드 알고리즘 (JacobianBuilderType.EdgeBased 또는 VertexBased)")
+        .def_readwrite("algorithm", &NewtonOptions::algorithm,
+            "Newton 반복 스케줄 (NewtonAlgorithm.Standard 또는 Modified)");
 
     // -----------------------------------------------------------------------
     // 결과 구조체 바인딩

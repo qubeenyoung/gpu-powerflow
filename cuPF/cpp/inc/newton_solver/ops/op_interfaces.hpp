@@ -41,10 +41,10 @@ public:
 
 
 // ---------------------------------------------------------------------------
-// Op 인터페이스: NR 4-stage solver의 연산자 계약을 정의한다.
+// Op 인터페이스: NR stage solver의 연산자 계약을 정의한다.
 //
 // 각 구체 Op는 특정 Storage 타입과 결합되어 생성된다.
-// NR 핫 패스에서는 run(ctx)만 호출하며, backend 분기가 없다.
+// NR 핫 패스에서는 인터페이스 호출만 수행하며, backend 분기가 없다.
 // ---------------------------------------------------------------------------
 
 class IMismatchOp {
@@ -71,8 +71,18 @@ public:
     // NewtonSolver::analyze() 내에서 storage->prepare() 이후 한 번 호출된다.
     virtual void analyze(const AnalyzeContext& ctx) = 0;
 
-    // b = -F 준비 → (재)인수분해 → J·dx = b 풀기
-    virtual void run(IterationContext& ctx) = 0;
+    // 현재 Jacobian 값으로 numeric factorization / refactorization을 수행한다.
+    virtual void factorize(IterationContext& ctx) = 0;
+
+    // 현재 mismatch F로 b = -F를 준비하고 factorized Jacobian으로 J·dx = b를 푼다.
+    virtual void solve(IterationContext& ctx) = 0;
+
+    // 기존 호출부 호환용: factorize와 solve를 연속 실행한다.
+    virtual void run(IterationContext& ctx)
+    {
+        factorize(ctx);
+        solve(ctx);
+    }
 };
 
 class IVoltageUpdateOp {

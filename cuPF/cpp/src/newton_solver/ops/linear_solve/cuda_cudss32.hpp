@@ -17,7 +17,8 @@ public:
     ~CudaLinearSolveCuDSS32();
 
     void analyze(const AnalyzeContext& ctx) override;
-    void run(IterationContext& ctx) override;
+    void factorize(IterationContext& ctx) override;
+    void solve(IterationContext& ctx) override;
 
 private:
     IStorage& storage_;

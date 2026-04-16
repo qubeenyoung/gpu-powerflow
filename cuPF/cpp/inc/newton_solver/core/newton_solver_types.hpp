@@ -69,15 +69,28 @@ enum class ComputePolicy {
 
 
 // ---------------------------------------------------------------------------
+// NewtonAlgorithm: NR 반복 스케줄 선택.
+//
+//   Standard — 기존 순서: mismatch → jacobian → factorize → solve → update.
+//   Modified — 한 번 factorize한 Jacobian을 두 번의 solve/update에 재사용한다.
+// ---------------------------------------------------------------------------
+enum class NewtonAlgorithm {
+    Standard,
+    Modified,
+};
+
+
+// ---------------------------------------------------------------------------
 // NewtonOptions: 생성자에 전달하는 solver 설정.
 //
-// 사용자는 backend, compute policy, Jacobian 빌드 알고리즘만 선택한다.
+// 사용자는 backend, compute policy, Jacobian 빌드 알고리즘, 반복 스케줄을 선택한다.
 // kernel 세부 변형은 core 내부에서 결정한다.
 // ---------------------------------------------------------------------------
 struct NewtonOptions {
     BackendKind         backend = BackendKind::CPU;
     ComputePolicy       compute = ComputePolicy::FP64;
     JacobianBuilderType jacobian_builder = JacobianBuilderType::EdgeBased;
+    NewtonAlgorithm     algorithm = NewtonAlgorithm::Standard;
 };
 
 

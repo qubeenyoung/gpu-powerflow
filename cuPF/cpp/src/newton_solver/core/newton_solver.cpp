@@ -162,17 +162,33 @@ void NewtonSolver::run_analyze_stages(const AnalyzeContext& ctx)
 
 
 // ---------------------------------------------------------------------------
-// run_iteration_stages: NR 반복 루프
+// run_iteration_stages: NR 반복 루프 선택
+// ---------------------------------------------------------------------------
+int32_t NewtonSolver::run_iteration_stages(IterationContext& ctx)
+{
+    switch (options_.algorithm) {
+        case NewtonAlgorithm::Standard:
+            return run_standard_iteration_stages(ctx);
+        case NewtonAlgorithm::Modified:
+            return run_modified_iteration_stages(ctx);
+    }
+
+    throw std::invalid_argument("NewtonSolver: unsupported NewtonAlgorithm");
+}
+
+
+// ---------------------------------------------------------------------------
+// run_standard_iteration_stages: 기존 NR 반복 루프
 //
 // 각 반복은 4개의 stage로 구성된다.
 //   mismatch     — F = S_specified - S_calculated, normF 계산
 //   jacobian     — Jacobian J 채우기
-//   linear_solve — J·dx = -F 풀기
+//   linear_solve — factorize 후 J·dx = -F 풀기
 //   voltage_update — dx 적용, V 재구성
 //
 // mismatch 단계 후 수렴하면 루프를 즉시 종료한다.
 // ---------------------------------------------------------------------------
-int32_t NewtonSolver::run_iteration_stages(IterationContext& ctx)
+int32_t NewtonSolver::run_standard_iteration_stages(IterationContext& ctx)
 {
     int32_t completed = 0;
 
@@ -194,12 +210,115 @@ int32_t NewtonSolver::run_iteration_stages(IterationContext& ctx)
             plan_.jacobian->run(ctx);
         }
         {
-            StageScope stage("NR.iteration.linear_solve");
-            plan_.linear_solve->run(ctx);
+            StageScope linear("NR.iteration.linear");
+            {
+                StageScope stage("NR.iteration.linear_factorize");
+                plan_.linear_solve->factorize(ctx);
+            }
+            {
+                StageScope stage("NR.iteration.linear_solve");
+                plan_.linear_solve->solve(ctx);
+            }
         }
         {
             StageScope stage("NR.iteration.voltage_update");
             plan_.voltage_update->run(ctx);
+        }
+    }
+
+    return completed;
+}
+
+
+// ---------------------------------------------------------------------------
+// run_modified_iteration_stages: factorization reuse 스케줄
+//
+// 초기 V0에서 F0/J0를 만든 뒤, outer pass마다 existing Jacobian을 한 번
+// factorize한다. 이후 같은 factorization으로
+//   solve(Fk)   → voltage_update(Vk+1) → mismatch(Fk+1)
+//   solve(Fk+1) → voltage_update(Vk+2) → mismatch(Fk+2)
+// 를 최대 두 번 수행하고, 루프 마지막에서 다음 factorize에 사용할 Jacobian을
+// 갱신한다.
+//
+// 따라서 operator 타이밍에서 linear_factorize count는 linear_solve count의
+// 절반(수렴/최대반복에 따라 올림)이 된다.
+// ---------------------------------------------------------------------------
+int32_t NewtonSolver::run_modified_iteration_stages(IterationContext& ctx)
+{
+    if (ctx.config.max_iter <= 0) {
+        return 0;
+    }
+
+    int32_t completed = 0;
+
+    ctx.iter = 0;
+    {
+        StageScope stage("NR.iteration.mismatch");
+        plan_.mismatch->run(ctx);
+        completed = 1;
+    }
+    if (ctx.converged) {
+        return completed;
+    }
+
+    ctx.iter = completed - 1;
+    {
+        StageScope stage("NR.iteration.jacobian");
+        plan_.jacobian->run(ctx);
+    }
+
+    int32_t corrections = 0;
+    while (!ctx.converged && corrections < ctx.config.max_iter) {
+        for (int32_t reuse = 0;
+             reuse < 2 && !ctx.converged && corrections < ctx.config.max_iter;
+             ++reuse) {
+            StageScope total("NR.iteration.total");
+
+            // The current F was produced by the latest mismatch evaluation.
+            ctx.iter = completed - 1;
+
+            if (reuse == 0) {
+                {
+                    StageScope linear("NR.iteration.linear");
+                    {
+                        StageScope stage("NR.iteration.linear_factorize");
+                        plan_.linear_solve->factorize(ctx);
+                    }
+                    {
+                        StageScope stage("NR.iteration.linear_solve");
+                        plan_.linear_solve->solve(ctx);
+                    }
+                }
+            } else {
+                {
+                    StageScope linear("NR.iteration.linear");
+                    {
+                        StageScope stage("NR.iteration.linear_solve");
+                        plan_.linear_solve->solve(ctx);
+                    }
+                }
+            }
+
+            {
+                StageScope stage("NR.iteration.voltage_update");
+                plan_.voltage_update->run(ctx);
+            }
+            ++corrections;
+
+            ctx.iter = completed;
+            {
+                StageScope stage("NR.iteration.mismatch");
+                plan_.mismatch->run(ctx);
+                completed = ctx.iter + 1;
+            }
+        }
+
+        if (!ctx.converged && corrections < ctx.config.max_iter) {
+            ctx.iter = completed - 1;
+            {
+                StageScope stage("NR.iteration.jacobian");
+                plan_.jacobian->run(ctx);
+            }
         }
     }
 

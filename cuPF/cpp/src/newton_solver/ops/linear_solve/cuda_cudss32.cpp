@@ -10,7 +10,8 @@
 //   - RHS 준비: d_F(FP64) → h_F → -static_cast<float>(h_F[i]) → d_rhs(float)
 //     Mixed 모드에서 F는 FP64이므로 float으로 다운캐스트 후 부호 반전.
 //
-// 생명주기: cuda_cudss64.cpp 와 동일 (analyze → run×N).
+// 생명주기: cuda_cudss64.cpp 와 동일
+// (analyze → (factorize → solve)×N).
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
@@ -106,7 +107,7 @@ void CudaLinearSolveCuDSS32::analyze(const AnalyzeContext& ctx)
 
     {
         newton_solver::utils::ScopedTimer timer("CUDA.analyze.cudss32.setup");
-        CUDSS_CHECK(cudssCreate(&state->handle));
+        cupf_cudss_detail::create_handle(&state->handle);
         cupf_cudss_detail::configure_handle(state->handle);
         CUDSS_CHECK(cudssConfigCreate(&state->config));
         cupf_cudss_detail::configure_solver(state->config);
@@ -142,21 +143,54 @@ void CudaLinearSolveCuDSS32::analyze(const AnalyzeContext& ctx)
 }
 
 
-void CudaLinearSolveCuDSS32::run(IterationContext& ctx)
+void CudaLinearSolveCuDSS32::factorize(IterationContext& ctx)
+{
+    (void)ctx;
+    auto& storage = static_cast<CudaMixedStorage&>(storage_);
+
+    if (storage.dimF <= 0 || storage.d_J_values.empty() || storage.d_dx.empty()) {
+        throw std::runtime_error("CudaLinearSolveCuDSS32::factorize: storage is not prepared");
+    }
+    if (state_ == nullptr) {
+        throw std::runtime_error("CudaLinearSolveCuDSS32::factorize: analyze() must be called first");
+    }
+
+#ifndef CUPF_ENABLE_CUDSS
+    throw std::runtime_error("CudaLinearSolveCuDSS32::factorize requires a cuDSS-enabled build");
+#else
+    // 첫 번째: FACTORIZATION, 이후: REFACTORIZATION (symbolic 재사용)
+    newton_solver::utils::ScopedTimer timer(
+        state_->factorized ? "CUDA.solve.refactorization32" : "CUDA.solve.factorization32");
+    const int phase = state_->factorized ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
+    CUDSS_CHECK(cudssExecute(
+        state_->handle, phase,
+        state_->config, state_->data,
+        state_->jacobian, state_->solution_matrix, state_->rhs_matrix));
+    sync_cuda_for_timing();
+    state_->factorized = true;
+#endif
+}
+
+
+void CudaLinearSolveCuDSS32::solve(IterationContext& ctx)
 {
     (void)ctx;
     auto& storage = static_cast<CudaMixedStorage&>(storage_);
 
     if (storage.dimF <= 0 || storage.d_F.empty() || storage.d_dx.empty()) {
-        throw std::runtime_error("CudaLinearSolveCuDSS32::run: storage is not prepared");
+        throw std::runtime_error("CudaLinearSolveCuDSS32::solve: storage is not prepared");
     }
     if (state_ == nullptr) {
-        throw std::runtime_error("CudaLinearSolveCuDSS32::run: analyze() must be called first");
+        throw std::runtime_error("CudaLinearSolveCuDSS32::solve: analyze() must be called first");
     }
 
 #ifndef CUPF_ENABLE_CUDSS
-    throw std::runtime_error("CudaLinearSolveCuDSS32::run requires a cuDSS-enabled build");
+    throw std::runtime_error("CudaLinearSolveCuDSS32::solve requires a cuDSS-enabled build");
 #else
+    if (!state_->factorized) {
+        throw std::runtime_error("CudaLinearSolveCuDSS32::solve: factorize() must be called first");
+    }
+
     std::vector<double> h_F(static_cast<std::size_t>(storage.dimF));
     std::vector<float> h_rhs(static_cast<std::size_t>(storage.dimF));
 
@@ -170,19 +204,6 @@ void CudaLinearSolveCuDSS32::run(IterationContext& ctx)
             h_rhs[i] = -static_cast<float>(h_F[i]);
         }
         state_->rhs.assign(h_rhs.data(), h_rhs.size());
-    }
-
-    {
-        // 첫 번째: FACTORIZATION, 이후: REFACTORIZATION (symbolic 재사용)
-        newton_solver::utils::ScopedTimer timer(
-            state_->factorized ? "CUDA.solve.refactorization32" : "CUDA.solve.factorization32");
-        const int phase = state_->factorized ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
-        CUDSS_CHECK(cudssExecute(
-            state_->handle, phase,
-            state_->config, state_->data,
-            state_->jacobian, state_->solution_matrix, state_->rhs_matrix));
-        sync_cuda_for_timing();
-        state_->factorized = true;
     }
 
     {

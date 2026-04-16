@@ -16,8 +16,10 @@ class CpuLinearSolveKLU final : public ILinearSolveOp {
 public:
     explicit CpuLinearSolveKLU(IStorage& storage);
     void analyze(const AnalyzeContext& ctx) override;
-    void run(IterationContext& ctx) override;
+    void factorize(IterationContext& ctx) override;
+    void solve(IterationContext& ctx) override;
 
 private:
     CpuFp64Storage& storage_;
+    bool factorized_ = false;
 };

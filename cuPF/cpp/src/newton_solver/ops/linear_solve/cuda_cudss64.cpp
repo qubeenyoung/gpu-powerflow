@@ -11,13 +11,14 @@
 //     3. cudssMatrixCreateDn  (rhs: FP64 dense, solution: d_dx FP64 dense)
 //     4. CUDSS_PHASE_ANALYSIS (symbolic: 재순서화, 비영 패턴 분석)
 //
-//   run() — 매 NR 반복 호출:
+//   factorize() — 매 NR 반복 호출:
+//     1. CUDSS_PHASE_FACTORIZATION (첫 번째) 또는 CUDSS_PHASE_REFACTORIZATION (이후)
+//        REFACTORIZATION은 symbolic 자료구조를 재사용하므로 첫 번째보다 빠름.
+//   solve() — 매 NR 반복 호출:
 //     1. RHS 준비 (host roundtrip):
 //        d_F → h_rhs → negate → d_rhs  (rhs = -F)
 //        cuDSS RHS는 dense device 포인터로 전달하므로 host에서 부호를 반전한 뒤 upload.
-//     2. CUDSS_PHASE_FACTORIZATION (첫 번째) 또는 CUDSS_PHASE_REFACTORIZATION (이후)
-//        REFACTORIZATION은 symbolic 자료구조를 재사용하므로 첫 번째보다 빠름.
-//     3. CUDSS_PHASE_SOLVE → d_dx = J⁻¹·(-F)
+//     2. CUDSS_PHASE_SOLVE → d_dx = J⁻¹·(-F)
 //
 // CuDSS64State: cuDSS 핸들·디스크립터를 소유하는 pimpl 구조체.
 //   소멸자에서 순서대로 해제한다 (matrix → data → config → handle).
@@ -117,7 +118,7 @@ void CudaLinearSolveCuDSS64::analyze(const AnalyzeContext& ctx)
 
     {
         newton_solver::utils::ScopedTimer timer("CUDA.analyze.cudss64.setup");
-        CUDSS_CHECK(cudssCreate(&state->handle));
+        cupf_cudss_detail::create_handle(&state->handle);
         cupf_cudss_detail::configure_handle(state->handle);
         CUDSS_CHECK(cudssConfigCreate(&state->config));
         cupf_cudss_detail::configure_solver(state->config);
@@ -153,21 +154,55 @@ void CudaLinearSolveCuDSS64::analyze(const AnalyzeContext& ctx)
 }
 
 
-void CudaLinearSolveCuDSS64::run(IterationContext& ctx)
+void CudaLinearSolveCuDSS64::factorize(IterationContext& ctx)
+{
+    (void)ctx;
+    auto& storage = static_cast<CudaFp64Storage&>(storage_);
+
+    if (storage.dimF <= 0 || storage.d_J_values.empty() || storage.d_dx.empty()) {
+        throw std::runtime_error("CudaLinearSolveCuDSS64::factorize: storage is not prepared");
+    }
+    if (state_ == nullptr) {
+        throw std::runtime_error("CudaLinearSolveCuDSS64::factorize: analyze() must be called first");
+    }
+
+#ifndef CUPF_ENABLE_CUDSS
+    throw std::runtime_error("CudaLinearSolveCuDSS64::factorize requires a cuDSS-enabled build");
+#else
+    // 첫 번째 호출: FACTORIZATION (symbolic 자료구조 포함 완전 분해)
+    // 이후 호출:   REFACTORIZATION (symbolic 재사용, 수치 재분해만 수행 → 더 빠름)
+    newton_solver::utils::ScopedTimer timer(
+        state_->factorized ? "CUDA.solve.refactorization64" : "CUDA.solve.factorization64");
+    const int phase = state_->factorized ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
+    CUDSS_CHECK(cudssExecute(
+        state_->handle, phase,
+        state_->config, state_->data,
+        state_->jacobian, state_->solution_matrix, state_->rhs_matrix));
+    sync_cuda_for_timing();
+    state_->factorized = true;
+#endif
+}
+
+
+void CudaLinearSolveCuDSS64::solve(IterationContext& ctx)
 {
     (void)ctx;
     auto& storage = static_cast<CudaFp64Storage&>(storage_);
 
     if (storage.dimF <= 0 || storage.d_F.empty() || storage.d_dx.empty()) {
-        throw std::runtime_error("CudaLinearSolveCuDSS64::run: storage is not prepared");
+        throw std::runtime_error("CudaLinearSolveCuDSS64::solve: storage is not prepared");
     }
     if (state_ == nullptr) {
-        throw std::runtime_error("CudaLinearSolveCuDSS64::run: analyze() must be called first");
+        throw std::runtime_error("CudaLinearSolveCuDSS64::solve: analyze() must be called first");
     }
 
 #ifndef CUPF_ENABLE_CUDSS
-    throw std::runtime_error("CudaLinearSolveCuDSS64::run requires a cuDSS-enabled build");
+    throw std::runtime_error("CudaLinearSolveCuDSS64::solve requires a cuDSS-enabled build");
 #else
+    if (!state_->factorized) {
+        throw std::runtime_error("CudaLinearSolveCuDSS64::solve: factorize() must be called first");
+    }
+
     std::vector<double> h_rhs(static_cast<std::size_t>(storage.dimF));
 
     {
@@ -179,20 +214,6 @@ void CudaLinearSolveCuDSS64::run(IterationContext& ctx)
             value = -value;
         }
         state_->rhs.assign(h_rhs.data(), h_rhs.size());
-    }
-
-    {
-        // 첫 번째 호출: FACTORIZATION (symbolic 자료구조 포함 완전 분해)
-        // 이후 호출:   REFACTORIZATION (symbolic 재사용, 수치 재분해만 수행 → 더 빠름)
-        newton_solver::utils::ScopedTimer timer(
-            state_->factorized ? "CUDA.solve.refactorization64" : "CUDA.solve.factorization64");
-        const int phase = state_->factorized ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
-        CUDSS_CHECK(cudssExecute(
-            state_->handle, phase,
-            state_->config, state_->data,
-            state_->jacobian, state_->solution_matrix, state_->rhs_matrix));
-        sync_cuda_for_timing();
-        state_->factorized = true;
     }
 
     {
