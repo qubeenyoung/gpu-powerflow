@@ -4,19 +4,36 @@
 
 #include <cstdint>
 
-__global__ void fill_jacobian_edge(
-    const YbusGraph ybus,
-    const float* __restrict__ v_re,
-    const float* __restrict__ v_im,
-    const float* __restrict__ v_norm_re,
-    const float* __restrict__ v_norm_im,
+namespace exp20260420::newton_solver {
 
-    const int32_t* __restrict__ offdiagJ11,
-    const int32_t* __restrict__ offdiagJ21,
-    const int32_t* __restrict__ offdiagJ12,
-    const int32_t* __restrict__ offdiagJ22,
-    const int32_t* __restrict__ diag11,
-    const int32_t* __restrict__ diag21,
-    const int32_t* __restrict__ diag12,
-    const int32_t* __restrict__ diag22,
-    float* __restrict__ J_values);
+__global__ void fill_jacobian_edge(YbusGraph ybus,
+                                   const float* v_re,
+                                   const float* v_im,
+                                   const float* v_norm_re,
+                                   const float* v_norm_im,
+                                   const int32_t* mapJ11,
+                                   const int32_t* mapJ21,
+                                   const int32_t* mapJ12,
+                                   const int32_t* mapJ22,
+                                   const int32_t* diagJ11,
+                                   const int32_t* diagJ21,
+                                   const int32_t* diagJ12,
+                                   const int32_t* diagJ22,
+                                   float* J_values);
+
+}  // namespace exp20260420::newton_solver
+
+__global__ void fill_jacobian_edge(YbusGraph ybus,
+                                   const float* v_re,
+                                   const float* v_im,
+                                   const float* v_norm_re,
+                                   const float* v_norm_im,
+                                   const int32_t* mapJ11,
+                                   const int32_t* mapJ21,
+                                   const int32_t* mapJ12,
+                                   const int32_t* mapJ22,
+                                   const int32_t* diagJ11,
+                                   const int32_t* diagJ21,
+                                   const int32_t* diagJ12,
+                                   const int32_t* diagJ22,
+                                   float* J_values);
