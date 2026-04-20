@@ -1,0 +1,60 @@
+[471342] jac_asm_bench@127.0.0.1
+  fill_jacobian_vertex(YbusGraph, const float *, const float *, const float *, const float *, int, const int *, const int *, const int *, const int *, const int *, const int *, const int *, const int *, const int *, const int *, const int *, const int *, float *) (274, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 8.6
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ------------- ------------
+    Metric Name               Metric Unit Metric Value
+    ----------------------- ------------- ------------
+    DRAM Frequency          cycle/nsecond         6.05
+    SM Frequency            cycle/usecond       857.41
+    Elapsed Cycles                  cycle       119056
+    Memory Throughput                   %        85.27
+    DRAM Throughput                     %        85.27
+    Duration                      usecond       138.85
+    L1/TEX Cache Throughput             %        30.23
+    L2 Cache Throughput                 %        37.30
+    SM Active Cycles                cycle    109096.26
+    Compute (SM) Throughput             %         5.80
+    ----------------------- ------------- ------------
+
+    INF   The kernel is utilizing greater than 80.0% of the available compute or memory performance of the device. To   
+          further improve performance, work will likely need to be shifted from the most utilized to another unit.      
+          Start by analyzing DRAM in the Memory Workload Analysis section.                                              
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   256
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                    274
+    Registers Per Thread             register/thread              40
+    Shared Memory Configuration Size           Kbyte            8.19
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block       byte/block               0
+    Static Shared Memory Per Block        byte/block               0
+    Threads                                   thread           70144
+    Waves Per SM                                                0.63
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Block Limit SM                        block           16
+    Block Limit Registers                 block            6
+    Block Limit Shared Mem                block            8
+    Block Limit Warps                     block            6
+    Theoretical Active Warps per SM        warp           48
+    Theoretical Occupancy                     %          100
+    Achieved Occupancy                        %        55.93
+    Achieved Active Warps Per SM           warp        26.85
+    ------------------------------- ----------- ------------
+
+    OPT   Estimated Speedup: 44.07%                                                                                     
+          This kernel's theoretical occupancy is not impacted by any block limit. The difference between calculated     
+          theoretical (100.0%) and measured achieved occupancy (55.9%) can be the result of warp scheduling overheads   
+          or workload imbalances during the kernel execution. Load imbalances can occur between warps within a block    
+          as well as across blocks of the same kernel. See the CUDA Best Practices Guide                                
+          (https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy) for more details on           
+          optimizing occupancy.                                                                                         
+

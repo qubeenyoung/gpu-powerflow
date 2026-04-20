@@ -1,0 +1,60 @@
+[471207] jac_asm_bench@127.0.0.1
+  fill_jacobian_edge(YbusGraph, const float *, const float *, const float *, const float *, const int *, const int *, const int *, const int *, const int *, const int *, const int *, const int *, float *) (925, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 8.6
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ------------- ------------
+    Metric Name               Metric Unit Metric Value
+    ----------------------- ------------- ------------
+    DRAM Frequency          cycle/nsecond         6.03
+    SM Frequency            cycle/usecond       854.91
+    Elapsed Cycles                  cycle        52667
+    Memory Throughput                   %        57.38
+    DRAM Throughput                     %        54.16
+    Duration                      usecond        61.60
+    L1/TEX Cache Throughput             %        74.36
+    L2 Cache Throughput                 %        57.38
+    SM Active Cycles                cycle     48576.69
+    Compute (SM) Throughput             %        11.31
+    ----------------------- ------------- ------------
+
+    OPT   This kernel exhibits low compute throughput and memory bandwidth utilization relative to the peak performance 
+          of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak typically indicate    
+          latency issues. Look at Scheduler Statistics and Warp State Statistics for potential reasons.                 
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   256
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                    925
+    Registers Per Thread             register/thread              28
+    Shared Memory Configuration Size           Kbyte            8.19
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block       byte/block               0
+    Static Shared Memory Per Block        byte/block               0
+    Threads                                   thread          236800
+    Waves Per SM                                                2.14
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Block Limit SM                        block           16
+    Block Limit Registers                 block            8
+    Block Limit Shared Mem                block            8
+    Block Limit Warps                     block            6
+    Theoretical Active Warps per SM        warp           48
+    Theoretical Occupancy                     %          100
+    Achieved Occupancy                        %        80.23
+    Achieved Active Warps Per SM           warp        38.51
+    ------------------------------- ----------- ------------
+
+    OPT   Estimated Speedup: 19.77%                                                                                     
+          This kernel's theoretical occupancy is not impacted by any block limit. The difference between calculated     
+          theoretical (100.0%) and measured achieved occupancy (80.2%) can be the result of warp scheduling overheads   
+          or workload imbalances during the kernel execution. Load imbalances can occur between warps within a block    
+          as well as across blocks of the same kernel. See the CUDA Best Practices Guide                                
+          (https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy) for more details on           
+          optimizing occupancy.                                                                                         
+
