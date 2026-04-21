@@ -9,6 +9,7 @@ namespace exp20260420::linear_solver {
 
 struct CudssLuWorkspace {
     int32_t dim = 0;
+    int32_t batch_size = 1;
     int64_t nnz = 0;
 
     cudssHandle_t handle = nullptr;
@@ -25,6 +26,7 @@ struct CudssLuWorkspace {
 
 void cudssLuAnalyze(CudssLuWorkspace& ws,
                     int32_t dim,
+                    int32_t batch_size,
                     int64_t nnz,
                     const int32_t* row_ptr,
                     const int32_t* col_idx,
@@ -35,7 +37,7 @@ void cudssLuAnalyze(CudssLuWorkspace& ws,
 void cudssLuFactorize(CudssLuWorkspace& ws, cudaStream_t stream = nullptr);
 
 void cudssLuSolve(CudssLuWorkspace& ws,
-                  const float* F,
+                  const double* F,
                   cudaStream_t stream = nullptr);
 
 void cudssLuDestroy(CudssLuWorkspace& ws);

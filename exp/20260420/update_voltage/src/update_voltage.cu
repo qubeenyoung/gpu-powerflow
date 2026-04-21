@@ -20,166 +20,120 @@ namespace {
 
 constexpr int32_t kBlock = 256;
 
-__global__ void init_voltage_kernel(const float* __restrict__ v0_re,
-                                    const float* __restrict__ v0_im,
-                                    float* __restrict__ v_re,
-                                    float* __restrict__ v_im,
-                                    float* __restrict__ va,
-                                    float* __restrict__ vm,
-                                    float* __restrict__ v_norm_re,
-                                    float* __restrict__ v_norm_im,
-                                    int32_t n_bus)
+__global__ void init_voltage_kernel(const double* __restrict__ v0_re,
+                                    const double* __restrict__ v0_im,
+                                    double* __restrict__ v_re,
+                                    double* __restrict__ v_im,
+                                    int32_t total_bus)
 {
-    const int32_t bus = blockIdx.x * blockDim.x + threadIdx.x;
-    if (bus >= n_bus) {
+    const int32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_bus) {
         return;
     }
 
-    const float re = v0_re[bus];
-    const float im = v0_im[bus];
-    const float mag = hypotf(re, im);
-
-    v_re[bus] = re;
-    v_im[bus] = im;
-    va[bus] = atan2f(im, re);
-    vm[bus] = mag;
-    v_norm_re[bus] = mag > 1e-6f ? re / mag : 0.0f;
-    v_norm_im[bus] = mag > 1e-6f ? im / mag : 0.0f;
+    v_re[idx] = v0_re[idx];
+    v_im[idx] = v0_im[idx];
 }
 
-__global__ void apply_dx_kernel(float* __restrict__ va,
-                                float* __restrict__ vm,
-                                const float* __restrict__ dx,
-                                const int32_t* __restrict__ pvpq,
-                                int32_t n_pvpq,
-                                const int32_t* __restrict__ pq,
-                                int32_t n_pq)
+__global__ void update_voltage_kernel(double* __restrict__ v_re,
+                                      double* __restrict__ v_im,
+                                      const float* __restrict__ dx,
+                                      const int32_t* __restrict__ pvpq,
+                                      int32_t n_pvpq,
+                                      int32_t n_pq,
+                                      int32_t n_bus,
+                                      int32_t dim,
+                                      int32_t total_active)
 {
-    const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const int32_t dim = n_pvpq + n_pq;
-    if (tid >= dim) {
+    const int32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_active) {
         return;
     }
 
-    if (tid < n_pvpq) {
-        va[pvpq[tid]] += dx[tid];
-    } else {
-        vm[pq[tid - n_pvpq]] += dx[tid];
+    const int32_t batch = idx / n_pvpq;
+    const int32_t slot = idx - batch * n_pvpq;
+    const int32_t bus = pvpq[slot];
+    const int32_t bus_index = batch * n_bus + bus;
+    const int32_t dim_base = batch * dim;
+    const int32_t n_pv = n_pvpq - n_pq;
+
+    const double d_va = static_cast<double>(dx[dim_base + slot]);
+    double re = v_re[bus_index];
+    double im = v_im[bus_index];
+    double mag_scale = 1.0;
+
+    if (slot >= n_pv) {
+        const int32_t pq_slot = slot - n_pv;
+        const double old_mag = hypot(re, im);
+        const double new_mag = old_mag + static_cast<double>(dx[dim_base + n_pvpq + pq_slot]);
+        mag_scale = (old_mag > 1e-12) ? (new_mag / old_mag) : 0.0;
     }
-}
 
-__global__ void rebuild_voltage_kernel(const float* __restrict__ va,
-                                       const float* __restrict__ vm,
-                                       float* __restrict__ v_re,
-                                       float* __restrict__ v_im,
-                                       float* __restrict__ v_norm_re,
-                                       float* __restrict__ v_norm_im,
-                                       int32_t n_bus)
-{
-    const int32_t bus = blockIdx.x * blockDim.x + threadIdx.x;
-    if (bus >= n_bus) {
-        return;
-    }
+    double sin_dva = 0.0;
+    double cos_dva = 0.0;
+    sincos(d_va, &sin_dva, &cos_dva);
 
-    float sin_va = 0.0f;
-    float cos_va = 0.0f;
-    sincosf(va[bus], &sin_va, &cos_va);
-
-    const float mag = vm[bus];
-    const float re = mag * cos_va;
-    const float im = mag * sin_va;
-    const float abs_mag = fabsf(mag);
-    const float norm_scale = abs_mag > 1e-6f ? 1.0f / abs_mag : 0.0f;
-
-    v_re[bus] = re;
-    v_im[bus] = im;
-    v_norm_re[bus] = re * norm_scale;
-    v_norm_im[bus] = im * norm_scale;
+    const double scaled_re = mag_scale * re;
+    const double scaled_im = mag_scale * im;
+    v_re[bus_index] = scaled_re * cos_dva - scaled_im * sin_dva;
+    v_im[bus_index] = scaled_re * sin_dva + scaled_im * cos_dva;
 }
 
 }  // namespace
 
-void init_voltage(const float* v0_re,
-                  const float* v0_im,
-                  float* v_re,
-                  float* v_im,
-                  float* va,
-                  float* vm,
-                  float* v_norm_re,
-                  float* v_norm_im,
+void init_voltage(const double* v0_re,
+                  const double* v0_im,
+                  double* v_re,
+                  double* v_im,
                   int32_t n_bus,
+                  int32_t batch_size,
                   cudaStream_t stream)
 {
-    if (n_bus <= 0) {
-        throw std::invalid_argument("init_voltage: n_bus must be positive");
+    if (n_bus <= 0 || batch_size <= 0) {
+        throw std::invalid_argument("init_voltage: dimensions must be positive");
     }
-    if (v0_re == nullptr || v0_im == nullptr ||
-        v_re == nullptr || v_im == nullptr ||
-        va == nullptr || vm == nullptr ||
-        v_norm_re == nullptr || v_norm_im == nullptr) {
+    if (v0_re == nullptr || v0_im == nullptr || v_re == nullptr || v_im == nullptr) {
         throw std::invalid_argument("init_voltage: device pointer is null");
     }
 
-    const int32_t grid = (n_bus + kBlock - 1) / kBlock;
-    init_voltage_kernel<<<grid, kBlock, 0, stream>>>(
-        v0_re,
-        v0_im,
-        v_re,
-        v_im,
-        va,
-        vm,
-        v_norm_re,
-        v_norm_im,
-        n_bus);
+    const int32_t total_bus = n_bus * batch_size;
+    const int32_t grid = (total_bus + kBlock - 1) / kBlock;
+    init_voltage_kernel<<<grid, kBlock, 0, stream>>>(v0_re, v0_im, v_re, v_im, total_bus);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void update_voltage(float* v_re,
-                    float* v_im,
-                    float* va,
-                    float* vm,
-                    float* v_norm_re,
-                    float* v_norm_im,
+void update_voltage(double* v_re,
+                    double* v_im,
                     const float* dx,
                     const int32_t* pvpq,
                     int32_t n_pvpq,
                     const int32_t* pq,
                     int32_t n_pq,
                     int32_t n_bus,
+                    int32_t batch_size,
                     cudaStream_t stream)
 {
-    if (n_bus <= 0 || n_pvpq <= 0 || n_pq < 0) {
+    (void)pq;
+    if (n_bus <= 0 || n_pvpq <= 0 || n_pq < 0 || batch_size <= 0) {
         throw std::invalid_argument("update_voltage: bad dimensions");
     }
-    if (v_re == nullptr || v_im == nullptr ||
-        va == nullptr || vm == nullptr ||
-        v_norm_re == nullptr || v_norm_im == nullptr ||
-        dx == nullptr || pvpq == nullptr ||
-        (n_pq > 0 && pq == nullptr)) {
+    if (v_re == nullptr || v_im == nullptr || dx == nullptr || pvpq == nullptr) {
         throw std::invalid_argument("update_voltage: device pointer is null");
     }
 
     const int32_t dim = n_pvpq + n_pq;
-    const int32_t dx_grid = (dim + kBlock - 1) / kBlock;
-    apply_dx_kernel<<<dx_grid, kBlock, 0, stream>>>(
-        va,
-        vm,
+    const int32_t total_active = n_pvpq * batch_size;
+    const int32_t grid = (total_active + kBlock - 1) / kBlock;
+    update_voltage_kernel<<<grid, kBlock, 0, stream>>>(
+        v_re,
+        v_im,
         dx,
         pvpq,
         n_pvpq,
-        pq,
-        n_pq);
-    CUDA_CHECK(cudaGetLastError());
-
-    const int32_t bus_grid = (n_bus + kBlock - 1) / kBlock;
-    rebuild_voltage_kernel<<<bus_grid, kBlock, 0, stream>>>(
-        va,
-        vm,
-        v_re,
-        v_im,
-        v_norm_re,
-        v_norm_im,
-        n_bus);
+        n_pq,
+        n_bus,
+        dim,
+        total_active);
     CUDA_CHECK(cudaGetLastError());
 }
 

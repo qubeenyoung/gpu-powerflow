@@ -1,0 +1,5 @@
+build/
+results/*.log
+results/*.csv
+results/**/*.log
+results/**/*.csv

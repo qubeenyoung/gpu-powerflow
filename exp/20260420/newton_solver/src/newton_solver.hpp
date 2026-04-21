@@ -13,6 +13,7 @@ namespace exp20260420::newton_solver {
 struct NewtonOptions {
     int32_t max_iter = 20;
     double tolerance = 1e-6;
+    int32_t batch_size = 1;
 };
 
 struct NewtonResult {
@@ -27,6 +28,7 @@ struct NewtonWorkspace {
     int32_t n_pv = 0;
     int32_t n_pq = 0;
     int32_t n_pvpq = 0;
+    int32_t batch_size = 1;
     int32_t dim = 0;
     int32_t jac_nnz = 0;
 
@@ -51,13 +53,9 @@ struct NewtonWorkspace {
 
     float* sbus_re = nullptr;
     float* sbus_im = nullptr;
-    float* v_re = nullptr;
-    float* v_im = nullptr;
-    float* va = nullptr;
-    float* vm = nullptr;
-    float* v_norm_re = nullptr;
-    float* v_norm_im = nullptr;
-    float* F = nullptr;
+    double* v_re = nullptr;
+    double* v_im = nullptr;
+    double* F = nullptr;
     float* dx = nullptr;
 
     exp20260420::mismatch::MismatchWorkspace mismatch;
@@ -71,16 +69,17 @@ void newtonAnalyze(NewtonWorkspace& ws,
                    int32_t n_pv,
                    const int32_t* pq,
                    int32_t n_pq,
+                   int32_t batch_size = 1,
                    cudaStream_t stream = nullptr);
 
 NewtonResult newtonSolve(NewtonWorkspace& ws,
                          const float* sbus_re,
                          const float* sbus_im,
-                         const float* v0_re,
-                         const float* v0_im,
+                         const double* v0_re,
+                         const double* v0_im,
                          const NewtonOptions& options,
-                         float* out_v_re = nullptr,
-                         float* out_v_im = nullptr,
+                         double* out_v_re = nullptr,
+                         double* out_v_im = nullptr,
                          cudaStream_t stream = nullptr);
 
 void newtonDestroy(NewtonWorkspace& ws);

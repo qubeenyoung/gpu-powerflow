@@ -22,6 +22,11 @@ struct JfnkOptions {
     double ilut_drop_tol = 1e-4;
     int32_t ilut_fill_factor = 10;
     double ilu_pivot_tol = 1e-12;
+    std::string permutation = "none";
+    std::string preconditioner_combine = "single";
+    std::string residual_trace_path;
+    std::string residual_trace_case;
+    std::string jacobian_error_path;
 };
 
 struct JfnkStats {

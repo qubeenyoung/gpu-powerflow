@@ -3,6 +3,7 @@
 #ifdef CUPF_WITH_CUDA
 
 #include "newton_solver/core/contexts.hpp"
+#include "newton_solver/ops/jacobian/cuda_edge_fp64.hpp"
 
 #include <Eigen/Dense>
 
@@ -15,7 +16,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -105,6 +109,99 @@ void initialize_amgx_runtime()
     (void)runtime;
 }
 
+void append_residual_trace(const JfnkOptions& options,
+                           int32_t outer_iteration,
+                           const char* phase,
+                           int32_t inner_iteration,
+                           double residual_abs,
+                           double residual_rel,
+                           double rhs_norm)
+{
+    if (options.residual_trace_path.empty()) {
+        return;
+    }
+    std::ofstream trace(options.residual_trace_path, std::ios::app);
+    trace << std::scientific << std::setprecision(17)
+          << options.residual_trace_case << ','
+          << outer_iteration << ','
+          << phase << ','
+          << inner_iteration << ','
+          << residual_abs << ','
+          << residual_rel << ','
+          << rhs_norm << '\n';
+}
+
+void append_jacobian_error(const JfnkOptions& options,
+                           CudaFp64Storage& storage,
+                           IterationContext& ctx,
+                           const DeviceBuffer<double>& fd_values)
+{
+    if (options.jacobian_error_path.empty()) {
+        return;
+    }
+    if (fd_values.size() != storage.d_J_values.size()) {
+        std::ofstream trace(options.jacobian_error_path, std::ios::app);
+        trace << options.residual_trace_case << ','
+              << ctx.iter << ','
+              << storage.dimF << ','
+              << "size_mismatch,"
+              << fd_values.size() << ','
+              << storage.d_J_values.size()
+              << ",,,,,,,\n";
+        return;
+    }
+
+    CudaJacobianOpEdgeFp64 analytic_jacobian(storage);
+    analytic_jacobian.run(ctx);
+
+    std::vector<double> fd(fd_values.size());
+    std::vector<double> exact(storage.d_J_values.size());
+    fd_values.copyTo(fd.data(), fd.size());
+    storage.d_J_values.copyTo(exact.data(), exact.size());
+
+    double fd_sq = 0.0;
+    double exact_sq = 0.0;
+    double diff_sq = 0.0;
+    double max_abs = 0.0;
+    double max_rel = 0.0;
+    std::size_t max_abs_index = 0;
+    for (std::size_t i = 0; i < fd.size(); ++i) {
+        const double diff = fd[i] - exact[i];
+        const double abs_diff = std::abs(diff);
+        const double denom = std::max(std::abs(exact[i]), 1e-30);
+        const double rel = abs_diff / denom;
+        fd_sq += fd[i] * fd[i];
+        exact_sq += exact[i] * exact[i];
+        diff_sq += diff * diff;
+        if (abs_diff > max_abs) {
+            max_abs = abs_diff;
+            max_abs_index = i;
+        }
+        max_rel = std::max(max_rel, rel);
+    }
+
+    const double fd_norm = std::sqrt(fd_sq);
+    const double exact_norm = std::sqrt(exact_sq);
+    const double diff_norm = std::sqrt(diff_sq);
+    const double rel_fro = diff_norm / std::max(exact_norm, 1e-30);
+
+    std::ofstream trace(options.jacobian_error_path, std::ios::app);
+    trace << std::scientific << std::setprecision(17)
+          << options.residual_trace_case << ','
+          << ctx.iter << ','
+          << storage.dimF << ','
+          << fd.size() << ','
+          << fd_norm << ','
+          << exact_norm << ','
+          << diff_norm << ','
+          << rel_fro << ','
+          << max_abs << ','
+          << max_rel << ','
+          << max_abs_index << ','
+          << fd[max_abs_index] << ','
+          << exact[max_abs_index] << '\n';
+}
+
 const char* amgx_amg_config()
 {
     return R"json(
@@ -118,7 +215,7 @@ const char* amgx_amg_config()
     "presweeps": 0,
     "postsweeps": 3,
     "cycle": "V",
-    "coarse_solver": "NOSOLVER",
+    "coarse_solver": "DENSE_LU_SOLVER",
     "max_iters": 1,
     "max_levels": 100,
     "min_coarse_rows": 32,
@@ -259,6 +356,36 @@ __global__ void subtract_kernel(int32_t n, const double* lhs, const double* rhs,
     const int32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
         output[i] = lhs[i] - rhs[i];
+    }
+}
+
+__global__ void add_vectors_kernel(int32_t n, const double* lhs, const double* rhs, double* output)
+{
+    const int32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        output[i] = lhs[i] + rhs[i];
+    }
+}
+
+__global__ void permute_old_to_new_kernel(int32_t n,
+                                          const int32_t* old_to_new,
+                                          const double* old_values,
+                                          double* new_values)
+{
+    const int32_t old_i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (old_i < n) {
+        new_values[old_to_new[old_i]] = old_values[old_i];
+    }
+}
+
+__global__ void unpermute_new_to_old_kernel(int32_t n,
+                                            const int32_t* old_to_new,
+                                            const double* new_values,
+                                            double* old_values)
+{
+    const int32_t old_i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (old_i < n) {
+        old_values[old_i] = new_values[old_to_new[old_i]];
     }
 }
 
@@ -441,6 +568,83 @@ __global__ void add_linear_combination_kernel(int32_t n,
     x[row] += sum;
 }
 
+__device__ double safe_inverse_device(double value)
+{
+    constexpr double kPivotTol = 1e-12;
+    if (!isfinite(value) || fabs(value) <= kPivotTol) {
+        return 1.0;
+    }
+    return 1.0 / value;
+}
+
+__global__ void setup_bus_block_jacobi_kernel(int32_t n_pv,
+                                              int32_t n_pq,
+                                              const int32_t* pv,
+                                              const int32_t* pq,
+                                              const int32_t* diag11,
+                                              const int32_t* diag12,
+                                              const int32_t* diag21,
+                                              const int32_t* diag22,
+                                              const double* values,
+                                              double* pv_inv,
+                                              double* pq_inv00,
+                                              double* pq_inv01,
+                                              double* pq_inv10,
+                                              double* pq_inv11)
+{
+    const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < n_pv) {
+        const int32_t bus = pv[tid];
+        const int32_t pos = diag11[bus];
+        pv_inv[tid] = pos >= 0 ? safe_inverse_device(values[pos]) : 1.0;
+    }
+    if (tid < n_pq) {
+        const int32_t bus = pq[tid];
+        const int32_t p11 = diag11[bus];
+        const int32_t p12 = diag12[bus];
+        const int32_t p21 = diag21[bus];
+        const int32_t p22 = diag22[bus];
+        const double a = p11 >= 0 ? values[p11] : 1.0;
+        const double b = p12 >= 0 ? values[p12] : 0.0;
+        const double c = p21 >= 0 ? values[p21] : 0.0;
+        const double d = p22 >= 0 ? values[p22] : 1.0;
+        const double det = a * d - b * c;
+        if (isfinite(det) && fabs(det) > 1e-12) {
+            pq_inv00[tid] = d / det;
+            pq_inv01[tid] = -b / det;
+            pq_inv10[tid] = -c / det;
+            pq_inv11[tid] = a / det;
+        } else {
+            pq_inv00[tid] = 1.0;
+            pq_inv01[tid] = 0.0;
+            pq_inv10[tid] = 0.0;
+            pq_inv11[tid] = 1.0;
+        }
+    }
+}
+
+__global__ void apply_bus_block_jacobi_kernel(int32_t n_pv,
+                                              int32_t n_pq,
+                                              const double* input,
+                                              const double* pv_inv,
+                                              const double* pq_inv00,
+                                              const double* pq_inv01,
+                                              const double* pq_inv10,
+                                              const double* pq_inv11,
+                                              double* output)
+{
+    const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < n_pv) {
+        output[tid] = pv_inv[tid] * input[tid];
+    }
+    if (tid < n_pq) {
+        const int32_t p = n_pv + tid;
+        const int32_t q = n_pv + n_pq + tid;
+        output[p] = pq_inv00[tid] * input[p] + pq_inv01[tid] * input[q];
+        output[q] = pq_inv10[tid] * input[p] + pq_inv11[tid] * input[q];
+    }
+}
+
 std::vector<std::vector<int32_t>> build_jacobian_pattern_by_column(
     int32_t n_bus,
     const std::vector<int32_t>& ybus_indptr,
@@ -560,6 +764,13 @@ struct FdPattern {
     std::vector<int32_t> scatter_positions;
 };
 
+struct PermutedFdMatrix {
+    std::vector<int32_t> old_to_new;
+    std::vector<int32_t> row_ptr;
+    std::vector<int32_t> col_idx;
+    std::vector<double> values;
+};
+
 FdPattern build_fd_pattern(int32_t n_bus,
                            const std::vector<int32_t>& ybus_indptr,
                            const std::vector<int32_t>& ybus_indices,
@@ -634,6 +845,105 @@ FdPattern build_fd_pattern(int32_t n_bus,
     }
 
     return pattern;
+}
+
+std::vector<int32_t> build_old_to_new_permutation(const std::string& permutation,
+                                                  int32_t n_bus,
+                                                  const std::vector<int32_t>& pv,
+                                                  const std::vector<int32_t>& pq)
+{
+    const int32_t n_pv = static_cast<int32_t>(pv.size());
+    const int32_t n_pq = static_cast<int32_t>(pq.size());
+    const int32_t dim = n_pv + 2 * n_pq;
+    std::vector<int32_t> pvpq_index(static_cast<std::size_t>(n_bus), -1);
+    std::vector<int32_t> pq_index(static_cast<std::size_t>(n_bus), -1);
+    for (int32_t i = 0; i < n_pv; ++i) {
+        pvpq_index[static_cast<std::size_t>(pv[static_cast<std::size_t>(i)])] = i;
+    }
+    for (int32_t i = 0; i < n_pq; ++i) {
+        const int32_t bus = pq[static_cast<std::size_t>(i)];
+        pvpq_index[static_cast<std::size_t>(bus)] = n_pv + i;
+        pq_index[static_cast<std::size_t>(bus)] = i;
+    }
+
+    std::vector<int32_t> old_order;
+    old_order.reserve(static_cast<std::size_t>(dim));
+    if (permutation == "bus_local") {
+        for (int32_t bus = 0; bus < n_bus; ++bus) {
+            const int32_t theta = pvpq_index[static_cast<std::size_t>(bus)];
+            const int32_t pq_local = pq_index[static_cast<std::size_t>(bus)];
+            if (theta >= 0) {
+                old_order.push_back(theta);
+            }
+            if (pq_local >= 0) {
+                old_order.push_back(n_pv + n_pq + pq_local);
+            }
+        }
+    } else if (permutation == "pq_interleaved") {
+        for (int32_t i = 0; i < n_pv; ++i) {
+            old_order.push_back(i);
+        }
+        for (int32_t i = 0; i < n_pq; ++i) {
+            old_order.push_back(n_pv + i);
+            old_order.push_back(n_pv + n_pq + i);
+        }
+    } else {
+        for (int32_t i = 0; i < dim; ++i) {
+            old_order.push_back(i);
+        }
+    }
+    if (static_cast<int32_t>(old_order.size()) != dim) {
+        throw std::runtime_error("invalid permutation size");
+    }
+
+    std::vector<int32_t> old_to_new(static_cast<std::size_t>(dim), -1);
+    for (int32_t new_i = 0; new_i < dim; ++new_i) {
+        const int32_t old_i = old_order[static_cast<std::size_t>(new_i)];
+        if (old_i < 0 || old_i >= dim || old_to_new[static_cast<std::size_t>(old_i)] >= 0) {
+            throw std::runtime_error("invalid permutation contents");
+        }
+        old_to_new[static_cast<std::size_t>(old_i)] = new_i;
+    }
+    return old_to_new;
+}
+
+PermutedFdMatrix permute_fd_matrix(const FdPattern& pattern,
+                                   const std::vector<double>& values,
+                                   const std::vector<int32_t>& old_to_new)
+{
+    if (values.size() != static_cast<std::size_t>(pattern.nnz)) {
+        throw std::runtime_error("permutation value size mismatch");
+    }
+    std::vector<std::vector<std::pair<int32_t, double>>> rows(
+        static_cast<std::size_t>(pattern.dim));
+    for (int32_t old_row = 0; old_row < pattern.dim; ++old_row) {
+        const int32_t new_row = old_to_new[static_cast<std::size_t>(old_row)];
+        auto& row = rows[static_cast<std::size_t>(new_row)];
+        for (int32_t p = pattern.row_ptr[static_cast<std::size_t>(old_row)];
+             p < pattern.row_ptr[static_cast<std::size_t>(old_row + 1)];
+             ++p) {
+            const int32_t old_col = pattern.col_idx[static_cast<std::size_t>(p)];
+            row.push_back({old_to_new[static_cast<std::size_t>(old_col)],
+                           values[static_cast<std::size_t>(p)]});
+        }
+        std::sort(row.begin(),
+                  row.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+    }
+
+    PermutedFdMatrix permuted;
+    permuted.old_to_new = old_to_new;
+    permuted.row_ptr.assign(static_cast<std::size_t>(pattern.dim + 1), 0);
+    for (int32_t row = 0; row < pattern.dim; ++row) {
+        permuted.row_ptr[static_cast<std::size_t>(row + 1)] =
+            permuted.row_ptr[static_cast<std::size_t>(row)] +
+            static_cast<int32_t>(rows[static_cast<std::size_t>(row)].size());
+        for (const auto& entry : rows[static_cast<std::size_t>(row)]) {
+            permuted.col_idx.push_back(entry.first);
+            permuted.values.push_back(entry.second);
+        }
+    }
+    return permuted;
 }
 
 struct DeviceFdPattern {
@@ -752,14 +1062,35 @@ void JfnkLinearSolveAmgx::run(IterationContext& ctx)
     if (options_.solver != "fgmres" && options_.solver != "gmres_none") {
         throw std::runtime_error("JfnkLinearSolveAmgx::run: GPU path supports fgmres only");
     }
-    if (options_.preconditioner != "amg_fd" && options_.preconditioner != "none") {
+    if (options_.preconditioner != "amg_fd" &&
+        options_.preconditioner != "bus_block_jacobi_fd" &&
+        options_.preconditioner != "none") {
         throw std::runtime_error(
-            "JfnkLinearSolveAmgx::run: GPU path supports amg_fd or none preconditioner only");
+            "JfnkLinearSolveAmgx::run: GPU path supports amg_fd, bus_block_jacobi_fd, or none preconditioner only");
     }
     if (options_.linear_tolerance <= 0.0 ||
         options_.max_inner_iterations <= 0 ||
         options_.gmres_restart <= 0) {
         throw std::runtime_error("JfnkLinearSolveAmgx::run: invalid linear solver options");
+    }
+    if (options_.permutation != "none" &&
+        options_.permutation != "bus_local" &&
+        options_.permutation != "pq_interleaved") {
+        throw std::runtime_error("JfnkLinearSolveAmgx::run: invalid AMGX permutation");
+    }
+    if (options_.permutation != "none" && options_.preconditioner != "amg_fd") {
+        throw std::runtime_error("JfnkLinearSolveAmgx::run: AMGX permutation requires amg_fd");
+    }
+    if (options_.preconditioner_combine != "single" &&
+        options_.preconditioner_combine != "additive" &&
+        options_.preconditioner_combine != "block_then_amg" &&
+        options_.preconditioner_combine != "amg_then_block") {
+        throw std::runtime_error("JfnkLinearSolveAmgx::run: invalid preconditioner combine mode");
+    }
+    if (options_.preconditioner_combine != "single" &&
+        options_.preconditioner != "bus_block_jacobi_fd") {
+        throw std::runtime_error(
+            "JfnkLinearSolveAmgx::run: combined preconditioner requires bus_block_jacobi_fd");
     }
 
     const auto solve_start = Clock::now();
@@ -877,17 +1208,39 @@ void JfnkLinearSolveAmgx::run(IterationContext& ctx)
 
     AmgxDevicePreconditioner amg_preconditioner;
     DeviceBuffer<double> d_fd_values;
+    DeviceBuffer<int32_t> d_perm_old_to_new;
+    DeviceBuffer<int32_t> d_perm_row_ptr;
+    DeviceBuffer<int32_t> d_perm_col_idx;
+    DeviceBuffer<double> d_perm_values;
+    DeviceBuffer<double> d_perm_rhs;
+    DeviceBuffer<double> d_perm_x;
+    DeviceBuffer<double> d_pv_inv;
+    DeviceBuffer<double> d_pq_inv00;
+    DeviceBuffer<double> d_pq_inv01;
+    DeviceBuffer<double> d_pq_inv10;
+    DeviceBuffer<double> d_pq_inv11;
+    DeviceFdPattern device_pattern;
 
-    if (options_.preconditioner == "amg_fd") {
+    const bool needs_fd = options_.preconditioner == "amg_fd" ||
+                          options_.preconditioner == "bus_block_jacobi_fd";
+    const bool needs_amg = options_.preconditioner == "amg_fd" ||
+                           options_.preconditioner_combine != "single";
+    const bool needs_block = options_.preconditioner == "bus_block_jacobi_fd";
+
+    if (needs_fd) {
         const auto setup_start = Clock::now();
         bool setup_ok = false;
 
         try {
             const FdPattern host_pattern =
                 build_fd_pattern(n_bus_, ybus_indptr_, ybus_indices_, pv_, pq_);
-            DeviceFdPattern device_pattern = upload_fd_pattern(host_pattern);
+            device_pattern = upload_fd_pattern(host_pattern);
             d_fd_values.resize(static_cast<std::size_t>(host_pattern.nnz));
             d_fd_values.memsetZero();
+            if (options_.preconditioner_combine != "single") {
+                d_perm_rhs.resize(static_cast<std::size_t>(dim));
+                d_perm_x.resize(static_cast<std::size_t>(dim));
+            }
 
             for (int32_t color = 0; color < device_pattern.num_colors; ++color) {
                 const int32_t col_begin = host_pattern.color_ptr[static_cast<std::size_t>(color)];
@@ -922,11 +1275,64 @@ void JfnkLinearSolveAmgx::run(IterationContext& ctx)
                 }
             }
 
-            setup_ok = amg_preconditioner.compute(device_pattern.dim,
-                                                  device_pattern.nnz,
-                                                  device_pattern.row_ptr.data(),
-                                                  device_pattern.col_idx.data(),
-                                                  d_fd_values.data());
+            append_jacobian_error(options_, storage_, ctx, d_fd_values);
+
+            if (needs_amg) {
+                if (options_.permutation == "none") {
+                    setup_ok = amg_preconditioner.compute(device_pattern.dim,
+                                                          device_pattern.nnz,
+                                                          device_pattern.row_ptr.data(),
+                                                          device_pattern.col_idx.data(),
+                                                          d_fd_values.data());
+                } else {
+                    std::vector<double> h_fd_values(static_cast<std::size_t>(host_pattern.nnz));
+                    d_fd_values.copyTo(h_fd_values.data(), h_fd_values.size());
+                    const std::vector<int32_t> old_to_new =
+                        build_old_to_new_permutation(options_.permutation, n_bus_, pv_, pq_);
+                    const PermutedFdMatrix permuted =
+                        permute_fd_matrix(host_pattern, h_fd_values, old_to_new);
+                    d_perm_old_to_new.assign(permuted.old_to_new.data(),
+                                             permuted.old_to_new.size());
+                    d_perm_row_ptr.assign(permuted.row_ptr.data(), permuted.row_ptr.size());
+                    d_perm_col_idx.assign(permuted.col_idx.data(), permuted.col_idx.size());
+                    d_perm_values.assign(permuted.values.data(), permuted.values.size());
+                    d_perm_rhs.resize(static_cast<std::size_t>(dim));
+                    d_perm_x.resize(static_cast<std::size_t>(dim));
+                    setup_ok = amg_preconditioner.compute(dim,
+                                                          static_cast<int32_t>(permuted.values.size()),
+                                                          d_perm_row_ptr.data(),
+                                                          d_perm_col_idx.data(),
+                                                          d_perm_values.data());
+                }
+            } else {
+                setup_ok = true;
+            }
+
+            if (setup_ok && needs_block) {
+                d_pv_inv.resize(static_cast<std::size_t>(n_pv));
+                d_pq_inv00.resize(static_cast<std::size_t>(n_pq));
+                d_pq_inv01.resize(static_cast<std::size_t>(n_pq));
+                d_pq_inv10.resize(static_cast<std::size_t>(n_pq));
+                d_pq_inv11.resize(static_cast<std::size_t>(n_pq));
+                const int32_t setup_grid = (std::max(n_pv, n_pq) + kBlockSize - 1) / kBlockSize;
+                setup_bus_block_jacobi_kernel<<<setup_grid, kBlockSize>>>(
+                    n_pv,
+                    n_pq,
+                    storage_.d_pv.data(),
+                    storage_.d_pq.data(),
+                    storage_.d_diagJ11.data(),
+                    storage_.d_diagJ12.data(),
+                    storage_.d_diagJ21.data(),
+                    storage_.d_diagJ22.data(),
+                    d_fd_values.data(),
+                    d_pv_inv.data(),
+                    d_pq_inv00.data(),
+                    d_pq_inv01.data(),
+                    d_pq_inv10.data(),
+                    d_pq_inv11.data());
+                CUDA_CHECK(cudaGetLastError());
+                setup_ok = true;
+            }
         } catch (const std::exception& ex) {
             stats_.last_failure_reason = std::string("preconditioner_setup_") + ex.what();
             setup_ok = false;
@@ -951,8 +1357,66 @@ void JfnkLinearSolveAmgx::run(IterationContext& ctx)
     }
 
     auto apply_preconditioner = [&](const double* input, double* output) {
+        auto apply_amg = [&](const double* amg_input, double* amg_output) {
+            if (options_.permutation == "none") {
+                amg_preconditioner.solve(amg_input, amg_output, dim);
+            } else {
+                permute_old_to_new_kernel<<<vector_grid, kBlockSize>>>(
+                    dim, d_perm_old_to_new.data(), amg_input, d_perm_rhs.data());
+                CUDA_CHECK(cudaGetLastError());
+                amg_preconditioner.solve(d_perm_rhs.data(), d_perm_x.data(), dim);
+                unpermute_new_to_old_kernel<<<vector_grid, kBlockSize>>>(
+                    dim, d_perm_old_to_new.data(), d_perm_x.data(), amg_output);
+                CUDA_CHECK(cudaGetLastError());
+            }
+        };
+        auto apply_block = [&](const double* block_input, double* block_output) {
+            const int32_t pc_grid = (std::max(n_pv, n_pq) + kBlockSize - 1) / kBlockSize;
+            apply_bus_block_jacobi_kernel<<<pc_grid, kBlockSize>>>(
+                n_pv,
+                n_pq,
+                block_input,
+                d_pv_inv.data(),
+                d_pq_inv00.data(),
+                d_pq_inv01.data(),
+                d_pq_inv10.data(),
+                d_pq_inv11.data(),
+                block_output);
+            CUDA_CHECK(cudaGetLastError());
+        };
+
         if (options_.preconditioner == "amg_fd") {
-            amg_preconditioner.solve(input, output, dim);
+            apply_amg(input, output);
+        } else if (options_.preconditioner == "bus_block_jacobi_fd") {
+            if (options_.preconditioner_combine == "single") {
+                apply_block(input, output);
+            } else if (options_.preconditioner_combine == "additive") {
+                apply_block(input, d_perm_rhs.data());
+                apply_amg(input, d_perm_x.data());
+                add_vectors_kernel<<<vector_grid, kBlockSize>>>(
+                    dim, d_perm_rhs.data(), d_perm_x.data(), output);
+                CUDA_CHECK(cudaGetLastError());
+            } else if (options_.preconditioner_combine == "block_then_amg") {
+                apply_block(input, d_perm_rhs.data());
+                apply_jv(d_perm_rhs.data(), d_perm_x.data());
+                subtract_kernel<<<vector_grid, kBlockSize>>>(
+                    dim, input, d_perm_x.data(), d_ax.data());
+                CUDA_CHECK(cudaGetLastError());
+                apply_amg(d_ax.data(), d_perm_x.data());
+                add_vectors_kernel<<<vector_grid, kBlockSize>>>(
+                    dim, d_perm_rhs.data(), d_perm_x.data(), output);
+                CUDA_CHECK(cudaGetLastError());
+            } else if (options_.preconditioner_combine == "amg_then_block") {
+                apply_amg(input, d_perm_rhs.data());
+                apply_jv(d_perm_rhs.data(), d_perm_x.data());
+                subtract_kernel<<<vector_grid, kBlockSize>>>(
+                    dim, input, d_perm_x.data(), d_ax.data());
+                CUDA_CHECK(cudaGetLastError());
+                apply_block(d_ax.data(), d_perm_x.data());
+                add_vectors_kernel<<<vector_grid, kBlockSize>>>(
+                    dim, d_perm_rhs.data(), d_perm_x.data(), output);
+                CUDA_CHECK(cudaGetLastError());
+            }
         } else {
             CUBLAS_CHECK(cublasDcopy(blas.get(), dim, input, 1, output, 1));
         }
@@ -966,6 +1430,13 @@ void JfnkLinearSolveAmgx::run(IterationContext& ctx)
     double residual_norm = 0.0;
     CUBLAS_CHECK(cublasDnrm2(blas.get(), dim, d_r.data(), 1, &residual_norm));
     stats_.last_estimated_error = residual_norm / rhs_norm;
+    append_residual_trace(options_,
+                          ctx.iter,
+                          "linear_initial",
+                          stats_.last_iterations,
+                          residual_norm,
+                          stats_.last_estimated_error,
+                          rhs_norm);
     if (residual_norm <= atol) {
         stats_.last_success = true;
         CUBLAS_CHECK(cublasDcopy(blas.get(), dim, d_x.data(), 1, storage_.d_dx.data(), 1));
@@ -1042,6 +1513,13 @@ void JfnkLinearSolveAmgx::run(IterationContext& ctx)
             best_y = y;
             best_k = j + 1;
             stats_.last_estimated_error = residual_estimate / rhs_norm;
+            append_residual_trace(options_,
+                                  ctx.iter,
+                                  "linear_estimate",
+                                  stats_.last_iterations,
+                                  residual_estimate,
+                                  stats_.last_estimated_error,
+                                  rhs_norm);
 
             if (stats_.last_estimated_error <= options_.linear_tolerance ||
                 happy_breakdown) {
@@ -1076,6 +1554,13 @@ void JfnkLinearSolveAmgx::run(IterationContext& ctx)
         CUDA_CHECK(cudaGetLastError());
         CUBLAS_CHECK(cublasDnrm2(blas.get(), dim, d_r.data(), 1, &residual_norm));
         stats_.last_estimated_error = residual_norm / rhs_norm;
+        append_residual_trace(options_,
+                              ctx.iter,
+                              "linear_restart",
+                              stats_.last_iterations,
+                              residual_norm,
+                              stats_.last_estimated_error,
+                              rhs_norm);
     }
 
     if (!stats_.last_success && stats_.last_failure_reason.empty()) {

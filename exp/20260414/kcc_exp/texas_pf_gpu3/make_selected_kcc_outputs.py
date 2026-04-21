@@ -8,17 +8,23 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
-from matplotlib.ticker import PercentFormatter
 import numpy as np
 
 
-ROOT = Path("/workspace/exp/20260414/kcc_exp/texas_pf_gpu3")
+ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 TABLES = ROOT / "tables"
 FIGURES = ROOT / "figures"
 REPORT = ROOT / "KCC_SELECTED_5CASE_RESULTS.md"
 DEFAULT_DPI = 600
-BASE_FONT_SIZE = 14
+BASE_FONT_SIZE = 21
+FIGURE_PIXEL_SIZES = {
+    "base_florida_pypower_newtonpf_pie.png": (4488, 3785),
+    "cuda_edge_analyze_solve_stack_by_bus.png": (9152, 4861),
+}
+COMPRESSED_AXIS_START = 20.0
+COMPRESSED_AXIS_END = 70.0
+COMPRESSED_AXIS_SCALE = 0.2
 
 ALL_CASES = [
     "case_ACTIVSg200",
@@ -76,12 +82,28 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def save_figure(fig: plt.Figure, path: Path, *, dpi: int, pad: float = 0.4, rect: tuple[float, float, float, float] | None = None) -> None:
-    if rect is None:
-        fig.tight_layout(pad=pad)
-    else:
-        fig.tight_layout(pad=pad, rect=rect)
-    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+def figure_size_inches(path: Path, dpi: int) -> tuple[float, float]:
+    width_px, height_px = FIGURE_PIXEL_SIZES[path.name]
+    return width_px / dpi, height_px / dpi
+
+
+def save_figure(
+    fig: plt.Figure,
+    path: Path,
+    *,
+    dpi: int,
+    pad: float = 0.4,
+    rect: tuple[float, float, float, float] | None = None,
+    use_tight_layout: bool = True,
+) -> None:
+    if path.name in FIGURE_PIXEL_SIZES:
+        fig.set_size_inches(*figure_size_inches(path, dpi), forward=True)
+    if use_tight_layout:
+        if rect is None:
+            fig.tight_layout(pad=pad)
+        else:
+            fig.tight_layout(pad=pad, rect=rect)
+    fig.savefig(path, dpi=dpi)
     plt.close(fig)
 
 
@@ -91,7 +113,31 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 
 
 def read_metadata(case: str) -> dict[str, Any]:
-    return json.loads((ROOT / "cupf_dumps" / case / "metadata.json").read_text(encoding="utf-8"))
+    path = ROOT / "cupf_dumps" / case / "metadata.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    in_case_sizes = False
+    for line in (ROOT / "KCC_EXTRACTED_RESULTS.md").read_text(encoding="utf-8").splitlines():
+        if line == "## Case Sizes":
+            in_case_sizes = True
+            continue
+        if in_case_sizes and line.startswith("## "):
+            break
+        if not in_case_sizes or not line.startswith("| "):
+            continue
+
+        parts = [part.strip() for part in line.strip("|").split("|")]
+        if len(parts) != 5 or parts[0] in {"case", "---"} or parts[0] != case:
+            continue
+        return {
+            "n_bus": int(parts[1]),
+            "ybus_nnz": int(parts[2]),
+            "n_pv": int(parts[3]),
+            "n_pq": int(parts[4]),
+        }
+
+    raise FileNotFoundError(f"metadata not found for {case}")
 
 
 def as_float(value: Any) -> float | None:
@@ -196,25 +242,36 @@ def make_pypower_pie(dpi: int) -> Path:
     FIGURES.mkdir(parents=True, exist_ok=True)
     path = FIGURES / "base_florida_pypower_newtonpf_pie.png"
 
-    fig, ax = plt.subplots(figsize=(7.2, 6.2), dpi=dpi)
+    fig = plt.figure(figsize=figure_size_inches(path, dpi), dpi=dpi)
+    ax = fig.add_axes([0.03, 0.08, 0.52, 0.84])
     colors = [PASTEL["blue"], PASTEL["mint"], PASTEL["peach"], PASTEL["pink"]]
-    wedges, texts, autotexts = ax.pie(
+    wedges, _, autotexts = ax.pie(
         values,
-        labels=names,
+        labels=None,
         colors=colors,
         autopct=lambda pct: f"{pct:.1f}%" if pct >= 2.0 else "",
         startangle=90,
         counterclock=False,
-        pctdistance=0.58,
-        labeldistance=1.28,
-        radius=0.72,
+        pctdistance=0.62,
+        radius=0.86,
         wedgeprops={"edgecolor": "white", "linewidth": 1.4},
     )
-    for text in [*texts, *autotexts]:
+    for text in autotexts:
         text.set_fontsize(BASE_FONT_SIZE)
         text.set_color("#263238")
+    legend_ax = fig.add_axes([0.56, 0.12, 0.42, 0.76])
+    legend_ax.axis("off")
+    legend_ax.legend(
+        wedges,
+        names,
+        loc="center left",
+        frameon=False,
+        fontsize=BASE_FONT_SIZE,
+        handlelength=1.6,
+        labelspacing=1.2,
+    )
     ax.axis("equal")
-    save_figure(fig, path, dpi=dpi, pad=0.4)
+    save_figure(fig, path, dpi=dpi, use_tight_layout=False)
     return path
 
 
@@ -274,21 +331,48 @@ def make_analyze_solve_stack(dpi: int) -> Path:
     solve_components = normalize_to_percent(solve_components, totals)
 
     path = FIGURES / "cuda_edge_analyze_solve_stack_by_bus.png"
-    fig, ax = plt.subplots(figsize=(15.6, 8.2), dpi=dpi)
+    fig, ax = plt.subplots(figsize=figure_size_inches(path, dpi), dpi=dpi)
 
-    bottom = np.zeros(len(cases))
+    def compress_percent(values: np.ndarray | float) -> np.ndarray | float:
+        values_array = np.asarray(values, dtype=float)
+        compressed = np.where(
+            values_array <= COMPRESSED_AXIS_START,
+            values_array,
+            np.where(
+                values_array <= COMPRESSED_AXIS_END,
+                COMPRESSED_AXIS_START + (values_array - COMPRESSED_AXIS_START) * COMPRESSED_AXIS_SCALE,
+                (
+                    COMPRESSED_AXIS_START
+                    + (COMPRESSED_AXIS_END - COMPRESSED_AXIS_START) * COMPRESSED_AXIS_SCALE
+                    + (values_array - COMPRESSED_AXIS_END)
+                ),
+            ),
+        )
+        if np.isscalar(values):
+            return float(compressed)
+        return compressed
+
+    bottom_raw = np.zeros(len(cases))
     for label, values, color in analyze_components:
-        ax.bar(x, values, 0.62, bottom=bottom, label=label, color=color, edgecolor="white", linewidth=0.8)
-        bottom += np.array(values)
+        values_array = np.array(values)
+        top_raw = bottom_raw + values_array
+        bottom = compress_percent(bottom_raw)
+        top = compress_percent(top_raw)
+        ax.bar(x, top - bottom, 0.62, bottom=bottom, label=label, color=color, edgecolor="white", linewidth=0.8)
+        bottom_raw = top_raw
 
-    analyze_top = bottom.copy()
-    bottom = np.zeros(len(cases))
+    analyze_top = compress_percent(bottom_raw)
+    bottom_raw = np.zeros(len(cases))
     for _, values, _ in analyze_components:
-        bottom += np.array(values)
+        bottom_raw += np.array(values)
     for label, values, color in solve_components:
+        values_array = np.array(values)
+        top_raw = bottom_raw + values_array
+        bottom = compress_percent(bottom_raw)
+        top = compress_percent(top_raw)
         ax.bar(
             x,
-            values,
+            top - bottom,
             0.62,
             bottom=bottom,
             label=label,
@@ -297,17 +381,42 @@ def make_analyze_solve_stack(dpi: int) -> Path:
             linewidth=0.7,
             hatch="//",
         )
-        bottom += np.array(values)
+        bottom_raw = top_raw
 
     for xpos, y in zip(x, analyze_top):
         ax.hlines(y, xpos - 0.31, xpos + 0.31, colors="#455a64", linewidth=1.5)
 
+    compressed_start = compress_percent(COMPRESSED_AXIS_START)
+    compressed_end = compress_percent(COMPRESSED_AXIS_END)
+    ax.axhspan(compressed_start, compressed_end, color="#eceff1", alpha=0.35, zorder=0)
+    ax.hlines(
+        [compressed_start, compressed_end],
+        x[0] - 0.75,
+        x[-1] + 0.75,
+        colors="#90a4ae",
+        linestyles=(0, (4, 4)),
+        linewidth=1.0,
+        alpha=0.8,
+    )
+    ax.text(
+        x[-1] + 0.72,
+        (compressed_start + compressed_end) / 2.0,
+        "20-70% compressed",
+        ha="right",
+        va="center",
+        fontsize=BASE_FONT_SIZE * 0.82,
+        color="#546e7a",
+    )
+
     ax.set_xticks(x)
     ax.set_xticklabels([str(metadata[case]["n_bus"]) for case in cases], rotation=35, ha="right", fontsize=BASE_FONT_SIZE)
+    ax.set_xlim(x[0] - 0.75, x[-1] + 0.75)
     ax.set_xlabel("Buses", fontsize=BASE_FONT_SIZE)
     ax.set_ylabel("Percent (%)", fontsize=BASE_FONT_SIZE, labelpad=6)
-    ax.set_ylim(0, 100)
-    ax.yaxis.set_major_formatter(PercentFormatter(xmax=100))
+    raw_ticks = [0, 10, 20, 70, 80, 90, 100]
+    ax.set_yticks([compress_percent(tick) for tick in raw_ticks])
+    ax.set_yticklabels([f"{tick}%" for tick in raw_ticks], fontsize=BASE_FONT_SIZE)
+    ax.set_ylim(0, compress_percent(100.0))
     ax.grid(axis="y", alpha=0.22, linewidth=0.8)
     ax.spines[["top", "right"]].set_visible(False)
     ax.tick_params(axis="y", labelsize=BASE_FONT_SIZE)
@@ -325,7 +434,7 @@ def make_analyze_solve_stack(dpi: int) -> Path:
         handlelength=2.0,
         columnspacing=1.5,
     )
-    save_figure(fig, path, dpi=dpi, pad=0.4, rect=(0.025, 0.0, 1.0, 0.86))
+    save_figure(fig, path, dpi=dpi, pad=0.4, rect=(0.07, 0.02, 0.995, 0.84))
     return path
 
 
@@ -445,7 +554,7 @@ def write_report(pie_path: Path, stack_path: Path) -> None:
     lines.append(f"- Base Florida PYPOWER operator pie: `{pie_path.relative_to(ROOT)}`")
     lines.append(f"- CUDA edge analyze/solve stack by bus count: `{stack_path.relative_to(ROOT)}`")
     lines.append("- The pie chart uses PYPOWER `newtonpf` operator timing and excludes `init_index`.")
-    lines.append("- The stacked graph uses combined analyze+solve percentages on the y-axis; solve components use hatching and a separator line marks the analyze/solve boundary.")
+    lines.append("- The stacked graph uses combined analyze+solve percentages on the y-axis; the 20-70% y-axis section is compressed, solve components use hatching, and a separator line marks the analyze/solve boundary.")
     lines.append("")
     lines.append(f"![Base Florida PYPOWER operator pie]({pie_path.relative_to(ROOT)})")
     lines.append("")

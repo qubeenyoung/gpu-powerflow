@@ -30,13 +30,13 @@ namespace {
 
 constexpr int32_t kBlock = 256;
 
-__global__ void negate_rhs_kernel(const float* __restrict__ F,
+__global__ void negate_rhs_kernel(const double* __restrict__ F,
                                   float* __restrict__ rhs,
                                   int32_t n)
 {
     const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid < n) {
-        rhs[tid] = -F[tid];
+        rhs[tid] = -static_cast<float>(F[tid]);
     }
 }
 
@@ -71,6 +71,7 @@ void cudssLuDestroy(CudssLuWorkspace& ws)
 
 void cudssLuAnalyze(CudssLuWorkspace& ws,
                     int32_t dim,
+                    int32_t batch_size,
                     int64_t nnz,
                     const int32_t* row_ptr,
                     const int32_t* col_idx,
@@ -78,7 +79,7 @@ void cudssLuAnalyze(CudssLuWorkspace& ws,
                     float* dx,
                     cudaStream_t stream)
 {
-    if (dim <= 0 || nnz <= 0) {
+    if (dim <= 0 || batch_size <= 0 || nnz <= 0) {
         throw std::invalid_argument("cudssLuAnalyze: bad matrix size");
     }
     if (row_ptr == nullptr || col_idx == nullptr || values == nullptr || dx == nullptr) {
@@ -88,15 +89,28 @@ void cudssLuAnalyze(CudssLuWorkspace& ws,
     cudssLuDestroy(ws);
 
     ws.dim = dim;
+    ws.batch_size = batch_size;
     ws.nnz = nnz;
     ws.dx = dx;
 
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.rhs),
-                          static_cast<std::size_t>(dim) * sizeof(float)));
+                          static_cast<std::size_t>(dim) *
+                              static_cast<std::size_t>(batch_size) * sizeof(float)));
 
     CUDSS_CHECK(cudssCreate(&ws.handle));
     CUDSS_CHECK(cudssSetStream(ws.handle, stream));
     CUDSS_CHECK(cudssConfigCreate(&ws.config));
+    CUDSS_CHECK(cudssConfigSet(
+        ws.config,
+        CUDSS_CONFIG_UBATCH_SIZE,
+        &ws.batch_size,
+        sizeof(ws.batch_size)));
+    int ubatch_index = -1;
+    CUDSS_CHECK(cudssConfigSet(
+        ws.config,
+        CUDSS_CONFIG_UBATCH_INDEX,
+        &ubatch_index,
+        sizeof(ubatch_index)));
     CUDSS_CHECK(cudssDataCreate(ws.handle, &ws.data));
 
     CUDSS_CHECK(cudssMatrixCreateCsr(
@@ -162,7 +176,7 @@ void cudssLuFactorize(CudssLuWorkspace& ws, cudaStream_t stream)
 }
 
 void cudssLuSolve(CudssLuWorkspace& ws,
-                  const float* F,
+                  const double* F,
                   cudaStream_t stream)
 {
     if (ws.handle == nullptr || ws.B == nullptr || ws.X == nullptr) {
@@ -175,8 +189,9 @@ void cudssLuSolve(CudssLuWorkspace& ws,
         throw std::invalid_argument("cudssLuSolve: F is null");
     }
 
-    const int32_t grid = (ws.dim + kBlock - 1) / kBlock;
-    negate_rhs_kernel<<<grid, kBlock, 0, stream>>>(F, ws.rhs, ws.dim);
+    const int32_t total = ws.dim * ws.batch_size;
+    const int32_t grid = (total + kBlock - 1) / kBlock;
+    negate_rhs_kernel<<<grid, kBlock, 0, stream>>>(F, ws.rhs, total);
     CUDA_CHECK(cudaGetLastError());
 
     CUDSS_CHECK(cudssSetStream(ws.handle, stream));

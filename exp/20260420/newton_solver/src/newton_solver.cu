@@ -49,10 +49,6 @@ void newtonDestroy(NewtonWorkspace& ws)
     if (ws.sbus_im != nullptr) cudaFree(ws.sbus_im);
     if (ws.v_re != nullptr) cudaFree(ws.v_re);
     if (ws.v_im != nullptr) cudaFree(ws.v_im);
-    if (ws.va != nullptr) cudaFree(ws.va);
-    if (ws.vm != nullptr) cudaFree(ws.vm);
-    if (ws.v_norm_re != nullptr) cudaFree(ws.v_norm_re);
-    if (ws.v_norm_im != nullptr) cudaFree(ws.v_norm_im);
     if (ws.F != nullptr) cudaFree(ws.F);
     if (ws.dx != nullptr) cudaFree(ws.dx);
 
@@ -66,6 +62,7 @@ void newtonAnalyze(NewtonWorkspace& ws,
                    int32_t n_pv,
                    const int32_t* pq,
                    int32_t n_pq,
+                   int32_t batch_size,
                    cudaStream_t stream)
 {
     if (host_ybus.n_bus <= 0 || host_ybus.n_edges <= 0 ||
@@ -78,7 +75,7 @@ void newtonAnalyze(NewtonWorkspace& ws,
         device_ybus.row_ptr == nullptr || device_ybus.real == nullptr || device_ybus.imag == nullptr) {
         throw std::invalid_argument("newtonAnalyze: bad device Ybus graph");
     }
-    if (n_pv < 0 || n_pq < 0 || n_pv + n_pq <= 0) {
+    if (n_pv < 0 || n_pq < 0 || n_pv + n_pq <= 0 || batch_size <= 0) {
         throw std::invalid_argument("newtonAnalyze: bad pv/pq sizes");
     }
     if ((n_pv > 0 && pv == nullptr) || (n_pq > 0 && pq == nullptr)) {
@@ -94,6 +91,7 @@ void newtonAnalyze(NewtonWorkspace& ws,
     ws.n_pv = n_pv;
     ws.n_pq = n_pq;
     ws.n_pvpq = n_pv + n_pq;
+    ws.batch_size = batch_size;
     ws.dim = build.pattern.dim;
     ws.jac_nnz = build.pattern.nnz;
     ws.ybus = device_ybus;
@@ -111,7 +109,9 @@ void newtonAnalyze(NewtonWorkspace& ws,
 
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.J_row_ptr), static_cast<std::size_t>(ws.dim + 1) * sizeof(int32_t)));
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.J_col_idx), static_cast<std::size_t>(ws.jac_nnz) * sizeof(int32_t)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.J_values), static_cast<std::size_t>(ws.jac_nnz) * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.J_values),
+                          static_cast<std::size_t>(ws.batch_size) *
+                              static_cast<std::size_t>(ws.jac_nnz) * sizeof(float)));
     CUDA_CHECK(cudaMemcpyAsync(ws.J_row_ptr, build.pattern.row_ptr.data(), static_cast<std::size_t>(ws.dim + 1) * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
     CUDA_CHECK(cudaMemcpyAsync(ws.J_col_idx, build.pattern.col_idx.data(), static_cast<std::size_t>(ws.jac_nnz) * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
 
@@ -133,20 +133,23 @@ void newtonAnalyze(NewtonWorkspace& ws,
     CUDA_CHECK(cudaMemcpyAsync(ws.diagJ21, build.map.diagJ21.data(), static_cast<std::size_t>(ws.n_bus) * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
     CUDA_CHECK(cudaMemcpyAsync(ws.diagJ22, build.map.diagJ22.data(), static_cast<std::size_t>(ws.n_bus) * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
 
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.sbus_re), static_cast<std::size_t>(ws.n_bus) * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.sbus_im), static_cast<std::size_t>(ws.n_bus) * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.v_re), static_cast<std::size_t>(ws.n_bus) * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.v_im), static_cast<std::size_t>(ws.n_bus) * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.va), static_cast<std::size_t>(ws.n_bus) * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.vm), static_cast<std::size_t>(ws.n_bus) * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.v_norm_re), static_cast<std::size_t>(ws.n_bus) * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.v_norm_im), static_cast<std::size_t>(ws.n_bus) * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.F), static_cast<std::size_t>(ws.dim) * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.dx), static_cast<std::size_t>(ws.dim) * sizeof(float)));
+    const std::size_t bus_count =
+        static_cast<std::size_t>(ws.batch_size) * static_cast<std::size_t>(ws.n_bus);
+    const std::size_t dim_count =
+        static_cast<std::size_t>(ws.batch_size) * static_cast<std::size_t>(ws.dim);
+    const std::size_t jac_count =
+        static_cast<std::size_t>(ws.batch_size) * static_cast<std::size_t>(ws.jac_nnz);
 
-    CUDA_CHECK(cudaMemsetAsync(ws.J_values, 0, static_cast<std::size_t>(ws.jac_nnz) * sizeof(float), stream));
-    CUDA_CHECK(cudaMemsetAsync(ws.F, 0, static_cast<std::size_t>(ws.dim) * sizeof(float), stream));
-    CUDA_CHECK(cudaMemsetAsync(ws.dx, 0, static_cast<std::size_t>(ws.dim) * sizeof(float), stream));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.sbus_re), bus_count * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.sbus_im), bus_count * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.v_re), bus_count * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.v_im), bus_count * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.F), dim_count * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ws.dx), dim_count * sizeof(float)));
+
+    CUDA_CHECK(cudaMemsetAsync(ws.J_values, 0, jac_count * sizeof(float), stream));
+    CUDA_CHECK(cudaMemsetAsync(ws.F, 0, dim_count * sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(ws.dx, 0, dim_count * sizeof(float), stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     exp20260420::mismatch::mismatchAnalyze(
@@ -156,11 +159,13 @@ void newtonAnalyze(NewtonWorkspace& ws,
         n_pv,
         ws.pq,
         n_pq,
+        ws.batch_size,
         stream);
 
     exp20260420::linear_solver::cudssLuAnalyze(
         ws.lu,
         ws.dim,
+        ws.batch_size,
         ws.jac_nnz,
         ws.J_row_ptr,
         ws.J_col_idx,
@@ -172,11 +177,11 @@ void newtonAnalyze(NewtonWorkspace& ws,
 NewtonResult newtonSolve(NewtonWorkspace& ws,
                          const float* sbus_re,
                          const float* sbus_im,
-                         const float* v0_re,
-                         const float* v0_im,
+                         const double* v0_re,
+                         const double* v0_im,
                          const NewtonOptions& options,
-                         float* out_v_re,
-                         float* out_v_im,
+                         double* out_v_re,
+                         double* out_v_im,
                          cudaStream_t stream)
 {
     if (ws.n_bus <= 0 || ws.dim <= 0 || ws.J_values == nullptr) {
@@ -192,19 +197,25 @@ NewtonResult newtonSolve(NewtonWorkspace& ws,
         throw std::invalid_argument("newtonSolve: output voltage pointers must both be null or both be non-null");
     }
 
-    CUDA_CHECK(cudaMemcpyAsync(ws.sbus_re, sbus_re, static_cast<std::size_t>(ws.n_bus) * sizeof(float), cudaMemcpyDeviceToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(ws.sbus_im, sbus_im, static_cast<std::size_t>(ws.n_bus) * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+    if (options.batch_size != ws.batch_size) {
+        throw std::invalid_argument("newtonSolve: options.batch_size must match analyze batch size");
+    }
+
+    const std::size_t bus_count =
+        static_cast<std::size_t>(ws.n_bus) * static_cast<std::size_t>(ws.batch_size);
+    const std::size_t jac_count =
+        static_cast<std::size_t>(ws.jac_nnz) * static_cast<std::size_t>(ws.batch_size);
+
+    CUDA_CHECK(cudaMemcpyAsync(ws.sbus_re, sbus_re, bus_count * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(ws.sbus_im, sbus_im, bus_count * sizeof(float), cudaMemcpyDeviceToDevice, stream));
 
     exp20260420::voltage_update::init_voltage(
         v0_re,
         v0_im,
         ws.v_re,
         ws.v_im,
-        ws.va,
-        ws.vm,
-        ws.v_norm_re,
-        ws.v_norm_im,
         ws.n_bus,
+        ws.batch_size,
         stream);
 
     NewtonResult result;
@@ -226,15 +237,14 @@ NewtonResult newtonSolve(NewtonWorkspace& ws,
             break;
         }
 
-        CUDA_CHECK(cudaMemsetAsync(ws.J_values, 0, static_cast<std::size_t>(ws.jac_nnz) * sizeof(float), stream));
+        CUDA_CHECK(cudaMemsetAsync(ws.J_values, 0, jac_count * sizeof(float), stream));
 
-        const int32_t edge_grid = (ws.n_edges + kBlock - 1) / kBlock;
-        fill_jacobian_edge<<<edge_grid, kBlock, 0, stream>>>(
+        const dim3 edge_grid((ws.n_edges + kBlock - 1) / kBlock, ws.batch_size);
+        fill_jacobian_edge_batch<<<edge_grid, kBlock, 0, stream>>>(
             ws.ybus,
             ws.v_re,
             ws.v_im,
-            ws.v_norm_re,
-            ws.v_norm_im,
+            ws.batch_size,
             ws.offdiagJ11,
             ws.offdiagJ21,
             ws.offdiagJ12,
@@ -243,6 +253,7 @@ NewtonResult newtonSolve(NewtonWorkspace& ws,
             ws.diagJ21,
             ws.diagJ12,
             ws.diagJ22,
+            ws.jac_nnz,
             ws.J_values);
         CUDA_CHECK(cudaGetLastError());
 
@@ -252,22 +263,19 @@ NewtonResult newtonSolve(NewtonWorkspace& ws,
         exp20260420::voltage_update::update_voltage(
             ws.v_re,
             ws.v_im,
-            ws.va,
-            ws.vm,
-            ws.v_norm_re,
-            ws.v_norm_im,
             ws.dx,
             ws.pvpq,
             ws.n_pvpq,
             ws.pq,
             ws.n_pq,
             ws.n_bus,
+            ws.batch_size,
             stream);
     }
 
     if (out_v_re != nullptr) {
-        CUDA_CHECK(cudaMemcpyAsync(out_v_re, ws.v_re, static_cast<std::size_t>(ws.n_bus) * sizeof(float), cudaMemcpyDeviceToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(out_v_im, ws.v_im, static_cast<std::size_t>(ws.n_bus) * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(out_v_re, ws.v_re, bus_count * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(out_v_im, ws.v_im, bus_count * sizeof(double), cudaMemcpyDeviceToDevice, stream));
     }
 
     CUDA_CHECK(cudaStreamSynchronize(stream));

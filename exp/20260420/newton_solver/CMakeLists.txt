@@ -56,3 +56,15 @@ target_link_libraries(exp20260420_newton_solver PUBLIC
 set_target_properties(exp20260420_newton_solver PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
 )
+
+add_executable(exp20260420_newton_solver_probe
+  src/newton_solver_probe.cu
+)
+
+target_link_libraries(exp20260420_newton_solver_probe PRIVATE
+  exp20260420_newton_solver
+)
+
+set_target_properties(exp20260420_newton_solver_probe PROPERTIES
+  CUDA_SEPARABLE_COMPILATION ON
+)

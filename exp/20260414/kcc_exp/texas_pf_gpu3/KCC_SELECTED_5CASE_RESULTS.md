@@ -57,7 +57,7 @@
 - Base Florida PYPOWER operator pie: `figures/base_florida_pypower_newtonpf_pie.png`
 - CUDA edge analyze/solve stack by bus count: `figures/cuda_edge_analyze_solve_stack_by_bus.png`
 - The pie chart uses PYPOWER `newtonpf` operator timing and excludes `init_index`.
-- The stacked graph uses combined analyze+solve percentages on the y-axis; solve components use hatching and a separator line marks the analyze/solve boundary.
+- The stacked graph uses combined analyze+solve percentages on the y-axis; the 20-70% y-axis section is compressed, solve components use hatching, and a separator line marks the analyze/solve boundary.
 
 ![Base Florida PYPOWER operator pie](figures/base_florida_pypower_newtonpf_pie.png)
 

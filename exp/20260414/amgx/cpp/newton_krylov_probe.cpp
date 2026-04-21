@@ -38,6 +38,8 @@ struct CliOptions {
     JfnkOptions jfnk;
     bool continue_on_linear_failure = false;
     bool list_cases = false;
+    std::filesystem::path residual_trace_csv;
+    std::filesystem::path jacobian_error_csv;
 };
 
 struct CaseResult {
@@ -85,11 +87,14 @@ void print_usage(const char* argv0)
         << " [--case NAME] [--cases NAME...] [--case-dir PATH]"
         << " [--tolerance FLOAT] [--max-iter INT]"
         << " [--solver fgmres|gmres_none]"
-        << " [--preconditioner none|amg_fd]"
+        << " [--preconditioner none|amg_fd|bus_block_jacobi_fd]"
+        << " [--amg-permutation none|bus_local|pq_interleaved]"
+        << " [--preconditioner-combine single|additive|block_then_amg|amg_then_block]"
         << " [--linear-tol FLOAT] [--inner-max-iter INT] [--gmres-restart INT]"
         << " [--ilut-drop-tol FLOAT] [--ilut-fill-factor INT] [--ilu-pivot-tol FLOAT]"
         << " [--fd-eps auto|FLOAT] [--continue-on-linear-failure]"
-        << " [--output-csv PATH] [--list-cases]\n";
+        << " [--output-csv PATH] [--trace-residuals PATH] [--jacobian-error-csv PATH]"
+        << " [--list-cases]\n";
 }
 
 void add_case(CliOptions& options, const std::string& case_name, bool& custom_cases)
@@ -135,6 +140,10 @@ CliOptions parse_args(int argc, char** argv)
             options.jfnk.solver = argv[++i];
         } else if (arg == "--preconditioner" && i + 1 < argc) {
             options.jfnk.preconditioner = argv[++i];
+        } else if (arg == "--amg-permutation" && i + 1 < argc) {
+            options.jfnk.permutation = argv[++i];
+        } else if (arg == "--preconditioner-combine" && i + 1 < argc) {
+            options.jfnk.preconditioner_combine = argv[++i];
         } else if (arg == "--linear-tol" && i + 1 < argc) {
             options.jfnk.linear_tolerance = std::stod(argv[++i]);
         } else if (arg == "--inner-max-iter" && i + 1 < argc) {
@@ -159,6 +168,10 @@ CliOptions parse_args(int argc, char** argv)
             options.continue_on_linear_failure = true;
         } else if (arg == "--output-csv" && i + 1 < argc) {
             options.output_csv = argv[++i];
+        } else if (arg == "--trace-residuals" && i + 1 < argc) {
+            options.residual_trace_csv = argv[++i];
+        } else if (arg == "--jacobian-error-csv" && i + 1 < argc) {
+            options.jacobian_error_csv = argv[++i];
         } else if (arg == "--list-cases") {
             options.list_cases = true;
         } else if (arg == "-h" || arg == "--help") {
@@ -180,8 +193,27 @@ CliOptions parse_args(int argc, char** argv)
         throw std::runtime_error("--solver must be fgmres or gmres_none");
     }
     if (options.jfnk.preconditioner != "none" &&
-        options.jfnk.preconditioner != "amg_fd") {
-        throw std::runtime_error("--preconditioner must be none or amg_fd");
+        options.jfnk.preconditioner != "amg_fd" &&
+        options.jfnk.preconditioner != "bus_block_jacobi_fd") {
+        throw std::runtime_error("--preconditioner must be none, amg_fd, or bus_block_jacobi_fd");
+    }
+    if (options.jfnk.permutation != "none" &&
+        options.jfnk.permutation != "bus_local" &&
+        options.jfnk.permutation != "pq_interleaved") {
+        throw std::runtime_error("--amg-permutation must be none, bus_local, or pq_interleaved");
+    }
+    if (options.jfnk.permutation != "none" && options.jfnk.preconditioner != "amg_fd") {
+        throw std::runtime_error("--amg-permutation requires --preconditioner amg_fd");
+    }
+    if (options.jfnk.preconditioner_combine != "single" &&
+        options.jfnk.preconditioner_combine != "additive" &&
+        options.jfnk.preconditioner_combine != "block_then_amg" &&
+        options.jfnk.preconditioner_combine != "amg_then_block") {
+        throw std::runtime_error("--preconditioner-combine must be single, additive, block_then_amg, or amg_then_block");
+    }
+    if (options.jfnk.preconditioner_combine != "single" &&
+        options.jfnk.preconditioner != "bus_block_jacobi_fd") {
+        throw std::runtime_error("--preconditioner-combine requires --preconditioner bus_block_jacobi_fd");
     }
     if (options.jfnk.linear_tolerance <= 0.0) {
         throw std::runtime_error("--linear-tol must be positive");
@@ -287,7 +319,17 @@ CaseResult run_case(const CliOptions& cli, const std::filesystem::path& case_dir
 
     CudaFp64Storage storage;
     CudaMismatchOpF64 mismatch(storage);
-    JfnkLinearSolveAmgx linear_solve(storage, cli.jfnk);
+    JfnkOptions jfnk_options = cli.jfnk;
+    if (!cli.residual_trace_csv.empty() || !cli.jacobian_error_csv.empty()) {
+        jfnk_options.residual_trace_case = case_data.case_name;
+    }
+    if (!cli.residual_trace_csv.empty()) {
+        jfnk_options.residual_trace_path = cli.residual_trace_csv.string();
+    }
+    if (!cli.jacobian_error_csv.empty()) {
+        jfnk_options.jacobian_error_path = cli.jacobian_error_csv.string();
+    }
+    JfnkLinearSolveAmgx linear_solve(storage, jfnk_options);
     CudaVoltageUpdateFp64 voltage_update(storage);
 
     storage.prepare(analyze_ctx);
@@ -315,6 +357,17 @@ CaseResult run_case(const CliOptions& cli, const std::filesystem::path& case_dir
         const auto mismatch_end = Clock::now();
         result.mismatch_sec += elapsed_sec(mismatch_start, mismatch_end);
         result.final_mismatch = iter_ctx.normF;
+        if (!cli.residual_trace_csv.empty()) {
+            std::ofstream trace(cli.residual_trace_csv, std::ios::app);
+            trace << std::scientific << std::setprecision(17)
+                  << case_data.case_name << ','
+                  << iter << ','
+                  << "outer_mismatch,"
+                  << 0 << ','
+                  << iter_ctx.normF << ','
+                  << "" << ','
+                  << "" << '\n';
+        }
 
         if (iter_ctx.converged) {
             result.converged = true;
@@ -364,6 +417,8 @@ void print_result(const CliOptions& cli, const CaseResult& result)
               << "case=" << result.case_name << ' '
               << "solver=" << cli.jfnk.solver << ' '
               << "preconditioner=" << cli.jfnk.preconditioner << ' '
+              << "amg_permutation=" << cli.jfnk.permutation << ' '
+              << "preconditioner_combine=" << cli.jfnk.preconditioner_combine << ' '
               << "converged=" << result.converged << ' '
               << "outer_iterations=" << result.outer_iterations << ' '
               << "final_mismatch=" << result.final_mismatch << ' '
@@ -394,7 +449,7 @@ void write_csv(const std::filesystem::path& output_path,
 
     out << "case,solver,converged,outer_iterations,final_mismatch,"
            "linear_tol,inner_max_iter,gmres_restart,fd_eps,preconditioner,total_jv_calls,total_inner_iterations,"
-           "max_inner_iterations,linear_failures,failure_reason,total_sec,mismatch_sec,"
+           "amg_permutation,preconditioner_combine,max_inner_iterations,linear_failures,failure_reason,total_sec,mismatch_sec,"
            "linear_solve_sec,preconditioner_setup_sec,voltage_update_sec,jv_sec,jv_mismatch_sec,jv_update_sec\n";
     out << std::boolalpha << std::scientific << std::setprecision(17);
     for (const CaseResult& result : results) {
@@ -410,6 +465,8 @@ void write_csv(const std::filesystem::path& output_path,
             << cli.jfnk.preconditioner << ','
             << result.total_jv_calls << ','
             << result.total_inner_iterations << ','
+            << cli.jfnk.permutation << ','
+            << cli.jfnk.preconditioner_combine << ','
             << result.max_inner_iterations << ','
             << result.linear_failures << ','
             << (result.failure_reason.empty() ? "none" : result.failure_reason) << ','
@@ -436,6 +493,34 @@ int main(int argc, char** argv)
         if (cli.list_cases) {
             list_cases(cli.dataset_root);
             return 0;
+        }
+
+        if (!cli.residual_trace_csv.empty()) {
+            const auto parent = cli.residual_trace_csv.parent_path();
+            if (!parent.empty()) {
+                std::filesystem::create_directories(parent);
+            }
+            std::ofstream trace(cli.residual_trace_csv);
+            if (!trace) {
+                throw std::runtime_error("Failed to open residual trace CSV: " +
+                                         cli.residual_trace_csv.string());
+            }
+            trace << "case,outer_iteration,phase,inner_iteration,residual_abs,residual_rel,rhs_norm\n";
+        }
+
+        if (!cli.jacobian_error_csv.empty()) {
+            const auto parent = cli.jacobian_error_csv.parent_path();
+            if (!parent.empty()) {
+                std::filesystem::create_directories(parent);
+            }
+            std::ofstream error_csv(cli.jacobian_error_csv);
+            if (!error_csv) {
+                throw std::runtime_error("Failed to open Jacobian error CSV: " +
+                                         cli.jacobian_error_csv.string());
+            }
+            error_csv << "case,outer_iteration,dim,nnz,fd_norm,exact_norm,diff_norm,"
+                         "relative_fro_error,max_abs_error,max_relative_error,"
+                         "max_abs_index,fd_at_max,exact_at_max\n";
         }
 
         const auto case_dirs = resolve_case_dirs(cli);
