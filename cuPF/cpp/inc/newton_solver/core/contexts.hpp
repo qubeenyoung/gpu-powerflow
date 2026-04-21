@@ -36,6 +36,19 @@ struct SolveContext {
     const std::complex<double>* sbus;    // 복소 전력 주입 (FP64)
     const std::complex<double>* V0;      // 초기 전압 벡터 (FP64)
     const NRConfig*             config;
+
+    // 기본 실행 모델은 batch다. single-case solve는 batch_size=1인 특수 케이스다.
+    int32_t batch_size = 1;
+
+    // sbus[b * sbus_stride + bus], V0[b * V0_stride + bus] 형태의 batch-major
+    // contiguous layout을 가정한다. 현재 single-case path에서는 stride=n_bus다.
+    int64_t sbus_stride = 0;
+    int64_t V0_stride   = 0;
+
+    // 향후 batch별 Ybus 값 경로를 위한 예약 필드다.
+    // 현재 구현 단계에서는 ybus->data를 batch 공통 값으로 사용한다.
+    bool    ybus_values_batched = false;
+    int64_t ybus_value_stride   = 0;
 };
 
 
@@ -57,4 +70,7 @@ struct IterationContext {
     int32_t iter      = 0;     // 현재 반복 횟수 (0-based)
     double  normF     = 0.0;   // 최신 mismatch 노름
     bool    converged = false;
+
+    bool    jacobian_updated_this_iter = false;  // linear solve가 본 J가 이번 iter에서 갱신됐는지
+    int32_t jacobian_age               = 0;      // modified schedule 진단용 stale iteration 수
 };

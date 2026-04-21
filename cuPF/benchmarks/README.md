@@ -88,6 +88,19 @@ python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --repeats 10
 ```
 
+CUDA Mixed batch runs can be measured with `--batch-size`. `B>1` is currently
+supported by cuPF CUDA Mixed profiles; CPU/PYPOWER profiles remain single-case
+benchmark paths.
+
+```bash
+python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
+  --cases case30_ieee case118_ieee \
+  --profiles cuda_edge cuda_vertex \
+  --batch-size 8 \
+  --warmup 1 \
+  --repeats 10
+```
+
 To compare cuDSS reordering algorithms, choose one of `DEFAULT`, `ALG_1`, or `ALG_2`.
 The selected value is passed to CMake and recorded in `manifest.json`:
 
@@ -96,6 +109,21 @@ python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --cases case30_ieee case118_ieee \
   --profiles cuda_edge cuda_vertex cuda_fp64_edge cuda_fp64_vertex \
   --cudss-reordering-alg ALG_1 \
+  --warmup 1 \
+  --repeats 10
+```
+
+To test cuDSS matching and pivot epsilon, use the matching flag plus an optional
+matching algorithm and epsilon value. Matching is only supported with the default
+reordering path:
+
+```bash
+python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
+  --cases case30_ieee case118_ieee \
+  --profiles cuda_edge cuda_vertex \
+  --cudss-use-matching \
+  --cudss-matching-alg ALG_5 \
+  --cudss-pivot-epsilon 1e-12 \
   --warmup 1 \
   --repeats 10
 ```
@@ -109,6 +137,21 @@ Results are written to `benchmarks/results/<run-name>/`:
 - `summary_operators.csv` / `aggregates_operators.csv`: operator timing results.
 - `SUMMARY.md`: human-readable result table.
 - `raw/<mode>/`: per-run timing payloads.
+
+When `--dump-residuals` or `--dump-newton-diagnostics` is enabled, the Python
+runner builds with `ENABLE_DUMP=ON` and writes dump files under
+`residuals/<mode>/<profile>/<case>/repeat_XX/`. CUDA cuDSS runs now include:
+
+- `residual_before_update_iterN.txt`: nonlinear residual at the start of iteration `N`.
+- `residual_solve_iterN.txt`: the `F_k` vector used for CUDA `J dx = F_k`.
+- `jacobian_row_ptr_iter0.txt` / `jacobian_col_idx_iter0.txt`: CSR structure.
+- `jacobian_values_used_iterN.txt`: CSR values actually passed to cuDSS at iteration `N`.
+- `dx_iterN.txt`: cuDSS solve result.
+- `linear_residual_iterN.txt`: CUDA `J_used dx - F_k`.
+- `linear_diagnostics.csv`: per-iteration norms, refactorization phase, Jacobian age, and cuDSS pivot counts when available.
+
+For CUDA Mixed `--batch-size > 1`, linear residual diagnostics currently record
+the batch 0 slice.
 
 ## Direct C++ Runner
 
@@ -127,6 +170,10 @@ cmake --build /workspace/cuPF/build/bench-end2end --target cupf_case_benchmark -
 /workspace/cuPF/build/bench-end2end/benchmarks/cupf_case_benchmark \
   --case-dir /workspace/datasets/cuPF_benchmark_dumps/case30_ieee \
   --profile cuda_mixed_edge \
+  --cudss-use-matching \
+  --cudss-matching-alg ALG_5 \
+  --cudss-pivot-epsilon 1e-12 \
+  --batch-size 1 \
   --warmup 1 \
   --repeats 10
 ```

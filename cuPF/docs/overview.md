@@ -65,6 +65,9 @@ for (각 시나리오) {
 }
 ```
 
+기본 실행 모델은 batch다. 기존 `solve()`는 `batch_size = 1`인 wrapper이고,
+CUDA Mixed 경로는 `solve_batch()`로 `B > 1` 실행을 지원한다.
+
 ---
 
 ## 실행 프로파일 (variants)
@@ -75,7 +78,8 @@ for (각 시나리오) {
 | CUDA FP64      | CUDA    | FP64    | Edge 또는 Vertex | cuDSS FP64      |
 | CUDA Mixed     | CUDA    | Mixed   | Edge 또는 Vertex | cuDSS FP32      |
 
-Mixed 프로파일은 고정 구성이다. Mismatch·Voltage는 FP64, Jacobian·Solve는 FP32를 사용한다.
+Mixed 프로파일은 고정 구성이다. `Va/Vm` 전압 상태, `V_re/V_im` cache, `Sbus`, `Ibus`, `F`는
+FP64로 유지하고, `Ybus/J/dx`는 FP32로 둔다.
 
 ---
 
@@ -87,8 +91,8 @@ for iter in range(max_iter):
     if converged: break
 
     jacobian.run(ctx)      # J.values ← Ybus 원소에서 scatter
-    linear_solve.run(ctx)  # J·dx = -F 풀기 (factorize + solve)
-    voltage_update.run(ctx) # Va, Vm에 dx 적용 → V 재구성
+    linear_solve.run(ctx)  # 선형계 풀이 (CUDA: J·dx = F)
+    voltage_update.run(ctx) # CUDA: Va, Vm에 dx를 빼고 V cache 재구성
 ```
 
 각 stage에 NVTX range와 ScopedTimer가 감싸져 있어 Nsight와 wall-clock 프로파일링을 동시에 지원한다.
@@ -104,4 +108,6 @@ for iter in range(max_iter):
 | [ops/README.md](ops/README.md) | 4-stage Op 인터페이스 및 구현체 |
 | [storage/README.md](storage/README.md) | IStorage 및 각 backend 스토리지 |
 | [variants/README.md](variants/README.md) | 실행 프로파일별 구성과 선택 기준 |
+| [gpu_batch_improvement_plan.md](gpu_batch_improvement_plan.md) | CUDA 기본 batch 실행과 kernel 개선 계획 |
+| [implementation/README.md](implementation/README.md) | CUDA batch refactor 단계별 구현 계획 |
 | [RULE.md](RULE.md) | 타이머·NVTX·Python 바인딩 규칙 |

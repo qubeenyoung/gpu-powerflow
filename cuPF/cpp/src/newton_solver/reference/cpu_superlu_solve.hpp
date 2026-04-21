@@ -16,8 +16,7 @@ class CpuLinearSolveSuperLU final : public ILinearSolveOp {
 public:
     explicit CpuLinearSolveSuperLU(IStorage& storage);
     void analyze(const AnalyzeContext& ctx) override;
-    void factorize(IterationContext& ctx) override;
-    void solve(IterationContext& ctx) override;
+    void run(IterationContext& ctx) override;
 
 private:
     CpuFp64Storage& storage_;

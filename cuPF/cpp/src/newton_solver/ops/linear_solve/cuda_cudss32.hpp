@@ -13,17 +13,22 @@
 // ---------------------------------------------------------------------------
 class CudaLinearSolveCuDSS32 final : public ILinearSolveOp {
 public:
-    explicit CudaLinearSolveCuDSS32(IStorage& storage);
+    explicit CudaLinearSolveCuDSS32(IStorage& storage,
+                                    CuDSSOptions cudss_options = {});
     ~CudaLinearSolveCuDSS32();
 
     void analyze(const AnalyzeContext& ctx) override;
-    void factorize(IterationContext& ctx) override;
-    void solve(IterationContext& ctx) override;
+    void run(IterationContext& ctx) override;
+    void factorize(IterationContext& ctx);
+    void solve(IterationContext& ctx);
+    void factorize_and_solve(IterationContext& ctx);
+
+    struct CuDSS32State;
 
 private:
     IStorage& storage_;
+    CuDSSOptions cudss_options_;
 
-    struct CuDSS32State;
     CuDSS32State* state_ = nullptr;
 };
 

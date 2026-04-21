@@ -8,7 +8,7 @@
 
 | 파일 | 역할 |
 |------|------|
-| `newton_solver_types.hpp` | 공개 타입: CSRView, NRConfig, BackendKind, ComputePolicy, NewtonOptions, NRResultF64 |
+| `newton_solver_types.hpp` | 공개 타입: CSRView, NRConfig, BackendKind, ComputePolicy, NewtonOptions, NRResultF64, NRBatchResultF64 |
 | `jacobian_types.hpp` | JacobianBuilderType, JacobianMaps, JacobianStructure |
 | `jacobian_builder.hpp/.cpp` | Ybus 희소 구조 분석 → 산포 맵 생성 |
 | `contexts.hpp` | AnalyzeContext, SolveContext, IterationContext |
@@ -26,7 +26,7 @@
 
 1. 생성자에서 `PlanBuilder::build(options)`로 `ExecutionPlan`을 조립한다.
 2. `analyze()`로 희소 구조를 분석하고 device-side 상태를 초기화한다.
-3. `solve()`로 NR 반복 루프를 실행하고 결과를 반환한다.
+3. `solve()`/`solve_batch()`로 NR 반복 루프를 실행하고 결과를 반환한다.
 
 ### 생명주기
 
@@ -35,16 +35,18 @@ NewtonSolver(options)    → PlanBuilder::build()  [ExecutionPlan 조립]
   analyze(ybus, ...)     → JacobianBuilder::analyze()
                          → IStorage::prepare()
                          → ILinearSolveOp::analyze()
-  solve(ybus, sbus, V0, ...)
+  solve(ybus, sbus, V0, ...) 또는 solve_batch(...)
                          → IStorage::upload()
                          → 반복 루프 (mismatch → jacobian → linear_solve → voltage_update)
-                         → IStorage::download_result()
+                         → IStorage::download_result() / download_batch_result()
 ```
 
 ### 주의사항
 
 - `analyze()`는 Ybus의 **희소 구조**가 바뀌지 않는 한 한 번만 호출하면 된다.
 - `solve()`는 Ybus 값(원소값)이 바뀌어도 호출할 수 있다. 구조가 같으면 된다.
+- 기본 실행 모델은 batch이고, 기존 `solve()`는 내부적으로 `solve_batch(B=1)` wrapper다.
+- 현재 `solve_batch(B>1)` 실제 실행은 CUDA Mixed path에서 지원한다.
 - `analyze()` 전에 `solve()`를 호출하면 `std::runtime_error`가 발생한다.
 
 ---
@@ -64,8 +66,8 @@ NewtonSolver(options)    → PlanBuilder::build()  [ExecutionPlan 조립]
 
 | 타입 | 방식 | CUDA fill 방식 |
 |------|------|---------------|
-| `EdgeBased` | Ybus 비영 원소(엣지) 순회 | 스레드 1개 = 원소 1개, atomic add |
-| `VertexBased` | 버스(정점) 기준 순회 | warp 1개 = 버스 1개, warp_sum 후 write |
+| `EdgeBased` | Ybus 비영 원소(엣지) 순회 | 스레드 1개 = 원소 1개 |
+| `VertexBased` | 버스(정점) 기준 순회 | warp 1개 = 버스 1개 |
 
 두 알고리즘의 희소 패턴 분석 결과(`JacobianMaps`, `JacobianStructure`)는 동일하다.
 `maps.builder_type` 필드만 다르며, 이를 통해 `PlanBuilder`가 커널을 선택한다.
@@ -139,6 +141,9 @@ J = [ J11  J12 ] = [ ∂P/∂θ     ∂P/∂|V| ]
 | `sbus` | 복소 전력 주입 벡터 (FP64) |
 | `V0` | 초기 전압 벡터 (FP64) |
 | `config` | NR 수렴 설정 (tolerance, max_iter) |
+| `batch_size` | batch 개수. single-case는 1 |
+| `sbus_stride`, `V0_stride` | batch-major 입력 stride |
+| `ybus_values_batched`, `ybus_value_stride` | batch별 Ybus 값 경로 예약 필드 |
 
 ### IterationContext
 

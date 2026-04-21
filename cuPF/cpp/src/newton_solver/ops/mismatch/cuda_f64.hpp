@@ -8,8 +8,8 @@
 // ---------------------------------------------------------------------------
 // CudaMismatchOpF64: CUDA mismatch operator shared by CUDA FP64 and Mixed.
 //
-// Public I/O and mismatch residual are FP64 in both profiles. Mixed casts to
-// FP32 only at the cuDSS32 RHS boundary, not inside mismatch.
+// Public I/O and mismatch residual are FP64 in both profiles. The Mixed path
+// computes Ibus64 from FP32 Ybus and FP64 V cache, then uses FP64 Sbus/F.
 // ---------------------------------------------------------------------------
 class CudaMismatchOpF64 final : public IMismatchOp {
 public:

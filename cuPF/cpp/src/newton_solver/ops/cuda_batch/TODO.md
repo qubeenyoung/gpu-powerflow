@@ -1,24 +1,30 @@
-# CUDA Multi-Batch Ops — Future Track
+# CUDA Batch Ops — Deprecated Separate Track
 
-This directory is reserved for CUDA multi-batch operator implementations.
+Do not add separate CUDA batch operator implementations in this directory.
 
-Multi-batch is explicitly **out of scope** for the Phase A–D refactor.
-Single-case experiments are the current priority.
+The CUDA backend's default execution model is batch execution. A single case is
+represented as `batch_size = 1` and must use the same storage, operator, and
+execution-plan path as larger batches.
 
-## Planned contents (do not implement until single-case is stable)
+## Current Direction
 
-- `CudaBatchMixedStorage`
-- `CudaBatchFp32Storage`
-- `CudaBatchMismatchOpMixed`
-- `CudaBatchMismatchOpFp32`
-- `CudaBatchJacobianOpEdgeF32`
-- `CudaBatchLinearSolveCuDSS32`
-- `CudaBatchVoltageUpdateMixed`
-- `CudaBatchVoltageUpdateFp32`
+- Extend the existing CUDA storage and ops to be batch-aware.
+- Use batch-major device buffers for voltage, residual, Jacobian values, and
+  solution vectors.
+- Use cuDSS uniform batch descriptors for Jacobian factorization and solve.
+- Keep sparse structure, maps, and bus index arrays shared across the batch.
+- Treat single-case APIs as wrappers around the same batch path with `B=1`.
 
-## Principles
+Current implementation state:
 
-- Single-case and batch ops must **not** share `.cu` source files.
-- Batch storage uses different buffer layouts and cuDSS UBATCH descriptors.
-- A separate `BatchExecutionPlan` or `BatchPlanBuilder` may be needed.
-- The `IStorage` / `IOp` interface concepts can be reused; concrete types cannot.
+- CUDA Mixed uses the batch-aware path. `solve_batch(B>1)` is enabled there.
+- CPU FP64 and CUDA FP64 remain `B=1` compatibility paths.
+- Mixed voltage state is `Va/Vm` FP64 with `V_re/V_im` FP64 cache.
+- Mixed mismatch uses custom batch CSR `Ibus`, not a separate cuSPARSE path.
+
+## Do Not Implement
+
+- `CudaBatch*` storage or operator classes.
+- A separate `BatchExecutionPlan`.
+- A separate `BatchPlanBuilder`.
+- A separate `.cu` source tree for batch kernels.

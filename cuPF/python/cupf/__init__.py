@@ -3,26 +3,21 @@
 from ._cupf import (
     BackendKind,
     ComputePolicy,
-    JacobianBuilderType,
-    NewtonAlgorithm,
+    CuDSSAlgorithm,
+    CuDSSOptions,
     NRConfig,
     NewtonOptions,
     NRResult,
     NewtonSolver,
 )
 
-PrecisionMode = ComputePolicy
-NRResultF64 = NRResult
-
 __all__ = [
     "BackendKind",
     "ComputePolicy",
-    "PrecisionMode",
-    "JacobianBuilderType",
-    "NewtonAlgorithm",
+    "CuDSSAlgorithm",
+    "CuDSSOptions",
     "NRConfig",
     "NewtonOptions",
     "NRResult",
-    "NRResultF64",
     "NewtonSolver",
 ]

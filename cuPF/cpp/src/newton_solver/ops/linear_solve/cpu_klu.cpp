@@ -8,11 +8,9 @@
 //      Jacobian CSC 구조만 사용하므로 analyze 시점에 J.values는 미확정이어도 됨.
 //      결과는 내부 KLU symbolic 객체에 저장; storage_.has_klu_symbolic = true 표시.
 //
-// factorize() 단계 (매 NR 반복):
-//   lu.factorize(J) — KLU numeric factorization (LU 분해)
-//
-// solve() 단계 (매 NR 반복):
-//   dx = lu.solve(-F) — forward/backward substitution → dx = J⁻¹·(-F)
+// run() 단계 (매 NR 반복):
+//   1. lu.factorize(J) — KLU numeric factorization (LU 분해)
+//   2. dx = lu.solve(-F) — forward/backward substitution → dx = J⁻¹·(-F)
 //
 // 선형 시스템: J · dx = -F   →   dx = -J⁻¹ · F
 // ---------------------------------------------------------------------------
@@ -26,25 +24,11 @@
 #include <Eigen/Sparse>
 
 #include <stdexcept>
-#include <string>
 
 
 namespace {
 
 using CpuRealVectorF64 = Eigen::Matrix<double, Eigen::Dynamic, 1>;
-
-void validate_storage_ready(const CpuFp64Storage& storage, const char* caller)
-{
-    if (storage.J.rows() != storage.dimF || storage.J.cols() != storage.dimF) {
-        throw std::runtime_error(std::string(caller) + ": Jacobian shape does not match dimF");
-    }
-    if (storage.J.nonZeros() <= 0) {
-        throw std::runtime_error(std::string(caller) + ": Jacobian is empty");
-    }
-    if (!storage.has_klu_symbolic) {
-        throw std::runtime_error(std::string(caller) + ": linear solver analyze was not completed");
-    }
-}
 
 }  // namespace
 
@@ -72,36 +56,32 @@ void CpuLinearSolveKLU::analyze(const AnalyzeContext& ctx)
         throw std::runtime_error("CpuLinearSolveKLU::analyze: KLU symbolic analysis failed");
     }
     storage_.has_klu_symbolic = true;
-    factorized_ = false;
 }
 
 
-// 매 NR 반복 호출: 현재 J.values 기준 numeric factorization.
-void CpuLinearSolveKLU::factorize(IterationContext& ctx)
+// 매 NR 반복 호출: numeric factorize → solve.
+// dx = J⁻¹ · (-F) 를 Eigen::Map 으로 storage_ 버퍼에 직접 기록.
+void CpuLinearSolveKLU::run(IterationContext& ctx)
 {
     (void)ctx;
 
-    validate_storage_ready(storage_, "CpuLinearSolveKLU::factorize");
-
-    // numeric factorization: 현재 J.values 기준 LU 분해
-    newton_solver::utils::ScopedTimer timer("CPU.solve.factorize");
-    storage_.lu.factorize(storage_.J);
-    if (storage_.lu.info() != Eigen::Success) {
-        factorized_ = false;
-        throw std::runtime_error("CpuLinearSolveKLU::factorize: KLU numeric factorization failed");
+    if (storage_.J.rows() != storage_.dimF || storage_.J.cols() != storage_.dimF) {
+        throw std::runtime_error("CpuLinearSolveKLU::run: Jacobian shape does not match dimF");
     }
-    factorized_ = true;
-}
+    if (storage_.J.nonZeros() <= 0) {
+        throw std::runtime_error("CpuLinearSolveKLU::run: Jacobian is empty");
+    }
+    if (!storage_.has_klu_symbolic) {
+        throw std::runtime_error("CpuLinearSolveKLU::run: linear solver analyze was not completed");
+    }
 
-
-// 매 NR 반복 호출: dx = J⁻¹ · (-F) 를 storage_ 버퍼에 직접 기록.
-void CpuLinearSolveKLU::solve(IterationContext& ctx)
-{
-    (void)ctx;
-
-    validate_storage_ready(storage_, "CpuLinearSolveKLU::solve");
-    if (!factorized_) {
-        throw std::runtime_error("CpuLinearSolveKLU::solve: factorize() must be called first");
+    {
+        // numeric factorization: 현재 J.values 기준 LU 분해
+        newton_solver::utils::ScopedTimer timer("CPU.solve.factorize");
+        storage_.lu.factorize(storage_.J);
+        if (storage_.lu.info() != Eigen::Success) {
+            throw std::runtime_error("CpuLinearSolveKLU::run: KLU numeric factorization failed");
+        }
     }
 
     // Eigen::Map: 외부 버퍼를 Eigen 벡터처럼 참조 (복사 없음)
@@ -113,7 +93,7 @@ void CpuLinearSolveKLU::solve(IterationContext& ctx)
         newton_solver::utils::ScopedTimer timer("CPU.solve.solve");
         dx = storage_.lu.solve(-F);
         if (storage_.lu.info() != Eigen::Success) {
-            throw std::runtime_error("CpuLinearSolveKLU::solve: KLU solve failed");
+            throw std::runtime_error("CpuLinearSolveKLU::run: KLU solve failed");
         }
     }
 }

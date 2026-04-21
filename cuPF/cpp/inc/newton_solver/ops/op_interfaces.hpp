@@ -3,6 +3,9 @@
 #include "newton_solver/core/newton_solver_types.hpp"
 #include "newton_solver/core/jacobian_types.hpp"
 
+#include <stdexcept>
+#include <utility>
+
 
 // Forward declarations
 struct IterationContext;
@@ -37,14 +40,32 @@ public:
 
     // NR 루프 완료 후 최종 전압 벡터를 host로 내려 result에 채운다.
     virtual void download_result(NRResultF64& result) const = 0;
+
+    // Batch result download. 기본 구현은 B=1 wrapper이며, batch-aware storage는
+    // 이 메서드를 override한다.
+    virtual void download_batch_result(NRBatchResultF64& result) const
+    {
+        if (result.batch_size != 1) {
+            throw std::runtime_error("IStorage::download_batch_result: storage is not batch-aware");
+        }
+
+        NRResultF64 single;
+        download_result(single);
+        result.V = std::move(single.V);
+        result.n_bus = static_cast<int32_t>(result.V.size());
+        result.batch_size = 1;
+        result.iterations.clear();
+        result.final_mismatch.clear();
+        result.converged.clear();
+    }
 };
 
 
 // ---------------------------------------------------------------------------
-// Op 인터페이스: NR stage solver의 연산자 계약을 정의한다.
+// Op 인터페이스: NR 4-stage solver의 연산자 계약을 정의한다.
 //
 // 각 구체 Op는 특정 Storage 타입과 결합되어 생성된다.
-// NR 핫 패스에서는 인터페이스 호출만 수행하며, backend 분기가 없다.
+// NR 핫 패스에서는 run(ctx)만 호출하며, backend 분기가 없다.
 // ---------------------------------------------------------------------------
 
 class IMismatchOp {
@@ -71,24 +92,16 @@ public:
     // NewtonSolver::analyze() 내에서 storage->prepare() 이후 한 번 호출된다.
     virtual void analyze(const AnalyzeContext& ctx) = 0;
 
-    // 현재 Jacobian 값으로 numeric factorization / refactorization을 수행한다.
-    virtual void factorize(IterationContext& ctx) = 0;
-
-    // 현재 mismatch F로 b = -F를 준비하고 factorized Jacobian으로 J·dx = b를 푼다.
-    virtual void solve(IterationContext& ctx) = 0;
-
-    // 기존 호출부 호환용: factorize와 solve를 연속 실행한다.
-    virtual void run(IterationContext& ctx)
-    {
-        factorize(ctx);
-        solve(ctx);
-    }
+    // RHS 준비 → (재)인수분해 → J·dx = RHS 풀기.
+    // CUDA 계획 경로는 RHS=F, voltage_update에서 state-=dx를 사용한다.
+    // CPU FP64 경로는 기존 RHS=-F, state+=dx convention을 유지한다.
+    virtual void run(IterationContext& ctx) = 0;
 };
 
 class IVoltageUpdateOp {
 public:
     virtual ~IVoltageUpdateOp() = default;
 
-    // dx를 적용해 Va·Vm을 갱신하고 복소 전압 V를 재구성한다.
+    // dx를 적용해 Va·Vm을 갱신하고 복소 전압 cache를 재구성한다.
     virtual void run(IterationContext& ctx) = 0;
 };

@@ -16,6 +16,7 @@ class IStorage {
     virtual void prepare(const AnalyzeContext& ctx) = 0;  // analyze 단계
     virtual void upload(const SolveContext& ctx)    = 0;  // solve 시작 시
     virtual void download_result(NRResultF64& result) const = 0;
+    virtual void download_batch_result(NRBatchResultF64& result) const;
 };
 ```
 
@@ -31,10 +32,12 @@ class IStorage {
 
 `solve()` 시작 시마다 호출된다. Ybus 값, Sbus, V0를 device로 올린다.
 Ybus의 희소 구조가 `analyze()` 당시와 같은지 검증한다.
+기본 실행 모델은 batch-major layout이며, single-case solve는 `batch_size=1`이다.
 
-### download_result()
+### download_result() / download_batch_result()
 
-NR 루프 완료 후 device의 V 벡터를 host `NRResultF64.V`로 복사한다.
+NR 루프 완료 후 device의 V 벡터를 host result로 복사한다.
+batch-aware storage는 `download_batch_result()`를 override하고, 기본 구현은 `B=1` wrapper다.
 
 ---
 
@@ -109,28 +112,40 @@ SolveScalar    = double
 
 **파일:** [cuda_mixed_storage.hpp](../../cpp/src/newton_solver/storage/cuda/cuda_mixed_storage.hpp)
 
-Mixed 정밀도 경로. 전압·미스매치는 FP64, Jacobian·풀이는 FP32.
+Mixed 정밀도 경로. 전압 상태(`Va/Vm`), derived cache(`V_re/V_im`), `Sbus`, `Ibus`, `F`는
+FP64로 유지하고, `Ybus/J/dx`는 FP32로 둔다. Jacobian 커널은 FP64 `V/Ibus` 입력을
+load한 뒤 내부 산술만 FP32로 수행한다.
 
 ### 정밀도 레이아웃
 
 ```
 PublicScalar   = double
-VoltageScalar  = double
-MismatchScalar = double
-JacobianScalar = float    ← FP32
-SolveScalar    = float    ← FP32
+Va/Vm          = double  ← authoritative state
+V cache        = double  ← derived V_re/V_im
+Ybus           = float
+Ibus           = double
+Sbus           = double
+F              = double
+JacobianScalar = float
+SolveScalar    = float
 ```
 
 ### FP64 vs FP32 버퍼 구분
 
-| 버퍼 | 타입 | FP32 이유 |
-|------|------|----------|
-| `d_Ybus_re/im` | `double` | Mismatch 계산에 사용 |
-| `d_J_values` | `float` | Jacobian fill + cuDSS FP32 입력 |
-| `d_F` | `double` | 수렴 판정 기준 (normF) |
-| `d_dx` | `float` | cuDSS FP32 출력, VoltageUpdate에서 double로 변환 |
-| `d_Va/Vm, d_V_re/im` | `double` | 전압 상태 누산 정밀도 유지 |
-| `d_Sbus_re/im` | `double` | Mismatch 계산에 사용 |
+| 버퍼 | 타입 | 크기 | 설명 |
+|------|------|------|------|
+| `d_Ybus_re/im` | `float` | [nnz_Y] 또는 [B·nnz_Y] | Ybus 값, 구조는 batch 공통 |
+| `d_Sbus_re/im` | `double` | [B·n_bus] | 지정 전력 |
+| `d_Ibus_re/im` | `double` | [B·n_bus] | custom CSR mismatch가 만든 재사용 전류 |
+| `d_Va/Vm` | `double` | [B·n_bus] | authoritative 전압 상태 |
+| `d_V_re/im` | `double` | [B·n_bus] | mismatch 입력, Jacobian FP32 내부 계산의 FP64 경계 입력 |
+| `d_F` | `double` | [B·dimF] | 수렴 판정용 미스매치 |
+| `d_normF` | `double` | [B] | batch별 L∞ norm |
+| `d_J_values` | `float` | [B·nnz_J] | cuDSS uniform batch CSR values |
+| `d_dx` | `float` | [B·dimF] | cuDSS FP32 solution |
+
+Jacobian structure와 map 배열은 batch 공통이고, 값 버퍼만 batch-major다.
+최종 `NRResultF64`/`NRBatchResultF64` 전압은 FP64 `Va/Vm`에서 재구성한다.
 
 ---
 

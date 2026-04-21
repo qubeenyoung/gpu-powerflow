@@ -92,5 +92,9 @@ void CpuMismatchOpF64::run(IterationContext& ctx)
                                     ctx.iter,
                                     storage_.F.data(),
                                     static_cast<int32_t>(storage_.F.size()));
+    newton_solver::utils::dumpArray("residual_before_update",
+                                    ctx.iter,
+                                    storage_.F.data(),
+                                    static_cast<int32_t>(storage_.F.size()));
     ctx.converged = (ctx.normF <= ctx.config.tolerance);
 }

@@ -19,6 +19,7 @@
 
 #ifdef CUPF_WITH_CUDA
   #include "newton_solver/ops/jacobian/cuda_edge_fp32.hpp"
+  #include "newton_solver/ops/jacobian/cuda_vertex_fp32.hpp"
   #include "newton_solver/ops/linear_solve/cuda_cudss32.hpp"
   #include "newton_solver/ops/mismatch/cuda_f64.hpp"
   #include "newton_solver/ops/voltage_update/cuda_mixed.hpp"
@@ -29,13 +30,16 @@
 #include <Eigen/Sparse>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -51,8 +55,10 @@ struct CliOptions {
     int32_t max_iter = 50;
     int32_t warmup = 0;
     int32_t repeats = 1;
+    int32_t batch_size = 1;
     bool dump_residuals = false;
     std::filesystem::path dump_dir = "residuals";
+    CuDSSOptions cudss;
 };
 
 struct ProfileConfig {
@@ -61,9 +67,9 @@ struct ProfileConfig {
     std::string backend;
     std::string compute;
     std::string jacobian;
-    std::string algorithm = "standard";
     bool reference_pypowerlike = false;
     bool hybrid_cuda_mixed_edge = false;
+    bool modified_schedule = false;
     bool use_cpu_naive_jacobian = false;
     bool use_cpu_superlu = false;
     NewtonOptions options;
@@ -85,10 +91,60 @@ void print_usage(const char* argv0)
     std::cout
         << "Usage: " << argv0
         << " [--case-dir PATH]"
-        << " [--profile cpp_pypowerlike|cpu_fp64_edge|cuda_mixed_edge|cuda_mixed_vertex|cuda_fp64_edge|cuda_fp64_vertex"
-        << "|cuda_mixed_edge_cpu_naive_jacobian|cuda_mixed_edge_cpu_superlu|<core_profile>_modified]"
-        << " [--tolerance FLOAT] [--max-iter INT] [--warmup INT] [--repeats INT]"
-        << " [--dump-residuals] [--dump-dir PATH]\n";
+        << " [--profile cpp_pypowerlike|cpu_fp64_edge|cuda_mixed_edge|cuda_mixed_edge_modified|cuda_mixed_vertex|cuda_mixed_vertex_modified|cuda_fp64_edge|cuda_fp64_vertex"
+        << "|cuda_mixed_edge_cpu_naive_jacobian|cuda_mixed_edge_cpu_superlu]"
+        << " [--tolerance FLOAT] [--max-iter INT] [--warmup INT] [--repeats INT] [--batch-size INT]"
+        << " [--cudss-use-matching] [--cudss-matching-alg DEFAULT|ALG_1|ALG_2|ALG_3|ALG_4|ALG_5]"
+        << " [--cudss-pivot-epsilon AUTO|FLOAT]"
+        << " [--dump-residuals|--dump-newton-diagnostics] [--dump-dir PATH]\n";
+}
+
+std::string uppercase(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
+    return value;
+}
+
+CuDSSAlgorithm parse_cudss_algorithm(const std::string& value)
+{
+    const std::string normalized = uppercase(value);
+    if (normalized == "DEFAULT") {
+        return CuDSSAlgorithm::Default;
+    }
+    if (normalized == "ALG_1") {
+        return CuDSSAlgorithm::Alg1;
+    }
+    if (normalized == "ALG_2") {
+        return CuDSSAlgorithm::Alg2;
+    }
+    if (normalized == "ALG_3") {
+        return CuDSSAlgorithm::Alg3;
+    }
+    if (normalized == "ALG_4") {
+        return CuDSSAlgorithm::Alg4;
+    }
+    if (normalized == "ALG_5") {
+        return CuDSSAlgorithm::Alg5;
+    }
+    throw std::runtime_error("Unknown cuDSS algorithm: " + value);
+}
+
+void set_cudss_pivot_epsilon(CuDSSOptions& options, const std::string& value)
+{
+    if (uppercase(value) == "AUTO") {
+        options.auto_pivot_epsilon = true;
+        options.pivot_epsilon = 0.0;
+        return;
+    }
+
+    const double parsed = std::stod(value);
+    if (!std::isfinite(parsed) || parsed < 0.0) {
+        throw std::runtime_error("--cudss-pivot-epsilon must be AUTO or a non-negative finite value");
+    }
+    options.auto_pivot_epsilon = false;
+    options.pivot_epsilon = parsed;
 }
 
 CliOptions parse_args(int argc, char** argv)
@@ -109,10 +165,18 @@ CliOptions parse_args(int argc, char** argv)
             options.warmup = static_cast<int32_t>(std::stoi(argv[++i]));
         } else if (arg == "--repeats" && i + 1 < argc) {
             options.repeats = static_cast<int32_t>(std::stoi(argv[++i]));
-        } else if (arg == "--dump-residuals") {
+        } else if (arg == "--batch-size" && i + 1 < argc) {
+            options.batch_size = static_cast<int32_t>(std::stoi(argv[++i]));
+        } else if (arg == "--dump-residuals" || arg == "--dump-newton-diagnostics") {
             options.dump_residuals = true;
         } else if (arg == "--dump-dir" && i + 1 < argc) {
             options.dump_dir = argv[++i];
+        } else if (arg == "--cudss-use-matching" || arg == "--cudss-matching") {
+            options.cudss.use_matching = true;
+        } else if (arg == "--cudss-matching-alg" && i + 1 < argc) {
+            options.cudss.matching_alg = parse_cudss_algorithm(argv[++i]);
+        } else if ((arg == "--cudss-pivot-epsilon" || arg == "--cudss-epsilon") && i + 1 < argc) {
+            set_cudss_pivot_epsilon(options.cudss, argv[++i]);
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             std::exit(0);
@@ -127,6 +191,9 @@ CliOptions parse_args(int argc, char** argv)
     if (options.repeats <= 0) {
         throw std::runtime_error("repeats must be > 0");
     }
+    if (options.batch_size <= 0) {
+        throw std::runtime_error("batch-size must be > 0");
+    }
 
     return options;
 }
@@ -138,36 +205,12 @@ std::filesystem::path repeat_dump_dir(const std::filesystem::path& root, int32_t
     return root / name.str();
 }
 
-bool consume_suffix(std::string& value, std::string_view suffix)
-{
-    if (value.size() < suffix.size()) {
-        return false;
-    }
-    const auto offset = value.size() - suffix.size();
-    if (value.compare(offset, suffix.size(), suffix.data(), suffix.size()) != 0) {
-        return false;
-    }
-    value.erase(offset);
-    return true;
-}
-
 ProfileConfig parse_profile(const std::string& profile)
 {
     ProfileConfig cfg;
     cfg.profile = profile;
-    cfg.options.algorithm = NewtonAlgorithm::Standard;
 
-    std::string base_profile = profile;
-    const bool modified = consume_suffix(base_profile, "_modified");
-    if (modified) {
-        cfg.algorithm = "modified";
-        cfg.options.algorithm = NewtonAlgorithm::Modified;
-    }
-
-    if (base_profile == "cpp_pypowerlike") {
-        if (modified) {
-            throw std::runtime_error("cpp_pypowerlike_modified is not supported by this reference path");
-        }
+    if (profile == "cpp_pypowerlike") {
 #ifndef CUPF_WITH_SUPERLU
         throw std::runtime_error("cpp_pypowerlike requires SuperLU support");
 #else
@@ -184,7 +227,7 @@ ProfileConfig parse_profile(const std::string& profile)
     }
 
     cfg.implementation = profile;
-    if (base_profile == "cpu_fp64_edge") {
+    if (profile == "cpu_fp64_edge") {
         cfg.backend = "cpu";
         cfg.compute = "fp64";
         cfg.jacobian = "edge_based";
@@ -193,7 +236,7 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
-    if (base_profile == "cuda_mixed_edge") {
+    if (profile == "cuda_mixed_edge") {
         cfg.backend = "cuda";
         cfg.compute = "mixed";
         cfg.jacobian = "edge_based";
@@ -202,10 +245,19 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
-    if (base_profile == "cuda_mixed_edge_cpu_naive_jacobian") {
-        if (modified) {
-            throw std::runtime_error("cuda_mixed_edge_cpu_naive_jacobian_modified is not supported");
-        }
+    if (profile == "cuda_edge_modified" || profile == "cuda_mixed_edge_modified") {
+        cfg.profile = "cuda_mixed_edge_modified";
+        cfg.implementation = "cuda_edge_modified";
+        cfg.backend = "cuda";
+        cfg.compute = "mixed";
+        cfg.jacobian = "edge_based";
+        cfg.modified_schedule = true;
+        cfg.options.backend = BackendKind::CUDA;
+        cfg.options.compute = ComputePolicy::Mixed;
+        cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
+        return cfg;
+    }
+    if (profile == "cuda_mixed_edge_cpu_naive_jacobian") {
 #if !defined(CUPF_WITH_CUDA) || !defined(CUPF_WITH_SUPERLU)
         throw std::runtime_error("cuda_mixed_edge_cpu_naive_jacobian requires CUDA and SuperLU support");
 #else
@@ -221,10 +273,7 @@ ProfileConfig parse_profile(const std::string& profile)
         return cfg;
 #endif
     }
-    if (base_profile == "cuda_mixed_edge_cpu_superlu") {
-        if (modified) {
-            throw std::runtime_error("cuda_mixed_edge_cpu_superlu_modified is not supported");
-        }
+    if (profile == "cuda_mixed_edge_cpu_superlu") {
 #if !defined(CUPF_WITH_CUDA) || !defined(CUPF_WITH_SUPERLU)
         throw std::runtime_error("cuda_mixed_edge_cpu_superlu requires CUDA and SuperLU support");
 #else
@@ -240,7 +289,7 @@ ProfileConfig parse_profile(const std::string& profile)
         return cfg;
 #endif
     }
-    if (base_profile == "cuda_mixed_vertex") {
+    if (profile == "cuda_mixed_vertex") {
         cfg.backend = "cuda";
         cfg.compute = "mixed";
         cfg.jacobian = "vertex_based";
@@ -249,7 +298,19 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.options.jacobian_builder = JacobianBuilderType::VertexBased;
         return cfg;
     }
-    if (base_profile == "cuda_fp64_edge") {
+    if (profile == "cuda_vertex_modified" || profile == "cuda_mixed_vertex_modified") {
+        cfg.profile = "cuda_mixed_vertex_modified";
+        cfg.implementation = "cuda_vertex_modified";
+        cfg.backend = "cuda";
+        cfg.compute = "mixed";
+        cfg.jacobian = "vertex_based";
+        cfg.modified_schedule = true;
+        cfg.options.backend = BackendKind::CUDA;
+        cfg.options.compute = ComputePolicy::Mixed;
+        cfg.options.jacobian_builder = JacobianBuilderType::VertexBased;
+        return cfg;
+    }
+    if (profile == "cuda_fp64_edge") {
         cfg.backend = "cuda";
         cfg.compute = "fp64";
         cfg.jacobian = "edge_based";
@@ -258,7 +319,7 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
-    if (base_profile == "cuda_fp64_vertex") {
+    if (profile == "cuda_fp64_vertex") {
         cfg.backend = "cuda";
         cfg.compute = "fp64";
         cfg.jacobian = "vertex_based";
@@ -282,6 +343,20 @@ double max_voltage_delta(const std::vector<std::complex<double>>& lhs,
     return max_delta;
 }
 
+std::vector<std::complex<double>> repeat_complex_vector(const std::vector<std::complex<double>>& src,
+                                                        int32_t batch_size)
+{
+    std::vector<std::complex<double>> dst(
+        static_cast<std::size_t>(batch_size) * src.size());
+    for (int32_t b = 0; b < batch_size; ++b) {
+        std::copy(src.begin(),
+                  src.end(),
+                  dst.begin() + static_cast<std::ptrdiff_t>(b) *
+                                  static_cast<std::ptrdiff_t>(src.size()));
+    }
+    return dst;
+}
+
 void validate_basic_result(const cupf::tests::DumpCaseData& data, const NRResultF64& result)
 {
     if (static_cast<int32_t>(result.V.size()) != data.rows) {
@@ -290,6 +365,70 @@ void validate_basic_result(const cupf::tests::DumpCaseData& data, const NRResult
     if (!std::isfinite(result.final_mismatch)) {
         throw std::runtime_error("Final mismatch is not finite");
     }
+}
+
+void validate_basic_batch_result(const cupf::tests::DumpCaseData& data,
+                                 const NRBatchResultF64& result,
+                                 int32_t batch_size)
+{
+    if (result.n_bus != data.rows || result.batch_size != batch_size) {
+        throw std::runtime_error("Batch result metadata does not match benchmark input");
+    }
+    if (result.V.size() != static_cast<std::size_t>(batch_size) *
+                           static_cast<std::size_t>(data.rows)) {
+        throw std::runtime_error("Batch result voltage size does not match benchmark input");
+    }
+    if (result.final_mismatch.size() != static_cast<std::size_t>(batch_size)) {
+        throw std::runtime_error("Batch result mismatch vector size does not match batch size");
+    }
+    for (double value : result.final_mismatch) {
+        if (!std::isfinite(value)) {
+            throw std::runtime_error("Batch result contains a non-finite mismatch");
+        }
+    }
+}
+
+bool all_batch_items_converged(const NRBatchResultF64& result)
+{
+    if (result.converged.size() != static_cast<std::size_t>(result.batch_size)) {
+        return false;
+    }
+    return std::all_of(result.converged.begin(), result.converged.end(),
+                       [](uint8_t value) { return value != 0; });
+}
+
+int32_t max_batch_iterations(const NRBatchResultF64& result)
+{
+    if (result.iterations.empty()) {
+        return 0;
+    }
+    return *std::max_element(result.iterations.begin(), result.iterations.end());
+}
+
+double max_batch_mismatch(const NRBatchResultF64& result)
+{
+    double max_value = 0.0;
+    for (double value : result.final_mismatch) {
+        max_value = std::max(max_value, std::abs(value));
+    }
+    return max_value;
+}
+
+double max_batched_voltage_delta_from_v0(const cupf::tests::DumpCaseData& data,
+                                         const NRBatchResultF64& result)
+{
+    double max_delta = 0.0;
+    for (int32_t b = 0; b < result.batch_size; ++b) {
+        const std::size_t batch_base =
+            static_cast<std::size_t>(b) * static_cast<std::size_t>(result.n_bus);
+        for (int32_t bus = 0; bus < result.n_bus; ++bus) {
+            const std::size_t idx = batch_base + static_cast<std::size_t>(bus);
+            max_delta = std::max(max_delta,
+                                 std::abs(result.V[idx] -
+                                          data.v0[static_cast<std::size_t>(bus)]));
+        }
+    }
+    return max_delta;
 }
 
 #ifdef CUPF_WITH_CUDA
@@ -305,8 +444,13 @@ void synchronize_if_cuda(const ProfileConfig&) {}
 
 BenchRun run_core_once(const cupf::tests::DumpCaseData& case_data,
                        const ProfileConfig& profile,
-                       const NRConfig& config)
+                       const NRConfig& config,
+                       int32_t batch_size)
 {
+    if (batch_size != 1 && !(profile.backend == "cuda" && profile.compute == "mixed")) {
+        throw std::runtime_error("--batch-size > 1 is currently supported only by CUDA mixed profiles");
+    }
+
     const YbusViewF64 ybus = case_data.ybus();
     NewtonSolver solver(profile.options);
 
@@ -320,16 +464,209 @@ BenchRun run_core_once(const cupf::tests::DumpCaseData& case_data,
     synchronize_if_cuda(profile);
     const auto t1 = std::chrono::steady_clock::now();
 
-    NRResultF64 result;
-    solver.solve(
+    std::vector<std::complex<double>> batched_sbus;
+    std::vector<std::complex<double>> batched_v0;
+    const std::complex<double>* sbus = case_data.sbus.data();
+    const std::complex<double>* v0 = case_data.v0.data();
+    if (batch_size > 1) {
+        batched_sbus = repeat_complex_vector(case_data.sbus, batch_size);
+        batched_v0 = repeat_complex_vector(case_data.v0, batch_size);
+        sbus = batched_sbus.data();
+        v0 = batched_v0.data();
+    }
+
+    NRBatchResultF64 result;
+    solver.solve_batch(
         ybus,
-        case_data.sbus.data(),
-        case_data.v0.data(),
+        sbus,
+        ybus.rows,
+        v0,
+        ybus.rows,
+        batch_size,
         case_data.pv.data(), static_cast<int32_t>(case_data.pv.size()),
         case_data.pq.data(), static_cast<int32_t>(case_data.pq.size()),
         config,
         result);
     synchronize_if_cuda(profile);
+    const auto t2 = std::chrono::steady_clock::now();
+
+    validate_basic_batch_result(case_data, result, batch_size);
+
+    BenchRun run;
+    run.final_mismatch = max_batch_mismatch(result);
+    run.success = all_batch_items_converged(result) && run.final_mismatch <= config.tolerance;
+    run.iterations = max_batch_iterations(result);
+    run.analyze_sec =
+        static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000000.0;
+    run.solve_sec =
+        static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count()) / 1000000.0;
+    run.total_sec =
+        static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t2 - t0).count()) / 1000000.0;
+    run.max_v_delta_from_v0 = max_batched_voltage_delta_from_v0(case_data, result);
+    run.timing_entries = newton_solver::utils::timingSnapshot();
+    std::sort(run.timing_entries.begin(), run.timing_entries.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::string_view(lhs.name) < std::string_view(rhs.name);
+              });
+    return run;
+}
+
+#ifdef CUPF_WITH_CUDA
+BenchRun run_cuda_mixed_modified_once(const cupf::tests::DumpCaseData& case_data,
+                                      const ProfileConfig& profile,
+                                      const NRConfig& config)
+{
+    if (profile.backend != "cuda" || profile.compute != "mixed") {
+        throw std::runtime_error("modified benchmark path currently supports CUDA mixed profiles only");
+    }
+
+    const YbusViewF64 ybus = case_data.ybus();
+    const int32_t n_pv = static_cast<int32_t>(case_data.pv.size());
+    const int32_t n_pq = static_cast<int32_t>(case_data.pq.size());
+
+    CudaMixedStorage storage;
+    CudaMismatchOpF64 mismatch(storage);
+    std::unique_ptr<IJacobianOp> jacobian;
+    if (profile.options.jacobian_builder == JacobianBuilderType::VertexBased) {
+        jacobian = std::make_unique<CudaJacobianOpVertexFp32>(storage);
+    } else {
+        jacobian = std::make_unique<CudaJacobianOpEdgeFp32>(storage);
+    }
+    CudaLinearSolveCuDSS32 linear_solve(storage, profile.options.cudss);
+    CudaVoltageUpdateMixed voltage_update(storage);
+
+    newton_solver::utils::resetTimingCollector();
+
+    JacobianBuilder::Result analysis;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+        newton_solver::utils::ScopedTimer total("NR.analyze.total");
+
+        {
+            newton_solver::utils::ScopedTimer stage("NR.analyze.jacobian_builder");
+            JacobianBuilder builder(profile.options.jacobian_builder);
+            analysis = builder.analyze(
+                ybus,
+                case_data.pv.data(), n_pv,
+                case_data.pq.data(), n_pq);
+        }
+
+        AnalyzeContext analyze_ctx{
+            .ybus = ybus,
+            .maps = analysis.maps,
+            .J = analysis.J,
+            .n_bus = ybus.rows,
+            .pv = case_data.pv.data(),
+            .n_pv = n_pv,
+            .pq = case_data.pq.data(),
+            .n_pq = n_pq,
+        };
+
+        {
+            newton_solver::utils::ScopedTimer stage("NR.analyze.storage_prepare");
+            storage.prepare(analyze_ctx);
+        }
+        {
+            newton_solver::utils::ScopedTimer stage("NR.analyze.linear_solve");
+            linear_solve.analyze(analyze_ctx);
+        }
+    }
+    cudaDeviceSynchronize();
+    const auto t1 = std::chrono::steady_clock::now();
+
+    SolveContext solve_ctx{
+        .ybus = &ybus,
+        .sbus = case_data.sbus.data(),
+        .V0 = case_data.v0.data(),
+        .config = &config,
+        .batch_size = 1,
+        .sbus_stride = ybus.rows,
+        .V0_stride = ybus.rows,
+        .ybus_values_batched = false,
+        .ybus_value_stride = ybus.nnz,
+    };
+
+    NRResultF64 result;
+    int32_t completed = 0;
+
+    {
+        newton_solver::utils::ScopedTimer total("NR.solve.total");
+
+        {
+            newton_solver::utils::ScopedTimer stage("NR.solve.upload");
+            storage.upload(solve_ctx);
+        }
+
+        IterationContext iter_ctx{
+            .storage = storage,
+            .config = config,
+            .pv = case_data.pv.data(),
+            .n_pv = n_pv,
+            .pq = case_data.pq.data(),
+            .n_pq = n_pq,
+        };
+
+        int32_t last_jacobian_iter = -1;
+        int32_t solves_since_factorize = 2;
+
+        for (int32_t iter = 0; iter < config.max_iter; ++iter) {
+            newton_solver::utils::ScopedTimer iter_total("NR.iteration.total");
+            iter_ctx.iter = iter;
+            iter_ctx.jacobian_updated_this_iter = false;
+            iter_ctx.jacobian_age =
+                (last_jacobian_iter >= 0) ? (iter - last_jacobian_iter) : 0;
+            completed = iter + 1;
+
+            {
+                newton_solver::utils::ScopedTimer stage("NR.iteration.mismatch");
+                mismatch.run(iter_ctx);
+            }
+            if (iter_ctx.converged) {
+                break;
+            }
+
+            const bool refresh_jacobian =
+                (last_jacobian_iter < 0) || (solves_since_factorize >= 2);
+            if (refresh_jacobian) {
+                {
+                    newton_solver::utils::ScopedTimer stage("NR.iteration.jacobian");
+                    jacobian->run(iter_ctx);
+                }
+                iter_ctx.jacobian_updated_this_iter = true;
+                iter_ctx.jacobian_age = 0;
+                last_jacobian_iter = iter;
+                solves_since_factorize = 0;
+
+                {
+                    newton_solver::utils::ScopedTimer stage("NR.iteration.linear_factorize");
+                    linear_solve.factorize(iter_ctx);
+                }
+            } else {
+                iter_ctx.jacobian_age = iter - last_jacobian_iter;
+            }
+
+            {
+                newton_solver::utils::ScopedTimer stage("NR.iteration.linear_solve");
+                linear_solve.solve(iter_ctx);
+            }
+            {
+                newton_solver::utils::ScopedTimer stage("NR.iteration.voltage_update");
+                voltage_update.run(iter_ctx);
+            }
+            ++solves_since_factorize;
+        }
+
+        result.iterations = completed;
+        result.converged = iter_ctx.converged;
+        result.final_mismatch = iter_ctx.normF;
+
+        {
+            newton_solver::utils::ScopedTimer stage("NR.solve.download");
+            storage.download_result(result);
+        }
+    }
+    cudaDeviceSynchronize();
     const auto t2 = std::chrono::steady_clock::now();
 
     validate_basic_result(case_data, result);
@@ -352,6 +689,7 @@ BenchRun run_core_once(const cupf::tests::DumpCaseData& case_data,
               });
     return run;
 }
+#endif
 
 BenchRun run_reference_pypowerlike_once(const cupf::tests::DumpCaseData& case_data,
                                         const ProfileConfig& profile,
@@ -395,6 +733,11 @@ BenchRun run_reference_pypowerlike_once(const cupf::tests::DumpCaseData& case_da
         .sbus = case_data.sbus.data(),
         .V0 = case_data.v0.data(),
         .config = &config,
+        .batch_size = 1,
+        .sbus_stride = ybus.rows,
+        .V0_stride = ybus.rows,
+        .ybus_values_batched = false,
+        .ybus_value_stride = ybus.nnz,
     };
     storage.upload(solve_ctx);
 
@@ -461,17 +804,18 @@ void copy_cuda_voltage_to_cpu(const CudaMixedStorage& cuda_storage,
         throw std::runtime_error("Hybrid ablation voltage copy: CUDA/CPU bus counts differ");
     }
 
-    std::vector<double> h_re(static_cast<std::size_t>(n_bus));
-    std::vector<double> h_im(static_cast<std::size_t>(n_bus));
-    cuda_storage.d_V_re.copyTo(h_re.data(), h_re.size());
-    cuda_storage.d_V_im.copyTo(h_im.data(), h_im.size());
+    std::vector<double> h_va(static_cast<std::size_t>(n_bus));
+    std::vector<double> h_vm(static_cast<std::size_t>(n_bus));
+    cuda_storage.d_Va.copyTo(h_va.data(), h_va.size());
+    cuda_storage.d_Vm.copyTo(h_vm.data(), h_vm.size());
 
     for (int32_t bus = 0; bus < n_bus; ++bus) {
-        const std::complex<double> value(h_re[static_cast<std::size_t>(bus)],
-                                         h_im[static_cast<std::size_t>(bus)]);
+        const double va = h_va[static_cast<std::size_t>(bus)];
+        const double vm = h_vm[static_cast<std::size_t>(bus)];
+        const std::complex<double> value(vm * std::cos(va), vm * std::sin(va));
         cpu_storage.V[static_cast<std::size_t>(bus)] = value;
-        cpu_storage.Va[static_cast<std::size_t>(bus)] = std::arg(value);
-        cpu_storage.Vm[static_cast<std::size_t>(bus)] = std::abs(value);
+        cpu_storage.Va[static_cast<std::size_t>(bus)] = va;
+        cpu_storage.Vm[static_cast<std::size_t>(bus)] = vm;
         cpu_storage.Ibus[static_cast<std::size_t>(bus)] = std::complex<double>(0.0, 0.0);
     }
     cpu_storage.has_cached_Ibus = false;
@@ -483,7 +827,7 @@ void copy_cpu_jacobian_to_cuda_mixed(const CpuFp64Storage& cpu_storage,
 {
     newton_solver::utils::ScopedTimer timer("ABLATION.cpu_jacobian_to_cuda_csr");
 
-    if (J.dim != cpu_storage.dimF || J.nnz != static_cast<int32_t>(cuda_storage.d_J_values.size())) {
+    if (J.dim != cpu_storage.dimF || J.nnz != cuda_storage.nnz_J) {
         throw std::runtime_error("Hybrid ablation Jacobian copy: CPU/CUDA Jacobian dimensions differ");
     }
 
@@ -517,7 +861,7 @@ void copy_cuda_jacobian_to_cpu_csc(const CudaMixedStorage& cuda_storage,
 {
     newton_solver::utils::ScopedTimer timer("ABLATION.cuda_J_to_cpu_csc");
 
-    if (J.dim != cpu_storage.dimF || J.nnz != static_cast<int32_t>(cuda_storage.d_J_values.size())) {
+    if (J.dim != cpu_storage.dimF || J.nnz != cuda_storage.nnz_J) {
         throw std::runtime_error("Hybrid ablation Jacobian copy: CUDA/CPU Jacobian dimensions differ");
     }
 
@@ -574,7 +918,7 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
     CudaMixedStorage cuda_storage;
     CudaMismatchOpF64 mismatch(cuda_storage);
     CudaJacobianOpEdgeFp32 cuda_jacobian(cuda_storage);
-    CudaLinearSolveCuDSS32 cudss(cuda_storage);
+    CudaLinearSolveCuDSS32 cudss(cuda_storage, profile.options.cudss);
     CudaVoltageUpdateMixed voltage_update(cuda_storage);
 
     CpuFp64Storage cpu_storage;
@@ -643,6 +987,11 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
         .sbus = case_data.sbus.data(),
         .V0 = case_data.v0.data(),
         .config = &config,
+        .batch_size = 1,
+        .sbus_stride = ybus.rows,
+        .V0_stride = ybus.rows,
+        .ybus_values_batched = false,
+        .ybus_value_stride = ybus.nnz,
     };
 
     NRResultF64 result;
@@ -680,6 +1029,8 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
             newton_solver::utils::ScopedTimer iter_total("NR.iteration.total");
             cuda_ctx.iter = iter;
             cpu_ctx.iter = iter;
+            cuda_ctx.jacobian_updated_this_iter = false;
+            cpu_ctx.jacobian_updated_this_iter = false;
             completed = iter + 1;
 
             {
@@ -704,6 +1055,10 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
                 } else {
                     cuda_jacobian.run(cuda_ctx);
                 }
+                cuda_ctx.jacobian_updated_this_iter = true;
+                cuda_ctx.jacobian_age = 0;
+                cpu_ctx.jacobian_updated_this_iter = true;
+                cpu_ctx.jacobian_age = 0;
             }
             {
                 newton_solver::utils::ScopedTimer stage("NR.iteration.linear_solve");
@@ -758,19 +1113,36 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
 
 BenchRun run_once(const cupf::tests::DumpCaseData& case_data,
                   const ProfileConfig& profile,
-                  const NRConfig& config)
+                  const NRConfig& config,
+                  int32_t batch_size)
 {
     if (profile.reference_pypowerlike) {
+        if (batch_size != 1) {
+            throw std::runtime_error("cpp_pypowerlike benchmark path supports only --batch-size 1");
+        }
         return run_reference_pypowerlike_once(case_data, profile, config);
     }
+    if (profile.modified_schedule) {
+        if (batch_size != 1) {
+            throw std::runtime_error("modified benchmark paths support only --batch-size 1");
+        }
+#ifdef CUPF_WITH_CUDA
+        return run_cuda_mixed_modified_once(case_data, profile, config);
+#else
+        throw std::runtime_error("modified CUDA profiles require CUDA support");
+#endif
+    }
     if (profile.hybrid_cuda_mixed_edge) {
+        if (batch_size != 1) {
+            throw std::runtime_error("hybrid ablation benchmark paths support only --batch-size 1");
+        }
 #if defined(CUPF_WITH_CUDA) && defined(CUPF_WITH_SUPERLU)
         return run_hybrid_cuda_mixed_edge_once(case_data, profile, config);
 #else
         throw std::runtime_error("Hybrid CUDA mixed edge profiles require CUDA and SuperLU support");
 #endif
     }
-    return run_core_once(case_data, profile, config);
+    return run_core_once(case_data, profile, config, batch_size);
 }
 
 }  // namespace
@@ -782,12 +1154,13 @@ int main(int argc, char** argv)
 
         const CliOptions cli = parse_args(argc, argv);
         const auto case_data = cupf::tests::load_dump_case(cli.case_dir);
-        const ProfileConfig profile = parse_profile(cli.profile);
+        ProfileConfig profile = parse_profile(cli.profile);
+        profile.options.cudss = cli.cudss;
         const NRConfig config{cli.tolerance, cli.max_iter};
 
         newton_solver::utils::setDumpEnabled(false);
         for (int32_t i = 0; i < cli.warmup; ++i) {
-            (void)run_once(case_data, profile, config);
+            (void)run_once(case_data, profile, config, cli.batch_size);
         }
 
         std::cout << std::boolalpha << std::scientific << std::setprecision(12);
@@ -796,7 +1169,7 @@ int main(int argc, char** argv)
                 newton_solver::utils::setDumpDirectory(repeat_dump_dir(cli.dump_dir, repeat).string());
                 newton_solver::utils::setDumpEnabled(true);
             }
-            const BenchRun run = run_once(case_data, profile, config);
+            const BenchRun run = run_once(case_data, profile, config, cli.batch_size);
             newton_solver::utils::setDumpEnabled(false);
 
             std::cout
@@ -807,8 +1180,8 @@ int main(int argc, char** argv)
                 << "backend=" << profile.backend << ' '
                 << "compute=" << profile.compute << ' '
                 << "jacobian=" << profile.jacobian << ' '
-                << "algorithm=" << profile.algorithm << ' '
                 << "repeat=" << repeat << ' '
+                << "batch_size=" << cli.batch_size << ' '
                 << "success=" << run.success << ' '
                 << "iterations=" << run.iterations << ' '
                 << "final_mismatch=" << run.final_mismatch << ' '

@@ -33,6 +33,17 @@ struct StageScope {
     newton_solver::utils::ScopedTimer     timer;
 };
 
+void validate_batch_args(int32_t batch_size, int64_t stride, int32_t n_bus, const char* name)
+{
+    if (batch_size <= 0) {
+        throw std::invalid_argument("NewtonSolver::solve_batch(): batch_size must be positive");
+    }
+    if (stride < n_bus) {
+        throw std::invalid_argument(std::string("NewtonSolver::solve_batch(): ") +
+                                    name + " stride must be at least n_bus");
+    }
+}
+
 }  // namespace
 
 
@@ -106,14 +117,63 @@ void NewtonSolver::solve(
     const NRConfig&             config,
     NRResultF64&                result)
 {
+    NRBatchResultF64 batch_result;
+    solve_batch(ybus,
+                sbus,
+                ybus.rows,
+                V0,
+                ybus.rows,
+                1,
+                pv,
+                n_pv,
+                pq,
+                n_pq,
+                config,
+                batch_result);
+
+    result = {};
+    result.V = std::move(batch_result.V);
+    result.iterations = batch_result.iterations.empty() ? 0 : batch_result.iterations[0];
+    result.final_mismatch = batch_result.final_mismatch.empty() ? 0.0 : batch_result.final_mismatch[0];
+    result.converged = !batch_result.converged.empty() && batch_result.converged[0] != 0;
+}
+
+
+void NewtonSolver::solve_batch(
+    const YbusViewF64&          ybus,
+    const std::complex<double>* sbus,
+    int64_t                     sbus_stride,
+    const std::complex<double>* V0,
+    int64_t                     V0_stride,
+    int32_t                     batch_size,
+    const int32_t*              pv, int32_t n_pv,
+    const int32_t*              pq, int32_t n_pq,
+    const NRConfig&             config,
+    NRBatchResultF64&           result)
+{
     StageScope total("NR.solve.total");
 
     if (!analyzed_) {
         throw std::runtime_error(
-            "NewtonSolver::solve(): analyze()를 먼저 호출해야 합니다.");
+            "NewtonSolver::solve_batch(): analyze()를 먼저 호출해야 합니다.");
     }
 
+    validate_batch_args(batch_size, sbus_stride, ybus.rows, "sbus");
+    validate_batch_args(batch_size, V0_stride, ybus.rows, "V0");
+
     result = {};
+    result.n_bus = ybus.rows;
+    result.batch_size = batch_size;
+
+    // 현재 실제 B>1 실행은 CUDA Mixed optimized path에서만 활성화되어 있다.
+    // CPU/FP64 CUDA 경로는 single-case compatibility path로 남긴다.
+    if (batch_size != 1 &&
+        !(plan_.storage->backend() == BackendKind::CUDA &&
+          plan_.storage->compute() == ComputePolicy::Mixed)) {
+        throw std::runtime_error(
+            "NewtonSolver::solve_batch(): batch_size > 1 is currently supported "
+            "only by the CUDA Mixed path.");
+    }
 
     {
         StageScope stage("NR.solve.upload");
@@ -122,6 +182,11 @@ void NewtonSolver::solve(
             .sbus   = sbus,
             .V0     = V0,
             .config = &config,
+            .batch_size = batch_size,
+            .sbus_stride = sbus_stride,
+            .V0_stride = V0_stride,
+            .ybus_values_batched = false,
+            .ybus_value_stride = ybus.nnz,
         };
         plan_.storage->upload(upload_ctx);
     }
@@ -133,15 +198,26 @@ void NewtonSolver::solve(
         .pq      = pq, .n_pq = n_pq,
     };
 
-    result.iterations = run_iteration_stages(iter_ctx);
-    result.converged  = iter_ctx.converged;
+    const int32_t iterations = run_iteration_stages(iter_ctx);
 
     {
         StageScope stage("NR.solve.download");
-        plan_.storage->download_result(result);
+        plan_.storage->download_batch_result(result);
     }
 
-    result.final_mismatch = iter_ctx.normF;
+    result.n_bus = ybus.rows;
+    result.batch_size = batch_size;
+    result.iterations.assign(static_cast<std::size_t>(batch_size), iterations);
+    if (result.final_mismatch.size() != static_cast<std::size_t>(batch_size)) {
+        result.final_mismatch.assign(static_cast<std::size_t>(batch_size), iter_ctx.normF);
+    }
+    result.converged.resize(static_cast<std::size_t>(batch_size));
+    for (int32_t b = 0; b < batch_size; ++b) {
+        const double norm =
+            result.final_mismatch.empty() ? iter_ctx.normF : result.final_mismatch[static_cast<std::size_t>(b)];
+        result.converged[static_cast<std::size_t>(b)] =
+            static_cast<uint8_t>(norm <= config.tolerance ? 1 : 0);
+    }
 }
 
 
@@ -162,39 +238,24 @@ void NewtonSolver::run_analyze_stages(const AnalyzeContext& ctx)
 
 
 // ---------------------------------------------------------------------------
-// run_iteration_stages: NR 반복 루프 선택
-// ---------------------------------------------------------------------------
-int32_t NewtonSolver::run_iteration_stages(IterationContext& ctx)
-{
-    switch (options_.algorithm) {
-        case NewtonAlgorithm::Standard:
-            return run_standard_iteration_stages(ctx);
-        case NewtonAlgorithm::Modified:
-            return run_modified_iteration_stages(ctx);
-    }
-
-    throw std::invalid_argument("NewtonSolver: unsupported NewtonAlgorithm");
-}
-
-
-// ---------------------------------------------------------------------------
-// run_standard_iteration_stages: 기존 NR 반복 루프
+// run_iteration_stages: NR 반복 루프
 //
 // 각 반복은 4개의 stage로 구성된다.
-//   mismatch     — F = S_specified - S_calculated, normF 계산
+//   mismatch     — F = S_calculated - S_specified, normF 계산
 //   jacobian     — Jacobian J 채우기
-//   linear_solve — factorize 후 J·dx = -F 풀기
-//   voltage_update — dx 적용, V 재구성
+//   linear_solve — 선형계 풀이
+//   voltage_update — dx 적용, V cache 재구성
 //
 // mismatch 단계 후 수렴하면 루프를 즉시 종료한다.
 // ---------------------------------------------------------------------------
-int32_t NewtonSolver::run_standard_iteration_stages(IterationContext& ctx)
+int32_t NewtonSolver::run_iteration_stages(IterationContext& ctx)
 {
     int32_t completed = 0;
 
     for (int32_t iter = 0; iter < ctx.config.max_iter; ++iter) {
         StageScope total("NR.iteration.total");
         ctx.iter = iter;
+        ctx.jacobian_updated_this_iter = false;
         completed = iter + 1;
 
         {
@@ -208,117 +269,16 @@ int32_t NewtonSolver::run_standard_iteration_stages(IterationContext& ctx)
         {
             StageScope stage("NR.iteration.jacobian");
             plan_.jacobian->run(ctx);
+            ctx.jacobian_updated_this_iter = true;
+            ctx.jacobian_age = 0;
         }
         {
-            StageScope linear("NR.iteration.linear");
-            {
-                StageScope stage("NR.iteration.linear_factorize");
-                plan_.linear_solve->factorize(ctx);
-            }
-            {
-                StageScope stage("NR.iteration.linear_solve");
-                plan_.linear_solve->solve(ctx);
-            }
+            StageScope stage("NR.iteration.linear_solve");
+            plan_.linear_solve->run(ctx);
         }
         {
             StageScope stage("NR.iteration.voltage_update");
             plan_.voltage_update->run(ctx);
-        }
-    }
-
-    return completed;
-}
-
-
-// ---------------------------------------------------------------------------
-// run_modified_iteration_stages: factorization reuse 스케줄
-//
-// 초기 V0에서 F0/J0를 만든 뒤, outer pass마다 existing Jacobian을 한 번
-// factorize한다. 이후 같은 factorization으로
-//   solve(Fk)   → voltage_update(Vk+1) → mismatch(Fk+1)
-//   solve(Fk+1) → voltage_update(Vk+2) → mismatch(Fk+2)
-// 를 최대 두 번 수행하고, 루프 마지막에서 다음 factorize에 사용할 Jacobian을
-// 갱신한다.
-//
-// 따라서 operator 타이밍에서 linear_factorize count는 linear_solve count의
-// 절반(수렴/최대반복에 따라 올림)이 된다.
-// ---------------------------------------------------------------------------
-int32_t NewtonSolver::run_modified_iteration_stages(IterationContext& ctx)
-{
-    if (ctx.config.max_iter <= 0) {
-        return 0;
-    }
-
-    int32_t completed = 0;
-
-    ctx.iter = 0;
-    {
-        StageScope stage("NR.iteration.mismatch");
-        plan_.mismatch->run(ctx);
-        completed = 1;
-    }
-    if (ctx.converged) {
-        return completed;
-    }
-
-    ctx.iter = completed - 1;
-    {
-        StageScope stage("NR.iteration.jacobian");
-        plan_.jacobian->run(ctx);
-    }
-
-    int32_t corrections = 0;
-    while (!ctx.converged && corrections < ctx.config.max_iter) {
-        for (int32_t reuse = 0;
-             reuse < 2 && !ctx.converged && corrections < ctx.config.max_iter;
-             ++reuse) {
-            StageScope total("NR.iteration.total");
-
-            // The current F was produced by the latest mismatch evaluation.
-            ctx.iter = completed - 1;
-
-            if (reuse == 0) {
-                {
-                    StageScope linear("NR.iteration.linear");
-                    {
-                        StageScope stage("NR.iteration.linear_factorize");
-                        plan_.linear_solve->factorize(ctx);
-                    }
-                    {
-                        StageScope stage("NR.iteration.linear_solve");
-                        plan_.linear_solve->solve(ctx);
-                    }
-                }
-            } else {
-                {
-                    StageScope linear("NR.iteration.linear");
-                    {
-                        StageScope stage("NR.iteration.linear_solve");
-                        plan_.linear_solve->solve(ctx);
-                    }
-                }
-            }
-
-            {
-                StageScope stage("NR.iteration.voltage_update");
-                plan_.voltage_update->run(ctx);
-            }
-            ++corrections;
-
-            ctx.iter = completed;
-            {
-                StageScope stage("NR.iteration.mismatch");
-                plan_.mismatch->run(ctx);
-                completed = ctx.iter + 1;
-            }
-        }
-
-        if (!ctx.converged && corrections < ctx.config.max_iter) {
-            ctx.iter = completed - 1;
-            {
-                StageScope stage("NR.iteration.jacobian");
-                plan_.jacobian->run(ctx);
-            }
         }
     }
 

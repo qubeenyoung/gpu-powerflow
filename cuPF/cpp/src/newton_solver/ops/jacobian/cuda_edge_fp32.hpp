@@ -8,8 +8,8 @@
 // ---------------------------------------------------------------------------
 // CudaJacobianOpEdgeFp32: edge-based FP32 Jacobian fill kernel.
 //
-// Used by the CUDA Mixed profile. Public voltage state is FP64; this op casts
-// Ybus/V to FP32 inside the kernel before filling the FP32 Jacobian.
+// Used by the CUDA Mixed profile. Ybus/J are FP32 while V cache and Ibus are
+// FP64; final Jacobian entries are written as FP32.
 // ---------------------------------------------------------------------------
 class CudaJacobianOpEdgeFp32 final : public IJacobianOp {
 public:

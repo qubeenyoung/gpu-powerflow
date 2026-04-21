@@ -1,19 +1,20 @@
 // ---------------------------------------------------------------------------
 // cuda_mixed_storage.cpp — CUDA Mixed 정밀도 Storage 구현
 //
-// cuda_fp64_storage.cpp 와 동일한 구조이며, Jacobian·solve 관련 버퍼만 float.
+// cuda_fp64_storage.cpp 와 같은 public FP64 API를 받지만, optimized mixed
+// profile 내부 dtype과 batch-major runtime buffers를 관리한다.
 //
 // 주요 차이점:
-//   - d_J_values : DeviceBuffer<float>  (FP32 Jacobian fill + cuDSS FP32 입력)
-//   - d_dx       : DeviceBuffer<float>  (cuDSS FP32 출력 → VoltageUpdate에서 FP64 캐스트)
-//   - d_Ybus_re/im, d_V_re/im, d_F, d_Va/Vm, d_Sbus_re/im : 모두 FP64(double)
+//   - d_Ybus_re/im : FP32 data
+//   - d_V_re/im : FP64 derived voltage cache
+//   - d_Sbus_re/im, d_Ibus_re/im : FP64 specified power/current cache
+//   - d_J_values, d_dx : FP32 Jacobian/linear-solve data
+//   - d_Va/Vm, d_F : FP64 authoritative voltage state and residual
 //
 // upload_complex_components<DeviceScalar>():
-//   FP64 버전과 달리 템플릿으로 구현되어 double 과 float 양쪽에 사용된다.
-//     - upload(Ybus): DeviceScalar = double  (Mismatch는 FP64 필요)
-//     - upload(Sbus): DeviceScalar = double
-//     - upload(V0):   DeviceScalar = double
-//   static_cast<DeviceScalar>(src[i].real()) 로 타입 변환을 통일.
+//   public complex<double>[] 입력을 batch-major SoA device buffer로 변환한다.
+//   DeviceScalar = float  : Ybus
+//   DeviceScalar = double : Sbus 업로드
 //
 // prepare() / upload() / download_result() 의 역할은 cuda_fp64_storage.cpp 와 동일.
 // ---------------------------------------------------------------------------
@@ -51,21 +52,63 @@ std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
     return rows;
 }
 
-// std::complex<double>[] → 실수·허수 분리 후 DeviceScalar 타입으로 device 업로드.
-// DeviceScalar = double : Ybus/Sbus/V 버퍼 (FP64 유지)
-// DeviceScalar = float  : 필요 시 확장 가능 (현재 Mixed에서 float 버퍼에는 직접 사용 안 함)
+// std::complex<double>[] → batch-major 실수·허수 분리 후 device 업로드.
 template <typename DeviceScalar>
 void upload_complex_components(DeviceBuffer<DeviceScalar>& dst_re,
                                DeviceBuffer<DeviceScalar>& dst_im,
                                const std::complex<double>* src,
-                               int32_t count)
+                               int32_t logical_count,
+                               int32_t batch_size,
+                               int64_t stride)
 {
-    std::vector<DeviceScalar> h_re(static_cast<std::size_t>(count));
-    std::vector<DeviceScalar> h_im(static_cast<std::size_t>(count));
-    for (int32_t i = 0; i < count; ++i) {
-        h_re[static_cast<std::size_t>(i)] = static_cast<DeviceScalar>(src[i].real());
-        h_im[static_cast<std::size_t>(i)] = static_cast<DeviceScalar>(src[i].imag());
+    const std::size_t total_count =
+        static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(logical_count);
+    std::vector<DeviceScalar> h_re(total_count);
+    std::vector<DeviceScalar> h_im(total_count);
+
+    for (int32_t b = 0; b < batch_size; ++b) {
+        const std::size_t dst_batch =
+            static_cast<std::size_t>(b) * static_cast<std::size_t>(logical_count);
+        const std::size_t src_batch = static_cast<std::size_t>(b) * static_cast<std::size_t>(stride);
+        for (int32_t i = 0; i < logical_count; ++i) {
+            const std::complex<double>& value = src[src_batch + static_cast<std::size_t>(i)];
+            h_re[dst_batch + static_cast<std::size_t>(i)] = static_cast<DeviceScalar>(value.real());
+            h_im[dst_batch + static_cast<std::size_t>(i)] = static_cast<DeviceScalar>(value.imag());
+        }
     }
+    dst_re.assign(h_re.data(), h_re.size());
+    dst_im.assign(h_im.data(), h_im.size());
+}
+
+// Ybus 값은 batch 공통이 기본이다. batch별 값 경로는 같은 buffer 이름을
+// [B * nnz_ybus] layout으로 확장한다.
+template <typename DeviceScalar>
+void upload_ybus_components(DeviceBuffer<DeviceScalar>& dst_re,
+                            DeviceBuffer<DeviceScalar>& dst_im,
+                            const std::complex<double>* src,
+                            int32_t nnz_ybus,
+                            int32_t batch_size,
+                            int64_t stride,
+                            bool values_batched)
+{
+    const int32_t stored_batches = values_batched ? batch_size : 1;
+    const std::size_t total_count =
+        static_cast<std::size_t>(stored_batches) * static_cast<std::size_t>(nnz_ybus);
+    std::vector<DeviceScalar> h_re(total_count);
+    std::vector<DeviceScalar> h_im(total_count);
+
+    for (int32_t b = 0; b < stored_batches; ++b) {
+        const std::size_t dst_batch =
+            static_cast<std::size_t>(b) * static_cast<std::size_t>(nnz_ybus);
+        const std::size_t src_batch =
+            values_batched ? static_cast<std::size_t>(b) * static_cast<std::size_t>(stride) : 0;
+        for (int32_t k = 0; k < nnz_ybus; ++k) {
+            const std::complex<double>& value = src[src_batch + static_cast<std::size_t>(k)];
+            h_re[dst_batch + static_cast<std::size_t>(k)] = static_cast<DeviceScalar>(value.real());
+            h_im[dst_batch + static_cast<std::size_t>(k)] = static_cast<DeviceScalar>(value.imag());
+        }
+    }
+
     dst_re.assign(h_re.data(), h_re.size());
     dst_im.assign(h_im.data(), h_im.size());
 }
@@ -89,8 +132,10 @@ void CudaMixedStorage::prepare(const AnalyzeContext& ctx)
     n_pq   = ctx.maps.n_pq;
     dimF   = n_pvpq + n_pq;
 
-    const int32_t nnz_ybus = ctx.ybus.nnz;
-    const int32_t nnz_J    = ctx.J.nnz;
+    nnz_ybus = ctx.ybus.nnz;
+    nnz_J    = ctx.J.nnz;
+    batch_size = 1;
+    ybus_values_batched = false;
 
     d_Ybus_re.resize(nnz_ybus);
     d_Ybus_im.resize(nnz_ybus);
@@ -105,6 +150,7 @@ void CudaMixedStorage::prepare(const AnalyzeContext& ctx)
     d_J_col_idx.assign(ctx.J.col_idx.data(), static_cast<std::size_t>(nnz_J));
 
     d_F.resize(dimF);
+    d_normF.resize(1);
     d_dx.resize(dimF);
 
     d_Va.resize(n_bus);
@@ -114,6 +160,8 @@ void CudaMixedStorage::prepare(const AnalyzeContext& ctx)
 
     d_Sbus_re.resize(n_bus);
     d_Sbus_im.resize(n_bus);
+    d_Ibus_re.resize(n_bus);
+    d_Ibus_im.resize(n_bus);
 
     const auto upload_map = [](DeviceBuffer<int32_t>& dst, const std::vector<int32_t>& src) {
         dst.assign(src.data(), src.size());
@@ -133,8 +181,11 @@ void CudaMixedStorage::prepare(const AnalyzeContext& ctx)
     d_pq.assign(ctx.pq, static_cast<std::size_t>(ctx.n_pq));
 
     d_F.memsetZero();
+    d_normF.memsetZero();
     d_dx.memsetZero();
     d_J_values.memsetZero();
+    d_Ibus_re.memsetZero();
+    d_Ibus_im.memsetZero();
 }
 
 
@@ -146,45 +197,142 @@ void CudaMixedStorage::upload(const SolveContext& ctx)
 
     const YbusViewF64& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus ||
-        ybus.nnz != static_cast<int32_t>(d_Ybus_re.size())) {
+        ybus.nnz != nnz_ybus) {
         throw std::runtime_error("CudaMixedStorage::upload: Ybus dimensions do not match analyze()");
     }
 
     require_pointer(ybus.data, "SolveContext.ybus->data", ybus.nnz);
     require_pointer(ctx.sbus, "SolveContext.sbus", n_bus);
     require_pointer(ctx.V0, "SolveContext.V0", n_bus);
-
-    upload_complex_components(d_Ybus_re, d_Ybus_im, ybus.data, ybus.nnz);
-    upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus);
-    upload_complex_components(d_V_re, d_V_im, ctx.V0, n_bus);
-
-    std::vector<double> h_Va(static_cast<std::size_t>(n_bus));
-    std::vector<double> h_Vm(static_cast<std::size_t>(n_bus));
-    for (int32_t bus = 0; bus < n_bus; ++bus) {
-        h_Va[static_cast<std::size_t>(bus)] = std::arg(ctx.V0[bus]);
-        h_Vm[static_cast<std::size_t>(bus)] = std::abs(ctx.V0[bus]);
+    if (ctx.batch_size <= 0) {
+        throw std::invalid_argument("CudaMixedStorage::upload: batch_size must be positive");
     }
+    if (ctx.sbus_stride < n_bus || ctx.V0_stride < n_bus) {
+        throw std::invalid_argument("CudaMixedStorage::upload: batch strides must be at least n_bus");
+    }
+    if (ctx.ybus_values_batched && ctx.ybus_value_stride < ybus.nnz) {
+        throw std::invalid_argument("CudaMixedStorage::upload: ybus_value_stride must be at least nnz");
+    }
+
+    batch_size = ctx.batch_size;
+    ybus_values_batched = ctx.ybus_values_batched;
+
+    const std::size_t bus_count =
+        static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
+    const std::size_t residual_count =
+        static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(dimF);
+    const std::size_t jacobian_count =
+        static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(nnz_J);
+
+    const auto ensure_size = [](auto& buffer, std::size_t count) {
+        if (buffer.size() != count) {
+            buffer.resize(count);
+        }
+    };
+
+    ensure_size(d_J_values, jacobian_count);
+    ensure_size(d_F, residual_count);
+    ensure_size(d_normF, static_cast<std::size_t>(batch_size));
+    ensure_size(d_dx, residual_count);
+    ensure_size(d_Va, bus_count);
+    ensure_size(d_Vm, bus_count);
+    ensure_size(d_V_re, bus_count);
+    ensure_size(d_V_im, bus_count);
+    ensure_size(d_Sbus_re, bus_count);
+    ensure_size(d_Sbus_im, bus_count);
+    ensure_size(d_Ibus_re, bus_count);
+    ensure_size(d_Ibus_im, bus_count);
+
+    upload_ybus_components(
+        d_Ybus_re,
+        d_Ybus_im,
+        ybus.data,
+        ybus.nnz,
+        batch_size,
+        ctx.ybus_value_stride,
+        ybus_values_batched);
+    upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
+
+    std::vector<double> h_V_re(bus_count);
+    std::vector<double> h_V_im(bus_count);
+    std::vector<double> h_Va(bus_count);
+    std::vector<double> h_Vm(bus_count);
+    for (int32_t b = 0; b < batch_size; ++b) {
+        const std::size_t dst_batch =
+            static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
+        const std::size_t src_batch =
+            static_cast<std::size_t>(b) * static_cast<std::size_t>(ctx.V0_stride);
+        for (int32_t bus = 0; bus < n_bus; ++bus) {
+            const auto& v0 = ctx.V0[src_batch + static_cast<std::size_t>(bus)];
+            const std::size_t dst = dst_batch + static_cast<std::size_t>(bus);
+            h_V_re[dst] = v0.real();
+            h_V_im[dst] = v0.imag();
+            h_Va[dst] = std::arg(v0);
+            h_Vm[dst] = std::abs(v0);
+        }
+    }
+    d_V_re.assign(h_V_re.data(), h_V_re.size());
+    d_V_im.assign(h_V_im.data(), h_V_im.size());
     d_Va.assign(h_Va.data(), h_Va.size());
     d_Vm.assign(h_Vm.data(), h_Vm.size());
 
     d_F.memsetZero();
+    d_normF.memsetZero();
     d_dx.memsetZero();
+    d_J_values.memsetZero();
+    d_Ibus_re.memsetZero();
+    d_Ibus_im.memsetZero();
 }
 
 
 void CudaMixedStorage::download_result(NRResultF64& result) const
 {
-    std::vector<double> h_re(static_cast<std::size_t>(n_bus));
-    std::vector<double> h_im(static_cast<std::size_t>(n_bus));
+    if (batch_size != 1) {
+        throw std::runtime_error("CudaMixedStorage::download_result: use batch result download for batch_size > 1");
+    }
 
-    d_V_re.copyTo(h_re.data(), h_re.size());
-    d_V_im.copyTo(h_im.data(), h_im.size());
+    std::vector<double> h_Va(static_cast<std::size_t>(n_bus));
+    std::vector<double> h_Vm(static_cast<std::size_t>(n_bus));
+
+    d_Va.copyTo(h_Va.data(), h_Va.size());
+    d_Vm.copyTo(h_Vm.data(), h_Vm.size());
 
     result.V.resize(static_cast<std::size_t>(n_bus));
     for (int32_t bus = 0; bus < n_bus; ++bus) {
+        const double va = h_Va[static_cast<std::size_t>(bus)];
+        const double vm = h_Vm[static_cast<std::size_t>(bus)];
         result.V[static_cast<std::size_t>(bus)] = std::complex<double>(
-            h_re[static_cast<std::size_t>(bus)],
-            h_im[static_cast<std::size_t>(bus)]);
+            vm * std::cos(va),
+            vm * std::sin(va));
+    }
+}
+
+
+void CudaMixedStorage::download_batch_result(NRBatchResultF64& result) const
+{
+    std::vector<double> h_Va(static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus));
+    std::vector<double> h_Vm(static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus));
+
+    d_Va.copyTo(h_Va.data(), h_Va.size());
+    d_Vm.copyTo(h_Vm.data(), h_Vm.size());
+
+    result.n_bus = n_bus;
+    result.batch_size = batch_size;
+    result.V.resize(static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus));
+
+    for (int32_t b = 0; b < batch_size; ++b) {
+        const std::size_t batch_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
+        for (int32_t bus = 0; bus < n_bus; ++bus) {
+            const std::size_t idx = batch_base + static_cast<std::size_t>(bus);
+            const double va = h_Va[idx];
+            const double vm = h_Vm[idx];
+            result.V[idx] = std::complex<double>(vm * std::cos(va), vm * std::sin(va));
+        }
+    }
+
+    if (!d_normF.empty()) {
+        result.final_mismatch.resize(static_cast<std::size_t>(batch_size));
+        d_normF.copyTo(result.final_mismatch.data(), result.final_mismatch.size());
     }
 }
 

@@ -50,16 +50,14 @@ PYBIND11_MODULE(_cupf, m)
         .value("Mixed", ComputePolicy::Mixed)
         .export_values();
 
-    py::enum_<JacobianBuilderType>(m, "JacobianBuilderType",
-        "Jacobian 희소 구조 및 값 산포 방식.")
-        .value("EdgeBased",   JacobianBuilderType::EdgeBased)
-        .value("VertexBased", JacobianBuilderType::VertexBased)
-        .export_values();
-
-    py::enum_<NewtonAlgorithm>(m, "NewtonAlgorithm",
-        "Newton-Raphson 반복 스케줄.")
-        .value("Standard", NewtonAlgorithm::Standard)
-        .value("Modified", NewtonAlgorithm::Modified)
+    py::enum_<CuDSSAlgorithm>(m, "CuDSSAlgorithm",
+        "cuDSS 알고리즘 선택.")
+        .value("DEFAULT", CuDSSAlgorithm::Default)
+        .value("ALG_1",   CuDSSAlgorithm::Alg1)
+        .value("ALG_2",   CuDSSAlgorithm::Alg2)
+        .value("ALG_3",   CuDSSAlgorithm::Alg3)
+        .value("ALG_4",   CuDSSAlgorithm::Alg4)
+        .value("ALG_5",   CuDSSAlgorithm::Alg5)
         .export_values();
 
     // -----------------------------------------------------------------------
@@ -74,18 +72,28 @@ PYBIND11_MODULE(_cupf, m)
         .def_readwrite("max_iter",  &NRConfig::max_iter,
             "최대 반복 횟수 (기본값 50)");
 
+    py::class_<CuDSSOptions>(m, "CuDSSOptions",
+        "CUDA cuDSS direct solver 런타임 설정.")
+        .def(py::init<>())
+        .def_readwrite("use_matching", &CuDSSOptions::use_matching,
+            "cuDSS matching 전처리 활성화")
+        .def_readwrite("matching_alg", &CuDSSOptions::matching_alg,
+            "matching 알고리즘")
+        .def_readwrite("auto_pivot_epsilon", &CuDSSOptions::auto_pivot_epsilon,
+            "True이면 cuDSS 기본 pivot epsilon 사용")
+        .def_readwrite("pivot_epsilon", &CuDSSOptions::pivot_epsilon,
+            "auto_pivot_epsilon=False일 때 사용할 pivot epsilon");
+
     py::class_<NewtonOptions>(m, "NewtonOptions",
         "solver 생성자에 전달하는 설정.\n"
-        "backend, compute policy, Jacobian builder, Newton 스케줄을 선택한다.")
+        "backend, compute policy, cuDSS 옵션을 선택한다.")
         .def(py::init<>())
         .def_readwrite("backend", &NewtonOptions::backend,
             "연산 백엔드 (BackendKind.CPU 또는 BackendKind.CUDA)")
         .def_readwrite("compute", &NewtonOptions::compute,
             "내부 계산 정밀도 정책 (ComputePolicy.FP64 또는 ComputePolicy.Mixed)")
-        .def_readwrite("jacobian_builder", &NewtonOptions::jacobian_builder,
-            "Jacobian 빌드 알고리즘 (JacobianBuilderType.EdgeBased 또는 VertexBased)")
-        .def_readwrite("algorithm", &NewtonOptions::algorithm,
-            "Newton 반복 스케줄 (NewtonAlgorithm.Standard 또는 Modified)");
+        .def_readwrite("cudss", &NewtonOptions::cudss,
+            "CUDA direct solver 런타임 설정");
 
     // -----------------------------------------------------------------------
     // 결과 구조체 바인딩

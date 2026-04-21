@@ -6,6 +6,7 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -36,7 +37,6 @@ class ProfileSpec:
     backend: str | None = None
     compute: str | None = None
     jacobian: str | None = None
-    algorithm: str | None = None
 
 
 PROFILE_SPECS: dict[str, ProfileSpec] = {
@@ -45,24 +45,20 @@ PROFILE_SPECS: dict[str, ProfileSpec] = {
     "cpp_pypowerlike": ProfileSpec("cpp_naive", "cupf", "cpp_pypowerlike", "cpp_naive", "cpu", "fp64", "pypower_like"),
     "cpp": ProfileSpec("cpp", "cupf", "cpu_fp64_edge", "cpp", "cpu", "fp64", "edge_based"),
     "cpu_fp64_edge": ProfileSpec("cpp", "cupf", "cpu_fp64_edge", "cpp", "cpu", "fp64", "edge_based"),
-    "cpp_modified": ProfileSpec("cpp_modified", "cupf", "cpu_fp64_edge_modified", "cpp_modified", "cpu", "fp64", "edge_based", "modified"),
-    "cpu_fp64_edge_modified": ProfileSpec("cpp_modified", "cupf", "cpu_fp64_edge_modified", "cpp_modified", "cpu", "fp64", "edge_based", "modified"),
     "cuda_edge": ProfileSpec("cuda_edge", "cupf", "cuda_mixed_edge", "cuda_edge", "cuda", "mixed", "edge_based"),
     "cuda_mixed_edge": ProfileSpec("cuda_edge", "cupf", "cuda_mixed_edge", "cuda_edge", "cuda", "mixed", "edge_based"),
-    "cuda_edge_modified": ProfileSpec("cuda_edge_modified", "cupf", "cuda_mixed_edge_modified", "cuda_edge_modified", "cuda", "mixed", "edge_based", "modified"),
-    "cuda_mixed_edge_modified": ProfileSpec("cuda_edge_modified", "cupf", "cuda_mixed_edge_modified", "cuda_edge_modified", "cuda", "mixed", "edge_based", "modified"),
+    "cuda_edge_modified": ProfileSpec("cuda_edge_modified", "cupf", "cuda_mixed_edge_modified", "cuda_edge_modified", "cuda", "mixed", "edge_based"),
+    "cuda_mixed_edge_modified": ProfileSpec("cuda_edge_modified", "cupf", "cuda_mixed_edge_modified", "cuda_edge_modified", "cuda", "mixed", "edge_based"),
     "cuda_vertex": ProfileSpec("cuda_vertex", "cupf", "cuda_mixed_vertex", "cuda_vertex", "cuda", "mixed", "vertex_based"),
     "cuda_mixed_vertex": ProfileSpec("cuda_vertex", "cupf", "cuda_mixed_vertex", "cuda_vertex", "cuda", "mixed", "vertex_based"),
-    "cuda_vertex_modified": ProfileSpec("cuda_vertex_modified", "cupf", "cuda_mixed_vertex_modified", "cuda_vertex_modified", "cuda", "mixed", "vertex_based", "modified"),
-    "cuda_mixed_vertex_modified": ProfileSpec("cuda_vertex_modified", "cupf", "cuda_mixed_vertex_modified", "cuda_vertex_modified", "cuda", "mixed", "vertex_based", "modified"),
+    "cuda_vertex_modified": ProfileSpec("cuda_vertex_modified", "cupf", "cuda_mixed_vertex_modified", "cuda_vertex_modified", "cuda", "mixed", "vertex_based"),
+    "cuda_mixed_vertex_modified": ProfileSpec("cuda_vertex_modified", "cupf", "cuda_mixed_vertex_modified", "cuda_vertex_modified", "cuda", "mixed", "vertex_based"),
     "cuda_wo_jacobian": ProfileSpec("cuda_wo_jacobian", "cupf", "cuda_mixed_edge_cpu_naive_jacobian", "cuda_wo_jacobian", "cuda", "mixed", "cpu_naive_pypower_like"),
     "cuda_mixed_edge_cpu_naive_jacobian": ProfileSpec("cuda_wo_jacobian", "cupf", "cuda_mixed_edge_cpu_naive_jacobian", "cuda_wo_jacobian", "cuda", "mixed", "cpu_naive_pypower_like"),
     "cuda_wo_cudss": ProfileSpec("cuda_wo_cudss", "cupf", "cuda_mixed_edge_cpu_superlu", "cuda_wo_cudss", "cuda", "mixed", "edge_based"),
     "cuda_mixed_edge_cpu_superlu": ProfileSpec("cuda_wo_cudss", "cupf", "cuda_mixed_edge_cpu_superlu", "cuda_wo_cudss", "cuda", "mixed", "edge_based"),
     "cuda_fp64_edge": ProfileSpec("cuda_fp64_edge", "cupf", "cuda_fp64_edge", "cuda_fp64_edge", "cuda", "fp64", "edge_based"),
-    "cuda_fp64_edge_modified": ProfileSpec("cuda_fp64_edge_modified", "cupf", "cuda_fp64_edge_modified", "cuda_fp64_edge_modified", "cuda", "fp64", "edge_based", "modified"),
     "cuda_fp64_vertex": ProfileSpec("cuda_fp64_vertex", "cupf", "cuda_fp64_vertex", "cuda_fp64_vertex", "cuda", "fp64", "vertex_based"),
-    "cuda_fp64_vertex_modified": ProfileSpec("cuda_fp64_vertex_modified", "cupf", "cuda_fp64_vertex_modified", "cuda_fp64_vertex_modified", "cuda", "fp64", "vertex_based", "modified"),
 }
 
 
@@ -83,12 +79,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profiles", nargs="*", default=DEFAULT_PROFILES)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--tolerance", type=float, default=1e-8)
     parser.add_argument("--max-iter", type=int, default=50)
     parser.add_argument("--with-cuda", action="store_true", help="Force CUDA build.")
     parser.add_argument(
         "--cudss-reordering-alg",
-        choices=("DEFAULT", "ALG_1", "ALG_2", "ALG_3"),
+        choices=("DEFAULT", "ALG_1", "ALG_2"),
         default="DEFAULT",
         help="cuDSS reordering algorithm used for CUDA benchmark builds.",
     )
@@ -108,15 +105,34 @@ def parse_args() -> argparse.Namespace:
         default="AUTO",
         help="cuDSS CUDSS_CONFIG_ND_NLEVELS value: AUTO or an integer >= 0.",
     )
-    parser.add_argument("--cudss-use-matching", action="store_true", help="Enable cuDSS matching.")
+    parser.add_argument(
+        "--cudss-use-matching",
+        "--cudss-matching",
+        dest="cudss_use_matching",
+        action="store_true",
+        help="Enable cuDSS CUDSS_CONFIG_USE_MATCHING.",
+    )
     parser.add_argument(
         "--cudss-matching-alg",
         choices=("DEFAULT", "ALG_1", "ALG_2", "ALG_3", "ALG_4", "ALG_5"),
         default="DEFAULT",
-        help="cuDSS matching algorithm used when --cudss-use-matching is enabled.",
+        help="cuDSS CUDSS_CONFIG_MATCHING_ALG value used when matching is enabled.",
+    )
+    parser.add_argument(
+        "--cudss-pivot-epsilon",
+        "--cudss-epsilon",
+        dest="cudss_pivot_epsilon",
+        default="AUTO",
+        help="cuDSS CUDSS_CONFIG_PIVOT_EPSILON value: AUTO or a non-negative float.",
     )
     parser.add_argument("--enable-dump", action="store_true", help="Build benchmark with dump utilities enabled.")
-    parser.add_argument("--dump-residuals", action="store_true", help="Dump per-iteration residual vectors.")
+    parser.add_argument(
+        "--dump-residuals",
+        "--dump-newton-diagnostics",
+        dest="dump_residuals",
+        action="store_true",
+        help="Dump per-iteration residual vectors plus cuDSS linear-system diagnostics.",
+    )
     parser.add_argument(
         "--residual-dump-root",
         type=Path,
@@ -165,6 +181,19 @@ def validate_auto_or_int(value: str, *, name: str, minimum: int) -> str:
         raise ValueError(f"{name} must be AUTO or an integer >= {minimum}: {value}")
     if int(value) < minimum:
         raise ValueError(f"{name} must be AUTO or an integer >= {minimum}: {value}")
+    return value
+
+
+def validate_auto_or_nonnegative_float(value: str, *, name: str) -> str:
+    normalized = value.upper()
+    if normalized == "AUTO":
+        return "AUTO"
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be AUTO or a non-negative float: {value}") from exc
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise ValueError(f"{name} must be AUTO or a non-negative float: {value}")
     return value
 
 
@@ -269,8 +298,6 @@ def ensure_benchmark_binary(mode: str,
         f"-DCUPF_CUDSS_ENABLE_MT={'ON' if args.cudss_enable_mt else 'OFF'}",
         f"-DCUPF_CUDSS_HOST_NTHREADS={args.cudss_host_nthreads}",
         f"-DCUPF_CUDSS_ND_NLEVELS={args.cudss_nd_nlevels}",
-        f"-DCUPF_CUDSS_USE_MATCHING={'ON' if args.cudss_use_matching else 'OFF'}",
-        f"-DCUPF_CUDSS_MATCHING_ALG={args.cudss_matching_alg}",
         "-DBUILD_BENCHMARKS=ON",
         "-DBUILD_TESTING=OFF",
         "-DBUILD_PYTHON_BINDINGS=OFF",
@@ -320,11 +347,15 @@ def run_cupf_profile_case(binary: Path,
                           profile: ProfileSpec,
                           warmup: int,
                           repeats: int,
+                          batch_size: int,
                           tolerance: float,
                           max_iter: int,
                           command_log: list[dict[str, Any]],
                           dump_residuals: bool = False,
                           residual_dump_root: Path | None = None,
+                          cudss_use_matching: bool = False,
+                          cudss_matching_alg: str = "DEFAULT",
+                          cudss_pivot_epsilon: str = "AUTO",
                           env: dict[str, str] | None = None) -> list[dict[str, Any]]:
     if profile.cupf_profile is None:
         raise ValueError(f"Profile is not a cuPF profile: {profile.name}")
@@ -339,9 +370,16 @@ def run_cupf_profile_case(binary: Path,
         "--profile", profile.cupf_profile,
         "--warmup", str(warmup),
         "--repeats", str(repeats),
+        "--batch-size", str(batch_size),
         "--tolerance", str(tolerance),
         "--max-iter", str(max_iter),
     ]
+    if cudss_use_matching:
+        cmd.append("--cudss-use-matching")
+    cmd.extend([
+        "--cudss-matching-alg", cudss_matching_alg,
+        "--cudss-pivot-epsilon", cudss_pivot_epsilon,
+    ])
     if dump_residuals:
         if residual_dump_root is None:
             raise ValueError("residual_dump_root must be provided when dump_residuals is enabled")
@@ -404,8 +442,8 @@ def run_cupf_profile_case(binary: Path,
             "backend": profile.backend or parsed["backend"],
             "compute": profile.compute or parsed["compute"],
             "jacobian": profile.jacobian or parsed["jacobian"],
-            "algorithm": profile.algorithm or parsed.get("algorithm", "standard"),
             "repeat_idx": repeat,
+            "batch_size": int(parsed.get("batch_size", batch_size)),
             "success": parsed["success"] == "true",
             "iterations": int(parsed["iterations"]),
             "final_mismatch": float(parsed["final_mismatch"]),
@@ -500,8 +538,8 @@ def run_pypower_case(run_root: Path,
             "backend": profile.backend or "python",
             "compute": profile.compute or "fp64",
             "jacobian": profile.jacobian or "pypower",
-            "algorithm": profile.algorithm or "standard",
             "repeat_idx": repeat_idx,
+            "batch_size": 1,
             "success": result.success,
             "iterations": result.iterations,
             "final_mismatch": result.final_mismatch,
@@ -581,7 +619,7 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "backend": group[0]["backend"],
             "compute": group[0]["compute"],
             "jacobian": group[0]["jacobian"],
-            "algorithm": group[0].get("algorithm", "standard"),
+            "batch_size": group[0].get("batch_size", 1),
             "runs": len(group),
             "success_all": all(bool(row["success"]) for row in group),
             "iterations_mean": statistics.mean(iterations) if iterations else "",
@@ -673,10 +711,14 @@ def write_summary_markdown(run_root: Path, manifest: dict[str, Any], aggregates:
         f"- Measurement modes: {', '.join(manifest['measurement_modes'])}",
         f"- Warmup: {manifest['warmup']}",
         f"- Repeats: {manifest['repeats']}",
+        f"- Batch size: {manifest['batch_size']}",
         f"- cuDSS reordering algorithm: {manifest['cudss_reordering_alg']}",
         f"- cuDSS MT mode: {manifest['cudss_enable_mt']}",
         f"- cuDSS host threads: {manifest['cudss_host_nthreads']}",
         f"- cuDSS ND_NLEVELS: {manifest['cudss_nd_nlevels']}",
+        f"- cuDSS matching: {manifest['cudss_use_matching']}",
+        f"- cuDSS matching algorithm: {manifest['cudss_matching_alg']}",
+        f"- cuDSS pivot epsilon: {manifest['cudss_pivot_epsilon']}",
         f"- cuDSS LD_PRELOAD: {manifest.get('cudss_ld_preload', '')}",
         "",
     ]
@@ -759,10 +801,14 @@ def write_readme(run_root: Path, manifest: dict[str, Any]) -> None:
         f"- Measurement modes: {', '.join(manifest['measurement_modes'])}",
         f"- Benchmark binaries: `{manifest['benchmark_binaries']}`",
         f"- Profiles: {', '.join(manifest['profiles'])}",
+        f"- Batch size: {manifest['batch_size']}",
         f"- cuDSS reordering algorithm: {manifest['cudss_reordering_alg']}",
         f"- cuDSS MT mode: {manifest['cudss_enable_mt']}",
         f"- cuDSS host threads: {manifest['cudss_host_nthreads']}",
         f"- cuDSS ND_NLEVELS: {manifest['cudss_nd_nlevels']}",
+        f"- cuDSS matching: {manifest['cudss_use_matching']}",
+        f"- cuDSS matching algorithm: {manifest['cudss_matching_alg']}",
+        f"- cuDSS pivot epsilon: {manifest['cudss_pivot_epsilon']}",
         f"- cuDSS LD_PRELOAD: {manifest.get('cudss_ld_preload', '')}",
         "",
         "See `SUMMARY.md` for the human-readable result table.",
@@ -776,6 +822,10 @@ def main() -> None:
         args.cudss_host_nthreads, name="--cudss-host-nthreads", minimum=1)
     args.cudss_nd_nlevels = validate_auto_or_int(
         args.cudss_nd_nlevels, name="--cudss-nd-nlevels", minimum=0)
+    args.cudss_pivot_epsilon = validate_auto_or_nonnegative_float(
+        args.cudss_pivot_epsilon, name="--cudss-pivot-epsilon")
+    if args.cudss_use_matching and args.cudss_reordering_alg in ("ALG_1", "ALG_2"):
+        raise ValueError("--cudss-use-matching is not supported with --cudss-reordering-alg ALG_1 or ALG_2")
     run_env = benchmark_env(args)
 
     cases = read_case_list(args.case_list) if args.case_list else list(args.cases)
@@ -787,6 +837,8 @@ def main() -> None:
         raise ValueError("warmup must be >= 0")
     if args.repeats <= 0:
         raise ValueError("repeats must be > 0")
+    if args.batch_size <= 0:
+        raise ValueError("batch-size must be > 0")
 
     run_root = args.results_root / args.run_name
     run_root.mkdir(parents=True, exist_ok=True)
@@ -806,6 +858,8 @@ def main() -> None:
         for case_name in cases:
             for profile in profile_specs:
                 if profile.runner == "pypower":
+                    if args.batch_size != 1:
+                        raise ValueError("PYPOWER benchmark profiles support only --batch-size 1")
                     rows.extend(run_pypower_case(
                         run_root,
                         mode,
@@ -819,6 +873,8 @@ def main() -> None:
 
                 if binary is None:
                     raise RuntimeError(f"No cuPF benchmark binary is available for {mode}/{profile.name}")
+                if args.batch_size != 1 and not (profile.backend == "cuda" and profile.compute == "mixed"):
+                    raise ValueError("--batch-size > 1 is currently supported only by CUDA mixed profiles")
                 rows.extend(run_cupf_profile_case(
                     binary,
                     args.dataset_root,
@@ -828,11 +884,15 @@ def main() -> None:
                     profile,
                     args.warmup,
                     args.repeats,
+                    args.batch_size,
                     args.tolerance,
                     args.max_iter,
                     command_log,
                     args.dump_residuals,
                     args.residual_dump_root or (run_root / "residuals"),
+                    args.cudss_use_matching,
+                    args.cudss_matching_alg,
+                    args.cudss_pivot_epsilon,
                     run_env,
                 ))
 
@@ -869,12 +929,12 @@ def main() -> None:
                 "backend": profile.backend,
                 "compute": profile.compute,
                 "jacobian": profile.jacobian,
-                "algorithm": profile.algorithm or "standard",
             }
             for profile in profile_specs
         ],
         "warmup": args.warmup,
         "repeats": args.repeats,
+        "batch_size": args.batch_size,
         "tolerance": args.tolerance,
         "max_iter": args.max_iter,
         "cudss_reordering_alg": args.cudss_reordering_alg,
@@ -883,6 +943,7 @@ def main() -> None:
         "cudss_nd_nlevels": args.cudss_nd_nlevels,
         "cudss_use_matching": args.cudss_use_matching,
         "cudss_matching_alg": args.cudss_matching_alg,
+        "cudss_pivot_epsilon": args.cudss_pivot_epsilon,
         "cudss_threading_lib": run_env.get("CUDSS_THREADING_LIB", "") if run_env is not None else "",
         "cudss_ld_preload": run_env.get("LD_PRELOAD", "") if run_env is not None else "",
         "dump_residuals": args.dump_residuals,

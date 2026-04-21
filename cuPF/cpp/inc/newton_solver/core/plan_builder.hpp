@@ -26,7 +26,9 @@ private:
     static ExecutionPlan build_cpu_fp64_plan();
 
 #ifdef CUPF_WITH_CUDA
-    static ExecutionPlan build_cuda_fp64_plan(JacobianBuilderType jacobian_builder);
-    static ExecutionPlan build_cuda_mixed_plan(JacobianBuilderType jacobian_builder);
+    static ExecutionPlan build_cuda_fp64_plan(JacobianBuilderType jacobian_builder,
+                                              const CuDSSOptions& cudss_options);
+    static ExecutionPlan build_cuda_mixed_plan(JacobianBuilderType jacobian_builder,
+                                               const CuDSSOptions& cudss_options);
 #endif
 };
