@@ -1,0 +1,270 @@
+{
+  "cases": [
+    "MemphisCase2026_Mar7",
+    "Texas7k_20220923",
+    "Base_West_Interconnect_121GW",
+    "case_ACTIVSg25k",
+    "Base_Eastern_Interconnect_515GW"
+  ],
+  "commands": [
+    {
+      "cmd": [
+        "cmake",
+        "-S",
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge",
+        "-B",
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe",
+        "-DCMAKE_BUILD_TYPE=Release"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "cmake_configure"
+    },
+    {
+      "cmd": [
+        "cmake",
+        "--build",
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe",
+        "--target",
+        "jacobian_operator_probe",
+        "-j",
+        "12"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "cmake_build"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/MemphisCase2026_Mar7",
+        "--mode",
+        "edge_atomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_MemphisCase2026_Mar7_edge_atomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/MemphisCase2026_Mar7",
+        "--mode",
+        "edge_noatomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_MemphisCase2026_Mar7_edge_noatomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/MemphisCase2026_Mar7",
+        "--mode",
+        "vertex",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_MemphisCase2026_Mar7_vertex"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Texas7k_20220923",
+        "--mode",
+        "edge_atomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_Texas7k_20220923_edge_atomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Texas7k_20220923",
+        "--mode",
+        "edge_noatomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_Texas7k_20220923_edge_noatomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Texas7k_20220923",
+        "--mode",
+        "vertex",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_Texas7k_20220923_vertex"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Base_West_Interconnect_121GW",
+        "--mode",
+        "edge_atomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_Base_West_Interconnect_121GW_edge_atomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Base_West_Interconnect_121GW",
+        "--mode",
+        "edge_noatomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_Base_West_Interconnect_121GW_edge_noatomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Base_West_Interconnect_121GW",
+        "--mode",
+        "vertex",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_Base_West_Interconnect_121GW_vertex"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/case_ACTIVSg25k",
+        "--mode",
+        "edge_atomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_case_ACTIVSg25k_edge_atomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/case_ACTIVSg25k",
+        "--mode",
+        "edge_noatomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_case_ACTIVSg25k_edge_noatomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/case_ACTIVSg25k",
+        "--mode",
+        "vertex",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_case_ACTIVSg25k_vertex"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Base_Eastern_Interconnect_515GW",
+        "--mode",
+        "edge_atomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_Base_Eastern_Interconnect_515GW_edge_atomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Base_Eastern_Interconnect_515GW",
+        "--mode",
+        "edge_noatomic",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_Base_Eastern_Interconnect_515GW_edge_noatomic"
+    },
+    {
+      "cmd": [
+        "/workspace/gpu-powerflow/exp/20260416/jac_vertex_edge/build/operator_probe/jacobian_operator_probe",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Base_Eastern_Interconnect_515GW",
+        "--mode",
+        "vertex",
+        "--warmup",
+        "5",
+        "--repeats",
+        "30"
+      ],
+      "cwd": "/workspace/gpu-powerflow",
+      "name": "probe_Base_Eastern_Interconnect_515GW_vertex"
+    }
+  ],
+  "cuda_visible_devices": "",
+  "dataset_root": "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps",
+  "modes": [
+    "edge_atomic",
+    "edge_noatomic",
+    "vertex"
+  ],
+  "repeats": 30,
+  "warmup": 5
+}

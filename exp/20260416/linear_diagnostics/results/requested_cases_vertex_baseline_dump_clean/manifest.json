@@ -1,0 +1,200 @@
+{
+  "benchmark_binaries": {
+    "end2end": "/tmp/cupf-cmake-cuda-dump-diagnostics/benchmarks/cupf_case_benchmark"
+  },
+  "build_dirs": {
+    "end2end": "/workspace/gpu-powerflow-master/cuPF/build/bench-end2end",
+    "operators": ""
+  },
+  "cases": [
+    "MemphisCase2026_Mar7",
+    "Texas7k_20220923",
+    "Base_West_Interconnect_121GW",
+    "case_ACTIVSg25k",
+    "Base_Eastern_Interconnect_515GW"
+  ],
+  "commands": [
+    {
+      "cmd": [
+        "/tmp/cupf-cmake-cuda-dump-diagnostics/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/MemphisCase2026_Mar7",
+        "--profile",
+        "cuda_mixed_vertex",
+        "--warmup",
+        "0",
+        "--repeats",
+        "1",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50",
+        "--cudss-matching-alg",
+        "DEFAULT",
+        "--cudss-pivot-epsilon",
+        "AUTO",
+        "--dump-residuals",
+        "--dump-dir",
+        "/workspace/gpu-powerflow/exp/20260416/linear_diagnostics/results/requested_cases_vertex_baseline_dump_clean/residuals/end2end/cuda_vertex/MemphisCase2026_Mar7"
+      ],
+      "cwd": "/workspace/gpu-powerflow-master",
+      "name": "run_end2end_cuda_vertex_MemphisCase2026_Mar7"
+    },
+    {
+      "cmd": [
+        "/tmp/cupf-cmake-cuda-dump-diagnostics/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Texas7k_20220923",
+        "--profile",
+        "cuda_mixed_vertex",
+        "--warmup",
+        "0",
+        "--repeats",
+        "1",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50",
+        "--cudss-matching-alg",
+        "DEFAULT",
+        "--cudss-pivot-epsilon",
+        "AUTO",
+        "--dump-residuals",
+        "--dump-dir",
+        "/workspace/gpu-powerflow/exp/20260416/linear_diagnostics/results/requested_cases_vertex_baseline_dump_clean/residuals/end2end/cuda_vertex/Texas7k_20220923"
+      ],
+      "cwd": "/workspace/gpu-powerflow-master",
+      "name": "run_end2end_cuda_vertex_Texas7k_20220923"
+    },
+    {
+      "cmd": [
+        "/tmp/cupf-cmake-cuda-dump-diagnostics/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Base_West_Interconnect_121GW",
+        "--profile",
+        "cuda_mixed_vertex",
+        "--warmup",
+        "0",
+        "--repeats",
+        "1",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50",
+        "--cudss-matching-alg",
+        "DEFAULT",
+        "--cudss-pivot-epsilon",
+        "AUTO",
+        "--dump-residuals",
+        "--dump-dir",
+        "/workspace/gpu-powerflow/exp/20260416/linear_diagnostics/results/requested_cases_vertex_baseline_dump_clean/residuals/end2end/cuda_vertex/Base_West_Interconnect_121GW"
+      ],
+      "cwd": "/workspace/gpu-powerflow-master",
+      "name": "run_end2end_cuda_vertex_Base_West_Interconnect_121GW"
+    },
+    {
+      "cmd": [
+        "/tmp/cupf-cmake-cuda-dump-diagnostics/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/case_ACTIVSg25k",
+        "--profile",
+        "cuda_mixed_vertex",
+        "--warmup",
+        "0",
+        "--repeats",
+        "1",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50",
+        "--cudss-matching-alg",
+        "DEFAULT",
+        "--cudss-pivot-epsilon",
+        "AUTO",
+        "--dump-residuals",
+        "--dump-dir",
+        "/workspace/gpu-powerflow/exp/20260416/linear_diagnostics/results/requested_cases_vertex_baseline_dump_clean/residuals/end2end/cuda_vertex/case_ACTIVSg25k"
+      ],
+      "cwd": "/workspace/gpu-powerflow-master",
+      "name": "run_end2end_cuda_vertex_case_ACTIVSg25k"
+    },
+    {
+      "cmd": [
+        "/tmp/cupf-cmake-cuda-dump-diagnostics/benchmarks/cupf_case_benchmark",
+        "--case-dir",
+        "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps/Base_Eastern_Interconnect_515GW",
+        "--profile",
+        "cuda_mixed_vertex",
+        "--warmup",
+        "0",
+        "--repeats",
+        "1",
+        "--tolerance",
+        "1e-08",
+        "--max-iter",
+        "50",
+        "--cudss-matching-alg",
+        "DEFAULT",
+        "--cudss-pivot-epsilon",
+        "AUTO",
+        "--dump-residuals",
+        "--dump-dir",
+        "/workspace/gpu-powerflow/exp/20260416/linear_diagnostics/results/requested_cases_vertex_baseline_dump_clean/residuals/end2end/cuda_vertex/Base_Eastern_Interconnect_515GW"
+      ],
+      "cwd": "/workspace/gpu-powerflow-master",
+      "name": "run_end2end_cuda_vertex_Base_Eastern_Interconnect_515GW"
+    }
+  ],
+  "created_at_utc": "2026-04-16T09:57:13.432203+00:00",
+  "cudss_enable_mt": false,
+  "cudss_host_nthreads": "AUTO",
+  "cudss_ld_preload": "",
+  "cudss_matching_alg": "DEFAULT",
+  "cudss_nd_nlevels": "AUTO",
+  "cudss_pivot_epsilon": "AUTO",
+  "cudss_reordering_alg": "DEFAULT",
+  "cudss_threading_lib": "",
+  "cudss_use_matching": false,
+  "dataset_root": "/workspace/gpu-powerflow/exp/20260414/amgx/cupf_dumps",
+  "dump_residuals": true,
+  "environment": {
+    "cmake": "cmake version 3.22.1\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).",
+    "created_on": "7d44605f53c6",
+    "cxx": "c++ (Ubuntu 12.3.0-1ubuntu1~22.04.2) 12.3.0\nCopyright (C) 2022 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+    "git": {
+      "branch": "master",
+      "commit": "78117cc120fb4958ff9ac7c648c4e4c5f5c0aae4",
+      "status_short": "M benchmarks/README.md\n M benchmarks/cpp/cupf_case_benchmark.cpp\n M benchmarks/run_benchmarks.py\n M bindings/pybind_cupf.cpp\n M cpp/inc/newton_solver/core/contexts.hpp\n M cpp/inc/newton_solver/core/newton_solver_types.hpp\n M cpp/inc/newton_solver/core/plan_builder.hpp\n M cpp/src/newton_solver/core/newton_solver.cpp\n M cpp/src/newton_solver/core/plan_builder.cpp\n M cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.cpp\n M cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.hpp\n M cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.cpp\n M cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.hpp\n M cpp/src/newton_solver/ops/linear_solve/cudss_config.hpp\n M cpp/src/newton_solver/ops/mismatch/cpu_f64.cpp\n M cpp/src/newton_solver/ops/mismatch/cuda_f64.cu\n M docs/ops/README.md\n M docs/variants/README.md\n M python/cupf/__init__.py\n?? cpp/src/newton_solver/ops/linear_solve/linear_diagnostics.hpp"
+    },
+    "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Fri_Feb_21_20:23:50_PST_2025\nCuda compilation tools, release 12.8, V12.8.93\nBuild cuda_12.8.r12.8/compiler.35583870_0",
+    "nvidia_smi": "NVIDIA GeForce RTX 3090, 580.126.09",
+    "platform": "Linux-6.8.0-107-generic-x86_64-with-glibc2.35",
+    "python": "3.10.12 (main, Aug 15 2025, 14:32:43) [GCC 11.4.0]"
+  },
+  "max_iter": 50,
+  "measurement_modes": [
+    "end2end"
+  ],
+  "profile_specs": [
+    {
+      "backend": "cuda",
+      "compute": "mixed",
+      "cupf_profile": "cuda_mixed_vertex",
+      "implementation": "cuda_vertex",
+      "jacobian": "vertex_based",
+      "name": "cuda_vertex",
+      "runner": "cupf"
+    }
+  ],
+  "profiles": [
+    "cuda_vertex"
+  ],
+  "repeats": 1,
+  "residual_dump_root": "/workspace/gpu-powerflow/exp/20260416/linear_diagnostics/results/requested_cases_vertex_baseline_dump_clean/residuals",
+  "results_root": "/workspace/gpu-powerflow/exp/20260416/linear_diagnostics/results/requested_cases_vertex_baseline_dump_clean",
+  "run_name": "requested_cases_vertex_baseline_dump_clean",
+  "script_path": "/workspace/gpu-powerflow-master/cuPF/benchmarks/run_benchmarks.py",
+  "tolerance": 1e-08,
+  "warmup": 0,
+  "workspace_root": "/workspace/gpu-powerflow-master"
+}

@@ -1,0 +1,6 @@
+case_label,case,n_bus,ybus_nnz,edge_atomic_mean_us,edge_noatomic_mean_us,vertex_mean_us,edge_atomic_speedup_vs_vertex,edge_noatomic_speedup_vs_vertex,atomic_time_share_estimate_percent,raw_atomic_time_share_estimate_percent,vertex_lane_util_percent,edge_lane_util_percent
+ACTIVSg,case_ACTIVSg25k,25000,85220,17.765333,12.757333,35.774933,2.013750,2.804264,28.189733,28.189733,49.27,95.80
+Base Eastern,Base_Eastern_Interconnect_515GW,78478,294392,51.902933,44.029867,116.289067,2.240510,2.641141,15.168827,15.168827,49.27,96.66
+Base West,Base_West_Interconnect_121GW,20758,78550,17.156267,12.296533,31.284267,1.823489,2.544153,28.326290,28.326290,49.27,96.59
+Memphis,MemphisCase2026_Mar7,993,3669,7.421867,7.798400,7.939200,1.069704,1.018055,0.000000,-5.073292,49.27,96.61
+Texas7K,Texas7k_20220923,6717,24009,9.712000,8.562133,15.468800,1.592751,1.806653,11.839652,11.839652,49.27,96.30
