@@ -12,7 +12,7 @@
 - 계획:
   batch-aware public/core API를 추가하고 single-case는 `B=1` wrapper로 유지한다.
 - 실제 구현:
-  C++ core에 `solve_batch()`와 `NRBatchResultF64` scaffolding을 추가했다.
+  C++ core에 `solve_batch()`와 `NRBatchResult` scaffolding을 추가했다.
 - 차이:
   `batch_size > 1` 실제 실행은 아직 막아 두었다.
   이유는 storage와 CUDA kernel이 아직 batch-major layout을 처리하지 못하기 때문이다.
@@ -32,7 +32,7 @@
   `CudaMixedStorage`를 batch-major layout과 새 dtype 정책으로 전환한다.
 - 실제 구현:
   `CudaMixedStorage`의 내부 버퍼를 새 optimized mixed profile에 맞췄다.
-  `Ybus/J/dx`는 FP32, `Sbus/Ibus/Va/Vm/V_re/V_im/F`는 FP64다.
+  현재 정책은 `J/dx`만 FP32, `Ybus/Sbus/Ibus/Va/Vm/V_re/V_im/F`는 FP64다.
   `V_re/V_im`은 FP64 derived cache이고, single-case 결과 다운로드는 FP64 `Va/Vm`에서 재구성한다.
 - 차이:
   `batch_size > 1` 실제 실행은 아직 `NewtonSolver::solve_batch()`에서 막혀 있다.
@@ -45,10 +45,10 @@
   초기 구현에서는 `V_re/V_im`을 FP32 cache로 낮추면서 mixed CUDA mismatch/Jacobian 커널 시그니처도
   FP32 입력을 읽도록 함께 맞췄다. 이후 Texas Univ 수렴성 점검을 반영해 `V_re/V_im`을 FP64 cache로
   되돌렸으나, `Ybus32 * V32 -> Ibus64` 실험을 위해 다시 FP32 cache로 낮췄다.
-  해당 실험이 크게 악화되어 현재는 `Ybus32 * V64 -> Ibus64` 조합으로 다시 FP64 cache를 사용한다.
+  해당 실험이 크게 악화되어 이후 `Ybus64 * V64 -> Ibus64` 조합으로 다시 FP64 cache를 사용했다.
 - 차이:
   이는 storage dtype 변경을 빌드 가능한 형태로 유지하기 위한 연결 작업이다.
-  `Ibus64 = Ybus32 * V64` custom CSR kernel 분리는 아직 Phase 04에 남아 있으며,
+  `Ibus64 = Ybus64 * V64` custom CSR kernel 분리는 아직 Phase 04에 남아 있으며,
   그 전까지 mismatch는 임시로 typed inline SpMV를 사용한다.
 
 ### Phase 03
@@ -59,17 +59,17 @@
   CUDA FP64/Mixed voltage update에서 `V -> Va/Vm` decompose kernel launch를 제거했다.
   cuDSS32/64 RHS 준비는 `-F`가 아니라 `F`를 사용하고, CUDA voltage update는 `dx`를 뺀다.
 - 차이:
-  CPU FP64 경로는 기존 `J * dx = -F`, `state += dx` convention을 유지했다.
-  두 convention은 같은 Newton step을 만들지만, CPU sign 변경은 CUDA batch path 안정화 이후
-  별도 정리 대상으로 남긴다.
+  CPU FP64 경로도 `J * dx = F`, `state -= dx` convention으로 맞췄다.
+  backend 간 linear solve/update 부호 차이는 더 이상 남겨두지 않는다.
 
 ### Phase 04
 
 - 계획:
-  mismatch stage 안에서 `launch_compute_ibus()`, `launch_compute_mismatch()`,
-  `launch_reduce_norm()` 순서의 substage schedule을 사용한다.
+  mismatch stage 안에서 `launch_compute_ibus()`,
+  `launch_compute_mismatch_from_ibus()`,
+  `launch_reduce_mismatch_norm()` 순서의 substage schedule을 사용한다.
 - 실제 구현:
-  CUDA Mixed path에 `Ibus64 = Ybus32 * V64` custom CSR kernel,
+  CUDA Mixed path에 `Ibus64 = Ybus64 * V64` custom CSR kernel,
   `F64 = V64 * conj(Ibus64) - Sbus64` kernel, batch별 norm reduction kernel을 추가했다.
 - 차이:
   `ctx.normF`는 batch별 norm vector를 device에서 만든 뒤 host로 norm vector만 복사해
@@ -121,8 +121,8 @@
   초기 구현은 `cudssMatrixCreateBatchCsr`/`cudssMatrixCreateBatchDn` API를 사용했지만,
   현재 설치된 cuDSS가 `CUDSS_STATUS_NOT_SUPPORTED`를 반환했다. v1 브랜치의 동작 코드가
   `CUDSS_CONFIG_UBATCH_SIZE + 단일 CSR/Dn descriptor` 방식이므로 그 방식으로 교체했다.
-  descriptor 생성은 `analyze()`가 아니라 첫 `factorize()` 시점으로 지연했다.
-  이유는 `analyze()` 시점에는 `solve_batch()`의 `batch_size`를 아직 알 수 없고,
+  descriptor 생성은 `initialize()`가 아니라 첫 `factorize()` 시점으로 지연했다.
+  이유는 `initialize()` 시점에는 `solve_batch()`의 `batch_size`를 아직 알 수 없고,
   `upload()` 이후 `J_values/F/dx` buffer가 batch-major 크기로 확정되기 때문이다.
 
 - 계획:
@@ -204,7 +204,7 @@
 - 차이:
   Texas Univ B=1 전체 sweep에서 모든 케이스가 `1e-8` 기준 50 iteration까지 미수렴했고,
   final mismatch가 `1e-7~2.5e-6` 범위에 걸렸다. 지정 전력 quantization 영향을 분리하기 위해
-  `Sbus`를 FP64로 올린다. 이후 `Ibus`도 FP64로 올렸고, `Ybus/J/dx`는 FP32로 유지한다.
+  `Sbus`를 FP64로 올린다. 이후 `Ibus`도 FP64로 올렸고, 현재 정책에서는 `Ybus`도 FP64로 유지한다.
 - 검증:
   `texas_batch1_sbus_fp64_20260421_r3` sweep에서 `B=1`, `tol=1e-8`, `max_iter=50`,
   `warmup=1`, `repeats=3` 조건으로 다시 측정했다. 모든 12개 케이스는 여전히 50 iteration까지
@@ -217,7 +217,7 @@
   `Ybus32`, `V_re/V_im32` 입력을 사용해 FP32 CUDA core 경로로 `Ibus`를 계산하되, `Ibus` 저장은 FP64로 둔다.
 - 실제 구현:
   `d_V_re/im`을 FP32 cache로 낮추고, `d_Ibus_re/im`을 FP64 buffer로 올렸다.
-  `compute_ibus_batch_fp32_kernel`은 FP32 곱셈/누산과 warp reduction을 수행한 뒤 lane 0에서
+  `compute_ibus_kernel`은 FP32 곱셈/누산과 warp reduction을 수행한 뒤 lane 0에서
   FP64 `Ibus`로 저장한다. mismatch와 Jacobian diagonal은 FP64 `Ibus`를 읽는다.
 - 차이:
   이 `Ibus64`는 FP64 곱셈/누산 결과가 아니라 FP32로 계산된 값을 FP64 buffer에 저장한 것이다.
@@ -241,13 +241,22 @@
   `cuda_mixed_edge`, `B=1`, `warmup=0`, `repeats=1`, `tol=1e-8`, `max_iter=50`으로 Texas Univ
   12개 케이스를 한 번씩 실행했다. 모든 케이스가 3~7 iteration 안에 수렴했고, final mismatch는
   `6e-12~3.2e-9` 범위였다. 따라서 직전 실패의 핵심 원인은 `Ibus` 저장 precision보다
-  `V_re/V_im` FP32 cache 영향이 컸고, 현재 조합(`Ybus32`, `V64`, `Ibus64`, `J/dx32`)은
+  `V_re/V_im` FP32 cache 영향이 컸고, 당시 조합(`Ybus32`, `V64`, `Ibus64`, `J/dx32`)은
   `1e-8` 기준 수렴성을 회복한다.
+
+- 계획:
+  mixed profile의 `Ybus`도 FP64로 유지한다.
+- 실제 구현:
+  `CudaMixedBuffers::d_Ybus_re/im`은 FP64 buffer로 유지하고, mixed `Ibus` kernel은
+  `Ybus64 * V64 -> Ibus64`를 계산한다. Jacobian fill은 `JScalar`와 `YbusScalar`를 분리해
+  mixed에서 `Ybus64/V64/Ibus64`를 읽은 뒤 FP32 산술로 `J32`를 쓴다.
+- 차이:
+  현재 mixed profile에서 FP32로 남는 hot buffer는 `J_values`, `dx`, cuDSS RHS copy다.
 
 - 계획:
   Jacobian의 `v_re/v_im` 입력을 FP32로 내려 Jacobian 입출력을 FP32 중심으로 맞춘다.
 - 실제 구현:
-  별도 FP32 `V/Ibus` cache를 두는 중간안을 제거했다. 현재 storage 경계의 `V_re/V_im`,
+  별도 FP32 `V/Ibus` cache를 두는 중간안을 제거했다. 당시 storage 경계의 `V_re/V_im`,
   `Vm`, `Ibus`는 FP64로 유지하고, edge/vertex/diag Jacobian kernel 내부에서 load 직후
   `float`로 cast해 FP32 산술로 `d_J_values`를 채운다.
 - 차이:
@@ -257,4 +266,29 @@
 - 검증:
   `cmake --build build/bench-end2end --target cupf_case_benchmark -j2`와 `git diff --check`를 통과했다.
   `case_ACTIVSg200`, `B=1`, `tol=1e-8`, `max_iter=50` smoke에서 `cuda_mixed_edge`는 3 iteration,
-  final mismatch `3.219e-12`, `cuda_mixed_vertex`는 3 iteration, final mismatch `2.971e-12`로 수렴했다.
+  final mismatch `3.219e-12`, 당시 vertex 프로파일은 3 iteration, final mismatch `2.971e-12`로 수렴했다.
+
+- 계획:
+  Jacobian 전용 FP32 cache를 두고, edge-based mixed Jacobian은 `Ibus` cache를 쓰면서 이전처럼
+  한 kernel에서 조립한다.
+- 실제 구현:
+  `d_J_Ibus_re/im` FP32 mirror는 제거했다.
+  voltage update는 FP64 `V_re/V_im` cache만 갱신하고,
+  `compute_ibus`는 `Ibus64`만 기록한다.
+  mixed edge kernel은 Ybus entry별 direct write를 수행하며, `i == j`인 diagonal Ybus entry에서
+  self term write 직후 FP64 `Ibus`를 읽어 FP32로 변환한 diagonal correction을 더한다.
+  mixed edge op는 더 이상 별도 diagonal correction kernel을 호출하지 않는다.
+  mixed vertex offdiag/self kernel은 warp-per-bus에서 thread-per-bus로 바꿔, thread 하나가
+  active bus 하나의 CSR row를 순회하게 했다.
+- 차이:
+  FP32 Ibus mirror의 추가 메모리와 write traffic을 피하고, FP64 Ibus 하나를 mismatch/Jacobian이 공유한다.
+  Jacobian diagonal correction은 FP64 Ibus read 비용을 감수하고 kernel 내부 cast로 처리한다.
+  다만 vertex path는 여전히 offdiag/self fill과 diagonal correction kernel을 분리한다.
+- 검증:
+  `cmake --build build/bench-end2end --target cupf_case_benchmark -j2`를 통과했다.
+  `case_ACTIVSg200`, `B=1`, `tol=1e-8`, `max_iter=50` smoke에서 `cuda_mixed_edge`는 3 iteration,
+  final mismatch `3.715e-12`, 당시 vertex 프로파일은 3 iteration, final mismatch `3.696e-12`로 수렴했다.
+  같은 조건으로 Texas Univ 12개 케이스의 `cuda_mixed_edge` B=1 sweep을 실행했고, 모두 3~7 iteration 안에
+  수렴했다. final mismatch 범위는 `4.284e-12`~`6.906e-09`였다.
+  `case_ACTIVSg200`, `B=4` smoke에서도 edge는 3 iteration, final mismatch `4.479e-12`,
+  vertex는 3 iteration, final mismatch `3.664e-12`로 수렴했다.

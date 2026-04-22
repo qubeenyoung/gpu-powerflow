@@ -35,7 +35,7 @@ J_values:   float  [B * nnz_J]
 Ybus와 Sbus:
 
 ```text
-Ybus_re/im: float [nnz_Y] or [B * nnz_Y]
+Ybus_re/im: double [nnz_Y] or [B * nnz_Y]
 Sbus_re/im: double [B * n_bus]
 ```
 
@@ -49,8 +49,9 @@ Sbus_re/im: double [B * n_bus]
 
 ### 2. public 결과는 FP64
 
-최종 `NRResultF64.V`는 `Va/Vm`에서 재구성한다.
+최종 `NRResult.V`는 `Va/Vm`에서 재구성한다.
 `V_re/V_im` cache도 FP64이지만, public 결과는 authoritative `Va/Vm`에서 재구성한다.
+`d_J_values`와 `d_dx`는 linear system용 FP32 buffer일 뿐 public 결과에 쓰지 않는다.
 
 ### 3. batch-major indexing helper
 
@@ -66,5 +67,5 @@ storage에 별도 validation state machine을 넣지 않는다.
 ## 완료 조건
 
 - storage가 `B=1`과 `B>1`을 같은 레이아웃으로 처리한다.
-- authoritative `Va/Vm`과 derived `V_re/V_im`/`Ibus` cache가 분리된다.
+- authoritative `Va/Vm`, mismatch/Jacobian 입력용 `V_re/V_im`/`Ibus`, linear system용 `J/dx`가 분리된다.
 - upload/download에서 public FP64와 internal mixed dtype 변환이 일관된다.

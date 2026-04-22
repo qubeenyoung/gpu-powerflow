@@ -19,7 +19,7 @@
 2. 바깥 Newton solver 추상화는 유지한다.
 
 ```text
-ExecutionPlan
+NewtonSolver stage ownership
   storage
   mismatch
   jacobian
@@ -32,12 +32,12 @@ ExecutionPlan
 ```text
 CudaMismatchOp::run()
   launch_compute_ibus()
-  launch_compute_mismatch()
-  launch_reduce_norm()
+  launch_compute_mismatch_from_ibus()
+  launch_reduce_mismatch_norm()
 
 CudaJacobianOp::run()
-  launch_fill_offdiag()
-  launch_fill_diag_from_ibus()
+  mixed: launch_fill_jacobian_gpu<float, double, double, float>()
+  fp64:  launch_fill_jacobian_gpu<double, double, double, double>()
 ```
 
 4. `cuda_batch`용 별도 storage/op/plan class를 만들지 않는다.
@@ -46,7 +46,8 @@ CudaJacobianOp::run()
    서로 다른 성격의 kernel을 한 `.cu` 파일에 계속 누적하지 않는다.
 6. generic storage validation framework는 추가하지 않는다.
    필요한 상태 계약은 storage 주석, field 이름, stage별 불변식으로 충분히 표현한다.
-7. authoritative voltage state는 `Va/Vm` FP64, derived cache인 `V_re/V_im`도 FP64다.
+7. authoritative voltage state는 `Va/Vm` FP64, mismatch용 derived cache인 `V_re/V_im`도 FP64다.
+   Jacobian diagonal correction은 FP64 `Ibus`를 읽고 커널 안에서 FP32로 변환한다.
 8. `Ibus = Ybus * V`는 cuSPARSE 기본 경로가 아니라 custom batch CSR kernel이 기본이다.
 9. 부호 convention은 `F = S_calc - S_spec`, `J * dx = F`, `state -= dx`로 통일한다.
 
@@ -99,19 +100,20 @@ CudaJacobianOp::run()
 - 파일 책임이 명확한가
 - 한 파일에 여러 "메인 kernel"이 뒤섞여 있지 않은가
 - batch-aware path와 single-case wrapper 관계가 코드만 읽어도 드러나는가
-- `PlanBuilder`가 여전히 profile 조립만 담당하는가
+- `solver stage configuration`가 여전히 profile 조립만 담당하는가
 
 ### 주석
 
 - `F = S_calc - S_spec` 부호 설명이 코드와 문서에서 일관적인가
 - `J * dx = F`, `state -= dx` 설명이 update/solve 주석과 맞는가
 - `Va/Vm` authoritative, `V_re/V_im` derived cache 설명이 storage와 update 주석에 반영되었는가
+- Jacobian 전용 FP32 값 버퍼와 FP64 mismatch/public 상태가 분리되어 설명되어 있는가
 - `Ibus`가 mismatch-produced reusable state라는 설명이 mismatch/jacobian/storage 주석에 반영되었는가
 
 ### 구조
 
 - `cuda_batch` 별도 구현 경로가 생기지 않았는가
-- `CudaBatch*`, `BatchExecutionPlan`, `BatchPlanBuilder`가 새로 추가되지 않았는가
+- `CudaBatch*`, `BatchNewtonSolver stage ownership`, `Batchsolver stage configuration`가 새로 추가되지 않았는가
 - `B=1`이 특수 분기 없이 같은 CUDA path를 타는가
 - cuDSS는 uniform batch descriptor를 쓰고 있는가
 

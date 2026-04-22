@@ -27,13 +27,13 @@
 
 - `B=1` 결과가 기존 single-case 결과와 수치적으로 맞는가
 - `B>1`에서 batch별 수렴 여부와 final mismatch가 합리적인가
-- FP32 `Ybus/J/dx` + FP64 Sbus/Ibus/voltage profile에서 실패 케이스가 정리되는가
+- FP64 `Ybus/Sbus/Ibus/voltage` + FP32 `J/dx` profile에서 실패 케이스가 정리되는가
 
 ### Jacobian
 
-- edge/vertex 결과가 수치적으로 맞는가
+- edge one-pass 결과가 수치적으로 맞는가
 - off-diagonal direct write가 충돌 없이 동작하는가
-- diagonal split 이후에도 기존 Jacobian과 일치하는가
+- diagonal correction 이후에도 기존 Jacobian과 일치하는가
 
 ### Linear solve
 

@@ -1,23 +1,30 @@
 #pragma once
 
-#include "newton_solver/ops/op_interfaces.hpp"
+#include <Eigen/KLUSupport>
+#include <Eigen/Sparse>
 
+#include <memory>
 
-class CpuFp64Storage;
+struct CpuFp64Buffers;
+struct InitializeContext;
+struct IterationContext;
+
+using CpuJacobianMatrixF64 = Eigen::SparseMatrix<double, Eigen::ColMajor, int32_t>;
 
 
 // ---------------------------------------------------------------------------
-// CpuLinearSolveKLU: KLU-based sparse direct solver for the CPU FP64 path.
+// CpuLinearSolveKLU: KLU 기반 희소 직접 솔버 (CPU FP64 경로).
 //
-// Symbolic analysis runs explicitly in the analyze phase. Numeric
-// refactorization still happens every NR iteration.
+// KLU symbolic/numeric 상태를 직접 소유한다. 이전에 CpuFp64Buffers에
+// 있던 lu, has_klu_symbolic 필드가 여기로 이동되었다.
 // ---------------------------------------------------------------------------
-class CpuLinearSolveKLU final : public ILinearSolveOp {
-public:
-    explicit CpuLinearSolveKLU(IStorage& storage);
-    void analyze(const AnalyzeContext& ctx) override;
-    void run(IterationContext& ctx) override;
+struct CpuLinearSolveKLU {
+    void initialize(CpuFp64Buffers& buf, const InitializeContext& ctx);
+    void prepare_rhs(CpuFp64Buffers& buf, IterationContext& ctx);
+    void factorize(CpuFp64Buffers& buf, IterationContext& ctx);
+    void solve(CpuFp64Buffers& buf, IterationContext& ctx);
 
 private:
-    CpuFp64Storage& storage_;
+    std::unique_ptr<Eigen::KLU<CpuJacobianMatrixF64>> lu_;
+    bool has_symbolic_ = false;
 };

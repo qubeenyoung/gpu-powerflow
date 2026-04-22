@@ -1,7 +1,7 @@
 # variants — 실행 프로파일 설계
 
 cuPF는 `NewtonOptions`를 통해 세 가지 실행 프로파일을 지원한다.
-각 프로파일은 Storage + 4 Op의 고정된 조합이며, `PlanBuilder::build()`에서 조립된다.
+각 프로파일은 Storage + 4 Op의 고정된 조합이며, `solver stage configuration::build()`에서 조립된다.
 
 ---
 
@@ -15,14 +15,12 @@ NewtonSolver solver;
 NewtonSolver solver({
     .backend         = BackendKind::CUDA,
     .compute         = ComputePolicy::FP64,
-    .jacobian_builder = JacobianBuilderType::EdgeBased,  // 또는 VertexBased
 });
 
 // CUDA Mixed
 NewtonSolver solver({
     .backend         = BackendKind::CUDA,
     .compute         = ComputePolicy::Mixed,
-    .jacobian_builder = JacobianBuilderType::EdgeBased,
 });
 ```
 
@@ -35,10 +33,10 @@ NewtonSolver solver({
 | Stage | 구현체 | 라이브러리 |
 |-------|--------|-----------|
 | Storage | `CpuFp64Storage` | Eigen, SuiteSparse KLU |
-| Mismatch | `CpuMismatchOpF64` | Eigen SpMV |
+| Mismatch | `CpuMismatchOp` | Eigen SpMV |
 | Jacobian | `CpuJacobianOpF64` | 직접 계산 (edge-based) |
 | Linear Solve | `CpuLinearSolveKLU` | Eigen::KLU |
-| Voltage Update | `CpuVoltageUpdateF64` | std::complex |
+| Voltage Update | `CpuVoltageUpdateOp` | std::complex |
 
 ### 특징
 
@@ -47,10 +45,10 @@ NewtonSolver solver({
 - 개발·디버깅·정확도 검증의 기준선으로 사용한다.
 - Ibus 캐시를 활용해 MismatchOp 이후 JacobianOp에서 SpMV를 생략할 수 있다.
 
-### Jacobian 빌더
+### Jacobian 분석/Fill
 
-CPU는 `JacobianBuilderType` 설정에 무관하게 항상 edge-based 방식으로 Jacobian을 채운다.
-버스별 루프이지만 CUDA 커널처럼 warp 단위 최적화가 없다.
+CPU는 `JacobianPatternGenerator`/`JacobianMapBuilder`가 만든 edge-based 산포 맵을
+사용해 Jacobian을 채운다. 버스별 루프이지만 CUDA 커널처럼 warp 단위 최적화가 없다.
 
 ### 데이터 흐름
 
@@ -67,28 +65,19 @@ host memory → (모든 연산 host) → host memory
 | Stage | 구현체 | 라이브러리 |
 |-------|--------|-----------|
 | Storage | `CudaFp64Storage` | — |
-| Mismatch | `CudaMismatchOpF64` | CUDA 커널 |
-| Jacobian | `CudaJacobianOpEdgeFp64` / `CudaJacobianOpVertexFp64` | CUDA 커널 |
-| Linear Solve | `CudaLinearSolveCuDSS64` | cuDSS (FP64) |
-| Voltage Update | `CudaVoltageUpdateFp64` | CUDA 커널 |
+| Mismatch | `CudaMismatchOp` | CUDA 커널 |
+| Jacobian | `CudaJacobianOp<double>` | CUDA 커널 |
+| Linear Solve | `CudaLinearSolveCuDSS<double, CudaFp64Storage>` | cuDSS (FP64) |
+| Voltage Update | `CudaVoltageUpdateOp<double>` | CUDA 커널 |
 
 ### 특징
 
 - Ybus, J, F, dx, V 모두 device 메모리에 상주한다.
 - Mismatch normF 계산을 위해 F 벡터를 host로 내려야 한다.
-- cuDSS RHS는 `d_F`를 직접 가리킨다. CUDA 부호 convention은 `J * dx = F`,
+- cuDSS RHS는 `d_F`를 직접 가리킨다. 공통 부호 convention은 `J * dx = F`,
   `state -= dx`다.
-- edge-based vs vertex-based Jacobian 커널을 선택할 수 있다.
+- Jacobian은 edge one-pass CUDA 커널 하나를 사용한다.
 - 수렴 안정성이 CPU FP64와 동일하다.
-
-### Jacobian 빌더 선택 기준
-
-| 특성 | EdgeBased | VertexBased |
-|------|-----------|-------------|
-| 스레드 = 버스 당 | 원소 1개 | 행 전체 (warp) |
-| 대각 처리 | atomic add | warp_sum → 단일 write |
-| 희박 계통 (저차수 버스 많음) | 적합 | warp 낭비 가능 |
-| 조밀 계통 (고차수 버스 많음) | 경쟁 심화 | 더 효율적 |
 
 ---
 
@@ -99,21 +88,21 @@ host memory → (모든 연산 host) → host memory
 | Stage | 구현체 | 정밀도 |
 |-------|--------|--------|
 | Storage | `CudaMixedStorage` | 혼합 |
-| Mismatch | `CudaMismatchOpF64` | FP32 Ybus + FP64 V/Ibus/Sbus/F |
-| Jacobian | `CudaJacobianOpEdgeFp32` / `CudaJacobianOpVertexFp32` | **FP32** |
-| Linear Solve | `CudaLinearSolveCuDSS32` | **FP32 uniform batch** |
-| Voltage Update | `CudaVoltageUpdateMixed` | FP64 Va/Vm / FP64 V cache |
+| Mismatch | `CudaMismatchOp` | FP64 Ybus/V/Ibus/Sbus/F |
+| Jacobian | `CudaJacobianOp<float>` | **FP32** |
+| Linear Solve | `CudaLinearSolveCuDSS<float, CudaMixedStorage>` | **FP32 uniform batch** |
+| Voltage Update | `CudaVoltageUpdateOp<float>` | FP64 Va/Vm / FP64 mismatch V cache / FP32 dx |
 
 Mixed 프로파일은 **고정 구성**이다. stage별 자유 조합이 아니다.
 
 ### 정밀도별 상세
 
 ```
-d_Ybus       (FP32) → Ibus custom CSR kernel 입력
+d_Ybus       (FP64) → Ibus custom CSR kernel 입력
 d_Sbus       (FP64) → mismatch 입력
-d_Ibus       (FP64) → mismatch 결과이자 Jacobian diagonal의 FP64 경계 입력
+d_Ibus       (FP64) → mismatch 결과, Jacobian diagonal correction 입력
 d_Va/Vm      (FP64) → authoritative 전압 상태
-d_V_re/im    (FP64) → mismatch 입력, Jacobian 내부에서 FP32로 cast
+d_V_re/im    (FP64) → mismatch 입력, Jacobian voltage 입력
 d_F          (FP64) → normF 수렴 판정 정밀도 유지
 d_J_values   (FP32) → Jacobian fill + cuDSS FP32 입력
 d_dx         (FP32) → cuDSS FP32 출력
@@ -121,21 +110,22 @@ d_dx         (FP32) → cuDSS FP32 출력
 
 ### FP32 Jacobian 커널
 
-Mixed FP32 Jacobian은 offdiag/self fill과 `Ibus` 기반 diagonal correction으로 나뉜다.
-edge off-diagonal은 direct write이며 atomic이 필요 없다. `d_J_values.memsetZero()`는
-아직 유지하며, 모든 entry write coverage를 검증한 뒤 제거한다.
-입력 storage는 FP64 `V_re/V_im`, `Vm`, `Ibus`를 유지하고, 각 Jacobian kernel이 load 직후
-FP32로 cast해 내부 계산을 수행한다.
+Mixed FP32 Jacobian은 FP64 `d_Ybus_*`, `d_V_re/im`, `d_Vm`을 읽어 커널 안에서
+`float`로 변환한다. edge path는 one-pass로 동작한다. Ybus entry 담당 thread가
+off-diagonal/self term을 direct write하고, diagonal Ybus entry thread가 같은 kernel에서
+FP64 `d_Ibus_*`를 읽어 FP32로 변환한 diagonal correction을 더한다.
 
-`/workspace/gpu-powerflow/exp/20260420/jac_asm` 실험에서는 edge fill이 vertex fill보다
-빠르게 측정되어 현재 기본값은 edge-based다. vertex path는 호환 옵션으로 유지한다.
+`d_J_values.memsetZero()`는 아직 유지하며, 모든 entry write coverage를 검증한 뒤 제거한다.
+
+`/workspace/gpu-powerflow/exp/20260420/jac_asm` 실험에서는 edge fill이 더 빠르게 측정되어
+현재 구현은 edge one-pass만 유지한다.
 
 ### Mixed 사용 시 고려사항
 
 - FP32 Jacobian은 수치적으로 ill-conditioned한 계통에서 수렴이 느려지거나 실패할 수 있다.
 - 표준 전력계통 계산(normal operating conditions)에서는 FP64와 동일한 반복 횟수에 수렴한다.
 - `F`와 `Va/Vm`이 FP64이므로 수렴 판정과 public output은 FP64 기준을 유지한다.
-- `Ybus/J/dx`가 FP32이므로 민감한 계통은 별도 실패 케이스로 추적한다.
+- `J/dx`가 FP32이므로 민감한 계통은 별도 실패 케이스로 추적한다.
 
 ---
 
@@ -146,8 +136,8 @@ FP32로 cast해 내부 계산을 수행한다.
 | 최소 의존성 | Eigen, KLU | + CUDA, cuDSS | + CUDA, cuDSS |
 | Jacobian 정밀도 | FP64 | FP64 | FP32 |
 | Solve 정밀도 | FP64 | FP64 | FP32 |
-| 전압 상태 | FP64 | FP64 | Va/Vm FP64, V cache FP64 |
-| atomic 필요 여부 | 없음 | Edge: 있음, Vertex: 없음 | Mixed edge offdiag: 없음, diag split |
+| 전압 상태 | FP64 | FP64 | Va/Vm FP64, mismatch/Jacobian V cache FP64 |
+| atomic 필요 여부 | 없음 | 없음 | 없음, one-pass diag correction |
 | 수렴 안정성 | 기준 | CPU FP64와 동일 | 대부분 동일, ill-cond는 주의 |
 | 적합한 용도 | 개발·검증 | 정확도 우선 GPU | 처리량 우선 GPU |
 

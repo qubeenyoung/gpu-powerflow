@@ -19,9 +19,8 @@ DEFAULT_RESULTS_ROOT = CUPF_ROOT / "benchmarks" / "results"
 DEFAULT_BATCH_SIZES = [1, 4, 16, 64, 256]
 DEFAULT_PROFILE = "cuda_mixed_edge"
 DEFAULT_NCU_KERNEL_REGEX = (
-    "regex:(compute_ibus_batch_fp32_kernel|compute_mismatch_batch_f64_kernel|"
-    "reduce_norm_batch_f64_kernel|fill_jacobian_edge_offdiag_fp32_kernel|"
-    "fill_jacobian_diag_from_ibus_fp32_kernel|cast_rhs_f64_to_f32_kernel|"
+    "regex:(compute_ibus_kernel|compute_mismatch_from_ibus_kernel|reduce_mismatch_norm_kernel|"
+    "fill_jacobian_gpu_kernel|prepare_rhs_kernel|"
     "update_voltage_mixed_kernel|reconstruct_voltage_kernel)"
 )
 

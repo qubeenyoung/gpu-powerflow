@@ -1,25 +1,22 @@
-# Phase 05 — Jacobian Off-Diagonal and Diagonal Split
+# Phase 05 — Jacobian Edge One-Pass
 
-이 단계의 목적은 Jacobian fill을 `Ibus` 재사용 구조로 바꾸고, off-diagonal과 diagonal 책임을 분리하는 것이다.
+이 단계의 목적은 Jacobian fill을 `Ibus` 재사용 구조로 바꾸고, edge path의 atomic을 없애는 것이다.
+현재 CUDA Jacobian fill은 `fill_jacobian_gpu.cu`의 edge one-pass 커널로 통합되어 있다.
 
 ---
 
 ## 목표
 
 1. off-diagonal fill은 direct write로 간다.
-2. diagonal fill은 `Ibus` 기반 별도 경로로 계산한다.
+2. mixed edge path는 diagonal Ybus entry thread가 `Ibus` correction까지 한 번에 처리한다.
 3. edge off-diagonal atomic을 제거한다.
 
 ---
 
 ## 대상 파일
 
-- [cpp/src/newton_solver/ops/jacobian/cuda_edge_fp32.cu](../../cpp/src/newton_solver/ops/jacobian/cuda_edge_fp32.cu)
-- [cpp/src/newton_solver/ops/jacobian/cuda_vertex_fp32.cu](../../cpp/src/newton_solver/ops/jacobian/cuda_vertex_fp32.cu)
-- 필요 시 FP64 대응 파일
-- 새 kernel file들
-  - `fill_jacobian_offdiag_*.cu`
-  - `fill_jacobian_diag_from_ibus_*.cu`
+- [cpp/src/newton_solver/ops/jacobian/fill_jacobian_gpu.cu](../../cpp/src/newton_solver/ops/jacobian/fill_jacobian_gpu.cu)
+- [cpp/src/newton_solver/ops/jacobian/fill_jacobian.cpp](../../cpp/src/newton_solver/ops/jacobian/fill_jacobian.cpp)
 
 ---
 
@@ -28,8 +25,11 @@
 `CudaJacobianOp::run()`은 다음 순서를 따른다.
 
 ```text
-launch_fill_offdiag()
-launch_fill_diag_from_ibus()
+edge mixed:
+launch_fill_jacobian_gpu<float>()
+
+fp64 cuda:
+launch_fill_jacobian_gpu<double>()
 ```
 
 ### Off-diagonal
@@ -44,24 +44,15 @@ mapJ**[k]가 고유한 J 위치를 가리킨다
 
 ### Diagonal
 
-대각은 `Ibus`, `V`, `Ydiag` 기반 별도 kernel에서 계산한다.
-이렇게 하면 edge path의 diagonal atomic을 줄일 수 있다.
+mixed edge path에서는 diagonal Ybus entry의 thread가 self term을 direct write한 뒤
+FP64 `d_Ibus_*`를 읽어 FP32로 변환한 correction을 같은 kernel에서 더한다.
 
 ---
 
 ## 파일 분할 원칙
 
-한 파일은 한 개의 main kernel만 가진다.
-
-예:
-
-```text
-cuda_edge_fp32.cu                    // thin edge op wrapper
-fill_jacobian_edge_offdiag_fp32.cu   // main offdiag kernel
-fill_jacobian_diag_from_ibus_fp32.cu // main diag kernel
-```
-
-vertex path도 같은 원칙을 따른다.
+Jacobian fill은 CPU `fill_jacobian.cpp`, CUDA `fill_jacobian_gpu.cu`로 둔다.
+CUDA 파일은 `T=float/double` 템플릿으로 mixed/FP64를 함께 처리한다.
 
 ---
 
@@ -76,5 +67,5 @@ vertex path도 같은 원칙을 따른다.
 
 - Jacobian fill이 `Ibus` 재사용 구조로 바뀐다.
 - edge off-diagonal atomic이 제거된다.
-- diagonal path가 분리된다.
+- edge path는 one-pass로 정리된다.
 - `B=1` Jacobian 수치가 기존 구현과 맞는다.

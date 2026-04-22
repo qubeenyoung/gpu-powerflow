@@ -31,9 +31,9 @@ should be a case directory name under `--dataset-root`.
 ## Recommended Progression
 
 1. Start with `--cases case30_ieee case118_ieee` and `pypower cpp_naive cpp`.
-2. Add `cuda_edge cuda_vertex` after CUDA runtime correctness is stable.
+2. Add `cuda_edge` after CUDA runtime correctness is stable.
 3. Use the default `--mode both --warmup 1 --repeats 10` for reportable runs.
-4. Add `cuda_fp64_edge cuda_fp64_vertex` when FP64 cuDSS performance is under investigation.
+4. Add `cuda_fp64_edge` when FP64 cuDSS performance is under investigation.
 5. Use large cases such as `case4601_goc`, `case8387_pegase`, and `case9241_pegase` only for dedicated timing or Nsight runs.
 
 ## Notes

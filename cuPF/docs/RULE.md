@@ -10,9 +10,9 @@
 
 현재 사용 label:
 
-- `NR.analyze.total`
-- `NR.analyze.jacobian_builder`
-- `NR.analyze.storage_prepare`
+- `NR.initialize.total`
+- `NR.initialize.jacobian_analysis`
+- `NR.initialize.storage_prepare`
 - `NR.solve.total`
 - `NR.solve.upload`
 - `NR.solve.download`

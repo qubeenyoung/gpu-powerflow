@@ -24,7 +24,7 @@ DEFAULT_DATASET_ROOT = WORKSPACE_ROOT / "datasets" / "cuPF_benchmark_dumps"
 DEFAULT_RESULTS_ROOT = CUPF_ROOT / "benchmarks" / "results"
 DEFAULT_END2END_BUILD_DIR = CUPF_ROOT / "build" / "bench-end2end"
 DEFAULT_OPERATORS_BUILD_DIR = CUPF_ROOT / "build" / "bench-operators"
-DEFAULT_PROFILES = ["pypower", "cpp_naive", "cpp", "cuda_edge", "cuda_vertex"]
+DEFAULT_PROFILES = ["pypower", "cpp_naive", "cpp", "cuda_edge"]
 MEASUREMENT_MODES = ("end2end", "operators")
 
 
@@ -49,16 +49,11 @@ PROFILE_SPECS: dict[str, ProfileSpec] = {
     "cuda_mixed_edge": ProfileSpec("cuda_edge", "cupf", "cuda_mixed_edge", "cuda_edge", "cuda", "mixed", "edge_based"),
     "cuda_edge_modified": ProfileSpec("cuda_edge_modified", "cupf", "cuda_mixed_edge_modified", "cuda_edge_modified", "cuda", "mixed", "edge_based"),
     "cuda_mixed_edge_modified": ProfileSpec("cuda_edge_modified", "cupf", "cuda_mixed_edge_modified", "cuda_edge_modified", "cuda", "mixed", "edge_based"),
-    "cuda_vertex": ProfileSpec("cuda_vertex", "cupf", "cuda_mixed_vertex", "cuda_vertex", "cuda", "mixed", "vertex_based"),
-    "cuda_mixed_vertex": ProfileSpec("cuda_vertex", "cupf", "cuda_mixed_vertex", "cuda_vertex", "cuda", "mixed", "vertex_based"),
-    "cuda_vertex_modified": ProfileSpec("cuda_vertex_modified", "cupf", "cuda_mixed_vertex_modified", "cuda_vertex_modified", "cuda", "mixed", "vertex_based"),
-    "cuda_mixed_vertex_modified": ProfileSpec("cuda_vertex_modified", "cupf", "cuda_mixed_vertex_modified", "cuda_vertex_modified", "cuda", "mixed", "vertex_based"),
     "cuda_wo_jacobian": ProfileSpec("cuda_wo_jacobian", "cupf", "cuda_mixed_edge_cpu_naive_jacobian", "cuda_wo_jacobian", "cuda", "mixed", "cpu_naive_pypower_like"),
     "cuda_mixed_edge_cpu_naive_jacobian": ProfileSpec("cuda_wo_jacobian", "cupf", "cuda_mixed_edge_cpu_naive_jacobian", "cuda_wo_jacobian", "cuda", "mixed", "cpu_naive_pypower_like"),
     "cuda_wo_cudss": ProfileSpec("cuda_wo_cudss", "cupf", "cuda_mixed_edge_cpu_superlu", "cuda_wo_cudss", "cuda", "mixed", "edge_based"),
     "cuda_mixed_edge_cpu_superlu": ProfileSpec("cuda_wo_cudss", "cupf", "cuda_mixed_edge_cpu_superlu", "cuda_wo_cudss", "cuda", "mixed", "edge_based"),
     "cuda_fp64_edge": ProfileSpec("cuda_fp64_edge", "cupf", "cuda_fp64_edge", "cuda_fp64_edge", "cuda", "fp64", "edge_based"),
-    "cuda_fp64_vertex": ProfileSpec("cuda_fp64_vertex", "cupf", "cuda_fp64_vertex", "cuda_fp64_vertex", "cuda", "fp64", "vertex_based"),
 }
 
 
@@ -687,7 +682,7 @@ def write_summary_markdown(run_root: Path, manifest: dict[str, Any], aggregates:
     }
     baseline_profile = "cpp" if "cpp" in manifest["profiles"] else "cpu_fp64_edge"
     cuda_profiles = [profile for profile in manifest["profiles"] if str(profile).startswith("cuda")]
-    nsight_profile = cuda_profiles[0] if cuda_profiles else "cuda_mixed_vertex"
+    nsight_profile = cuda_profiles[0] if cuda_profiles else "cuda_edge"
     nsight_case = "case118_ieee" if "case118_ieee" in manifest["cases"] else manifest["cases"][0]
     nsight_case_dir = Path(str(manifest["dataset_root"])) / nsight_case
     benchmark_binaries = manifest.get("benchmark_binaries", {})
@@ -783,7 +778,7 @@ def write_summary_markdown(run_root: Path, manifest: dict[str, Any], aggregates:
             f"python3 {SCRIPT_PATH} \\",
             f"  --dataset-root {manifest['dataset_root']} \\",
             f"  --cases {nsight_case} \\",
-            "  --profiles cuda_mixed_vertex \\",
+            "  --profiles cuda_edge \\",
             "  --with-cuda --warmup 1 --repeats 1",
             "```",
         ])

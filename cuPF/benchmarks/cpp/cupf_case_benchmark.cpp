@@ -1,12 +1,12 @@
 #include "dump_case_loader.hpp"
 
-#include "newton_solver/core/contexts.hpp"
-#include "newton_solver/core/jacobian_builder.hpp"
+#include "newton_solver/core/solver_contexts.hpp"
+#include "newton_solver/ops/jacobian/jacobian_analysis.hpp"
 #include "newton_solver/core/newton_solver.hpp"
-#include "newton_solver/ops/jacobian/cpu_f64.hpp"
+#include "newton_solver/ops/jacobian/fill_jacobian.hpp"
 #include "newton_solver/ops/linear_solve/cpu_klu.hpp"
-#include "newton_solver/ops/mismatch/cpu_f64.hpp"
-#include "newton_solver/ops/voltage_update/cpu_f64.hpp"
+#include "newton_solver/ops/mismatch/cpu_mismatch.hpp"
+#include "newton_solver/ops/voltage_update/cpu_voltage_update.hpp"
 #include "newton_solver/storage/cpu/cpu_fp64_storage.hpp"
 #include "utils/dump.hpp"
 #include "utils/logger.hpp"
@@ -18,11 +18,10 @@
 #endif
 
 #ifdef CUPF_WITH_CUDA
-  #include "newton_solver/ops/jacobian/cuda_edge_fp32.hpp"
-  #include "newton_solver/ops/jacobian/cuda_vertex_fp32.hpp"
-  #include "newton_solver/ops/linear_solve/cuda_cudss32.hpp"
-  #include "newton_solver/ops/mismatch/cuda_f64.hpp"
-  #include "newton_solver/ops/voltage_update/cuda_mixed.hpp"
+  #include "newton_solver/ops/jacobian/fill_jacobian_gpu.hpp"
+  #include "newton_solver/ops/linear_solve/cuda_cudss.hpp"
+  #include "newton_solver/ops/mismatch/cuda_mismatch.hpp"
+  #include "newton_solver/ops/voltage_update/cuda_voltage_update.hpp"
   #include "newton_solver/storage/cuda/cuda_mixed_storage.hpp"
   #include <cuda_runtime.h>
 #endif
@@ -79,7 +78,7 @@ struct BenchRun {
     bool success = false;
     int32_t iterations = 0;
     double final_mismatch = 0.0;
-    double analyze_sec = 0.0;
+    double initialize_sec = 0.0;
     double solve_sec = 0.0;
     double total_sec = 0.0;
     double max_v_delta_from_v0 = 0.0;
@@ -91,7 +90,7 @@ void print_usage(const char* argv0)
     std::cout
         << "Usage: " << argv0
         << " [--case-dir PATH]"
-        << " [--profile cpp_pypowerlike|cpu_fp64_edge|cuda_mixed_edge|cuda_mixed_edge_modified|cuda_mixed_vertex|cuda_mixed_vertex_modified|cuda_fp64_edge|cuda_fp64_vertex"
+        << " [--profile cpp_pypowerlike|cpu_fp64_edge|cuda_mixed_edge|cuda_mixed_edge_modified|cuda_fp64_edge"
         << "|cuda_mixed_edge_cpu_naive_jacobian|cuda_mixed_edge_cpu_superlu]"
         << " [--tolerance FLOAT] [--max-iter INT] [--warmup INT] [--repeats INT] [--batch-size INT]"
         << " [--cudss-use-matching] [--cudss-matching-alg DEFAULT|ALG_1|ALG_2|ALG_3|ALG_4|ALG_5]"
@@ -221,7 +220,6 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.jacobian = "pypower_like";
         cfg.options.backend = BackendKind::CPU;
         cfg.options.compute = ComputePolicy::FP64;
-        cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
 #endif
     }
@@ -233,7 +231,6 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.jacobian = "edge_based";
         cfg.options.backend = BackendKind::CPU;
         cfg.options.compute = ComputePolicy::FP64;
-        cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
     if (profile == "cuda_mixed_edge") {
@@ -242,7 +239,6 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.jacobian = "edge_based";
         cfg.options.backend = BackendKind::CUDA;
         cfg.options.compute = ComputePolicy::Mixed;
-        cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
     if (profile == "cuda_edge_modified" || profile == "cuda_mixed_edge_modified") {
@@ -254,7 +250,6 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.modified_schedule = true;
         cfg.options.backend = BackendKind::CUDA;
         cfg.options.compute = ComputePolicy::Mixed;
-        cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
     if (profile == "cuda_mixed_edge_cpu_naive_jacobian") {
@@ -269,7 +264,6 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.jacobian = "cpu_naive_pypower_like";
         cfg.options.backend = BackendKind::CUDA;
         cfg.options.compute = ComputePolicy::Mixed;
-        cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
 #endif
     }
@@ -285,30 +279,8 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.jacobian = "edge_based";
         cfg.options.backend = BackendKind::CUDA;
         cfg.options.compute = ComputePolicy::Mixed;
-        cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
 #endif
-    }
-    if (profile == "cuda_mixed_vertex") {
-        cfg.backend = "cuda";
-        cfg.compute = "mixed";
-        cfg.jacobian = "vertex_based";
-        cfg.options.backend = BackendKind::CUDA;
-        cfg.options.compute = ComputePolicy::Mixed;
-        cfg.options.jacobian_builder = JacobianBuilderType::VertexBased;
-        return cfg;
-    }
-    if (profile == "cuda_vertex_modified" || profile == "cuda_mixed_vertex_modified") {
-        cfg.profile = "cuda_mixed_vertex_modified";
-        cfg.implementation = "cuda_vertex_modified";
-        cfg.backend = "cuda";
-        cfg.compute = "mixed";
-        cfg.jacobian = "vertex_based";
-        cfg.modified_schedule = true;
-        cfg.options.backend = BackendKind::CUDA;
-        cfg.options.compute = ComputePolicy::Mixed;
-        cfg.options.jacobian_builder = JacobianBuilderType::VertexBased;
-        return cfg;
     }
     if (profile == "cuda_fp64_edge") {
         cfg.backend = "cuda";
@@ -316,19 +288,8 @@ ProfileConfig parse_profile(const std::string& profile)
         cfg.jacobian = "edge_based";
         cfg.options.backend = BackendKind::CUDA;
         cfg.options.compute = ComputePolicy::FP64;
-        cfg.options.jacobian_builder = JacobianBuilderType::EdgeBased;
         return cfg;
     }
-    if (profile == "cuda_fp64_vertex") {
-        cfg.backend = "cuda";
-        cfg.compute = "fp64";
-        cfg.jacobian = "vertex_based";
-        cfg.options.backend = BackendKind::CUDA;
-        cfg.options.compute = ComputePolicy::FP64;
-        cfg.options.jacobian_builder = JacobianBuilderType::VertexBased;
-        return cfg;
-    }
-
     throw std::runtime_error("Unknown profile: " + profile);
 }
 
@@ -357,7 +318,7 @@ std::vector<std::complex<double>> repeat_complex_vector(const std::vector<std::c
     return dst;
 }
 
-void validate_basic_result(const cupf::tests::DumpCaseData& data, const NRResultF64& result)
+void validate_basic_result(const cupf::tests::DumpCaseData& data, const NRResult& result)
 {
     if (static_cast<int32_t>(result.V.size()) != data.rows) {
         throw std::runtime_error("Result voltage size does not match case size");
@@ -368,7 +329,7 @@ void validate_basic_result(const cupf::tests::DumpCaseData& data, const NRResult
 }
 
 void validate_basic_batch_result(const cupf::tests::DumpCaseData& data,
-                                 const NRBatchResultF64& result,
+                                 const NRBatchResult& result,
                                  int32_t batch_size)
 {
     if (result.n_bus != data.rows || result.batch_size != batch_size) {
@@ -388,7 +349,7 @@ void validate_basic_batch_result(const cupf::tests::DumpCaseData& data,
     }
 }
 
-bool all_batch_items_converged(const NRBatchResultF64& result)
+bool all_batch_items_converged(const NRBatchResult& result)
 {
     if (result.converged.size() != static_cast<std::size_t>(result.batch_size)) {
         return false;
@@ -397,7 +358,7 @@ bool all_batch_items_converged(const NRBatchResultF64& result)
                        [](uint8_t value) { return value != 0; });
 }
 
-int32_t max_batch_iterations(const NRBatchResultF64& result)
+int32_t max_batch_iterations(const NRBatchResult& result)
 {
     if (result.iterations.empty()) {
         return 0;
@@ -405,7 +366,7 @@ int32_t max_batch_iterations(const NRBatchResultF64& result)
     return *std::max_element(result.iterations.begin(), result.iterations.end());
 }
 
-double max_batch_mismatch(const NRBatchResultF64& result)
+double max_batch_mismatch(const NRBatchResult& result)
 {
     double max_value = 0.0;
     for (double value : result.final_mismatch) {
@@ -415,7 +376,7 @@ double max_batch_mismatch(const NRBatchResultF64& result)
 }
 
 double max_batched_voltage_delta_from_v0(const cupf::tests::DumpCaseData& data,
-                                         const NRBatchResultF64& result)
+                                         const NRBatchResult& result)
 {
     double max_delta = 0.0;
     for (int32_t b = 0; b < result.batch_size; ++b) {
@@ -429,6 +390,25 @@ double max_batched_voltage_delta_from_v0(const cupf::tests::DumpCaseData& data,
         }
     }
     return max_delta;
+}
+
+struct JacobianAnalysisResult {
+    JacobianScatterMap maps;
+    JacobianPattern pattern;
+};
+
+JacobianAnalysisResult run_jacobian_analysis(const YbusView& ybus,
+                                             const int32_t* pv,
+                                             int32_t n_pv,
+                                             const int32_t* pq,
+                                             int32_t n_pq)
+{
+    const JacobianIndexing indexing =
+        make_jacobian_indexing(ybus.rows, pv, n_pv, pq, n_pq);
+    JacobianAnalysisResult result;
+    result.pattern = JacobianPatternGenerator().generate(ybus, indexing);
+    result.maps = JacobianMapBuilder().build(ybus, indexing, result.pattern);
+    return result;
 }
 
 #ifdef CUPF_WITH_CUDA
@@ -451,13 +431,13 @@ BenchRun run_core_once(const cupf::tests::DumpCaseData& case_data,
         throw std::runtime_error("--batch-size > 1 is currently supported only by CUDA mixed profiles");
     }
 
-    const YbusViewF64 ybus = case_data.ybus();
+    const YbusView ybus = case_data.ybus();
     NewtonSolver solver(profile.options);
 
     newton_solver::utils::resetTimingCollector();
 
     const auto t0 = std::chrono::steady_clock::now();
-    solver.analyze(
+    solver.initialize(
         ybus,
         case_data.pv.data(), static_cast<int32_t>(case_data.pv.size()),
         case_data.pq.data(), static_cast<int32_t>(case_data.pq.size()));
@@ -475,7 +455,7 @@ BenchRun run_core_once(const cupf::tests::DumpCaseData& case_data,
         v0 = batched_v0.data();
     }
 
-    NRBatchResultF64 result;
+    NRBatchResult result;
     solver.solve_batch(
         ybus,
         sbus,
@@ -496,7 +476,7 @@ BenchRun run_core_once(const cupf::tests::DumpCaseData& case_data,
     run.final_mismatch = max_batch_mismatch(result);
     run.success = all_batch_items_converged(result) && run.final_mismatch <= config.tolerance;
     run.iterations = max_batch_iterations(result);
-    run.analyze_sec =
+    run.initialize_sec =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000000.0;
     run.solve_sec =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count()) / 1000000.0;
@@ -520,42 +500,36 @@ BenchRun run_cuda_mixed_modified_once(const cupf::tests::DumpCaseData& case_data
         throw std::runtime_error("modified benchmark path currently supports CUDA mixed profiles only");
     }
 
-    const YbusViewF64 ybus = case_data.ybus();
+    const YbusView ybus = case_data.ybus();
     const int32_t n_pv = static_cast<int32_t>(case_data.pv.size());
     const int32_t n_pq = static_cast<int32_t>(case_data.pq.size());
 
     CudaMixedStorage storage;
-    CudaMismatchOpF64 mismatch(storage);
-    std::unique_ptr<IJacobianOp> jacobian;
-    if (profile.options.jacobian_builder == JacobianBuilderType::VertexBased) {
-        jacobian = std::make_unique<CudaJacobianOpVertexFp32>(storage);
-    } else {
-        jacobian = std::make_unique<CudaJacobianOpEdgeFp32>(storage);
-    }
-    CudaLinearSolveCuDSS32 linear_solve(storage, profile.options.cudss);
-    CudaVoltageUpdateMixed voltage_update(storage);
+    CudaMismatchOp mismatch(storage);
+    CudaJacobianOp<float> jacobian(storage);
+    CudaLinearSolveCuDSS<float, CudaMixedStorage> linear_solve(storage, profile.options.cudss);
+    CudaVoltageUpdateOp<float> voltage_update(storage);
 
     newton_solver::utils::resetTimingCollector();
 
-    JacobianBuilder::Result analysis;
+    JacobianAnalysisResult analysis;
 
     const auto t0 = std::chrono::steady_clock::now();
     {
-        newton_solver::utils::ScopedTimer total("NR.analyze.total");
+        newton_solver::utils::ScopedTimer total("NR.initialize.total");
 
         {
-            newton_solver::utils::ScopedTimer stage("NR.analyze.jacobian_builder");
-            JacobianBuilder builder(profile.options.jacobian_builder);
-            analysis = builder.analyze(
+            newton_solver::utils::ScopedTimer stage("NR.initialize.jacobian_analysis");
+            analysis = run_jacobian_analysis(
                 ybus,
                 case_data.pv.data(), n_pv,
                 case_data.pq.data(), n_pq);
         }
 
-        AnalyzeContext analyze_ctx{
+        InitializeContext initialize_ctx{
             .ybus = ybus,
             .maps = analysis.maps,
-            .J = analysis.J,
+            .J = analysis.pattern,
             .n_bus = ybus.rows,
             .pv = case_data.pv.data(),
             .n_pv = n_pv,
@@ -564,12 +538,12 @@ BenchRun run_cuda_mixed_modified_once(const cupf::tests::DumpCaseData& case_data
         };
 
         {
-            newton_solver::utils::ScopedTimer stage("NR.analyze.storage_prepare");
-            storage.prepare(analyze_ctx);
+            newton_solver::utils::ScopedTimer stage("NR.initialize.storage_prepare");
+            storage.prepare(initialize_ctx);
         }
         {
-            newton_solver::utils::ScopedTimer stage("NR.analyze.linear_solve");
-            linear_solve.analyze(analyze_ctx);
+            newton_solver::utils::ScopedTimer stage("NR.initialize.linear_solve_initialize");
+            linear_solve.initialize(initialize_ctx);
         }
     }
     cudaDeviceSynchronize();
@@ -587,7 +561,7 @@ BenchRun run_cuda_mixed_modified_once(const cupf::tests::DumpCaseData& case_data
         .ybus_value_stride = ybus.nnz,
     };
 
-    NRResultF64 result;
+    NRResult result;
     int32_t completed = 0;
 
     {
@@ -631,7 +605,7 @@ BenchRun run_cuda_mixed_modified_once(const cupf::tests::DumpCaseData& case_data
             if (refresh_jacobian) {
                 {
                     newton_solver::utils::ScopedTimer stage("NR.iteration.jacobian");
-                    jacobian->run(iter_ctx);
+                    jacobian.run(iter_ctx);
                 }
                 iter_ctx.jacobian_updated_this_iter = true;
                 iter_ctx.jacobian_age = 0;
@@ -675,7 +649,7 @@ BenchRun run_cuda_mixed_modified_once(const cupf::tests::DumpCaseData& case_data
     run.success = result.converged && result.final_mismatch <= config.tolerance;
     run.iterations = result.iterations;
     run.final_mismatch = result.final_mismatch;
-    run.analyze_sec =
+    run.initialize_sec =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000000.0;
     run.solve_sec =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count()) / 1000000.0;
@@ -700,17 +674,17 @@ BenchRun run_reference_pypowerlike_once(const cupf::tests::DumpCaseData& case_da
 #ifndef CUPF_WITH_SUPERLU
     throw std::runtime_error("cpp_pypowerlike requires SuperLU support");
 #else
-    const YbusViewF64 ybus = case_data.ybus();
+    const YbusView ybus = case_data.ybus();
 
     CpuFp64Storage storage;
-    CpuMismatchOpF64 mismatch(storage);
+    CpuMismatchOp mismatch(storage);
     CpuNaiveJacobianOpF64 jacobian(storage);
     CpuLinearSolveSuperLU linear_solve(storage);
-    CpuVoltageUpdateF64 voltage_update(storage);
+    CpuVoltageUpdateOp voltage_update(storage);
 
-    JacobianMaps maps;
-    JacobianStructure J;
-    AnalyzeContext analyze_ctx{
+    JacobianScatterMap maps;
+    JacobianPattern J;
+    InitializeContext initialize_ctx{
         .ybus = ybus,
         .maps = maps,
         .J = J,
@@ -724,8 +698,8 @@ BenchRun run_reference_pypowerlike_once(const cupf::tests::DumpCaseData& case_da
     newton_solver::utils::resetTimingCollector();
 
     const auto t0 = std::chrono::steady_clock::now();
-    storage.prepare(analyze_ctx);
-    linear_solve.analyze(analyze_ctx);
+    storage.prepare(initialize_ctx);
+    linear_solve.initialize(initialize_ctx);
     const auto t1 = std::chrono::steady_clock::now();
 
     SolveContext solve_ctx{
@@ -760,11 +734,12 @@ BenchRun run_reference_pypowerlike_once(const cupf::tests::DumpCaseData& case_da
             break;
         }
         jacobian.run(iter_ctx);
-        linear_solve.run(iter_ctx);
+        linear_solve.factorize(iter_ctx);
+        linear_solve.solve(iter_ctx);
         voltage_update.run(iter_ctx);
     }
 
-    NRResultF64 result;
+    NRResult result;
     result.iterations = completed;
     result.final_mismatch = iter_ctx.normF;
     result.converged = iter_ctx.converged;
@@ -777,7 +752,7 @@ BenchRun run_reference_pypowerlike_once(const cupf::tests::DumpCaseData& case_da
     run.success = result.converged && result.final_mismatch <= config.tolerance;
     run.iterations = result.iterations;
     run.final_mismatch = result.final_mismatch;
-    run.analyze_sec =
+    run.initialize_sec =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000000.0;
     run.solve_sec =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count()) / 1000000.0;
@@ -823,7 +798,7 @@ void copy_cuda_voltage_to_cpu(const CudaMixedStorage& cuda_storage,
 
 void copy_cpu_jacobian_to_cuda_mixed(const CpuFp64Storage& cpu_storage,
                                      CudaMixedStorage& cuda_storage,
-                                     const JacobianStructure& J)
+                                     const JacobianPattern& J)
 {
     newton_solver::utils::ScopedTimer timer("ABLATION.cpu_jacobian_to_cuda_csr");
 
@@ -857,7 +832,7 @@ void copy_cuda_mismatch_to_cpu(const CudaMixedStorage& cuda_storage,
 
 void copy_cuda_jacobian_to_cpu_csc(const CudaMixedStorage& cuda_storage,
                                    CpuFp64Storage& cpu_storage,
-                                   const JacobianStructure& J)
+                                   const JacobianPattern& J)
 {
     newton_solver::utils::ScopedTimer timer("ABLATION.cuda_J_to_cpu_csc");
 
@@ -911,15 +886,15 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
         throw std::runtime_error("Hybrid CUDA mixed edge profile has no CPU ablation operator selected");
     }
 
-    const YbusViewF64 ybus = case_data.ybus();
+    const YbusView ybus = case_data.ybus();
     const int32_t n_pv = static_cast<int32_t>(case_data.pv.size());
     const int32_t n_pq = static_cast<int32_t>(case_data.pq.size());
 
     CudaMixedStorage cuda_storage;
-    CudaMismatchOpF64 mismatch(cuda_storage);
-    CudaJacobianOpEdgeFp32 cuda_jacobian(cuda_storage);
-    CudaLinearSolveCuDSS32 cudss(cuda_storage, profile.options.cudss);
-    CudaVoltageUpdateMixed voltage_update(cuda_storage);
+    CudaMismatchOp mismatch(cuda_storage);
+    CudaJacobianOp<float> cuda_jacobian(cuda_storage);
+    CudaLinearSolveCuDSS<float, CudaMixedStorage> cudss(cuda_storage, profile.options.cudss);
+    CudaVoltageUpdateOp<float> voltage_update(cuda_storage);
 
     CpuFp64Storage cpu_storage;
     CpuNaiveJacobianOpF64 cpu_naive_jacobian(cpu_storage);
@@ -927,34 +902,33 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
 
     newton_solver::utils::resetTimingCollector();
 
-    JacobianBuilder::Result analysis;
-    JacobianMaps cpu_empty_maps;
-    JacobianStructure cpu_empty_jacobian;
+    JacobianAnalysisResult analysis;
+    JacobianScatterMap cpu_empty_maps;
+    JacobianPattern cpu_empty_jacobian;
 
     const auto t0 = std::chrono::steady_clock::now();
     {
-        newton_solver::utils::ScopedTimer total("NR.analyze.total");
+        newton_solver::utils::ScopedTimer total("NR.initialize.total");
 
         {
-            newton_solver::utils::ScopedTimer stage("NR.analyze.jacobian_builder");
-            JacobianBuilder builder(JacobianBuilderType::EdgeBased);
-            analysis = builder.analyze(
+            newton_solver::utils::ScopedTimer stage("NR.initialize.jacobian_analysis");
+            analysis = run_jacobian_analysis(
                 ybus,
                 case_data.pv.data(), n_pv,
                 case_data.pq.data(), n_pq);
         }
 
-        AnalyzeContext cuda_analyze_ctx{
+        InitializeContext cuda_initialize_ctx{
             .ybus = ybus,
             .maps = analysis.maps,
-            .J = analysis.J,
+            .J = analysis.pattern,
             .n_bus = ybus.rows,
             .pv = case_data.pv.data(),
             .n_pv = n_pv,
             .pq = case_data.pq.data(),
             .n_pq = n_pq,
         };
-        AnalyzeContext cpu_analyze_ctx{
+        InitializeContext cpu_initialize_ctx{
             .ybus = ybus,
             .maps = cpu_empty_maps,
             .J = cpu_empty_jacobian,
@@ -966,16 +940,16 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
         };
 
         {
-            newton_solver::utils::ScopedTimer stage("NR.analyze.storage_prepare");
-            cuda_storage.prepare(cuda_analyze_ctx);
-            cpu_storage.prepare(cpu_analyze_ctx);
+            newton_solver::utils::ScopedTimer stage("NR.initialize.storage_prepare");
+            cuda_storage.prepare(cuda_initialize_ctx);
+            cpu_storage.prepare(cpu_initialize_ctx);
         }
         {
-            newton_solver::utils::ScopedTimer stage("NR.analyze.linear_solve");
+            newton_solver::utils::ScopedTimer stage("NR.initialize.linear_solve_initialize");
             if (profile.use_cpu_superlu) {
-                cpu_superlu.analyze(cpu_analyze_ctx);
+                cpu_superlu.initialize(cpu_initialize_ctx);
             } else {
-                cudss.analyze(cuda_analyze_ctx);
+                cudss.initialize(cuda_initialize_ctx);
             }
         }
     }
@@ -994,7 +968,7 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
         .ybus_value_stride = ybus.nnz,
     };
 
-    NRResultF64 result;
+    NRResult result;
     int32_t completed = 0;
 
     {
@@ -1051,7 +1025,7 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
                         newton_solver::utils::ScopedTimer cpu_stage("ABLATION.cpu_naive_jacobian");
                         cpu_naive_jacobian.run(cpu_ctx);
                     }
-                    copy_cpu_jacobian_to_cuda_mixed(cpu_storage, cuda_storage, analysis.J);
+                    copy_cpu_jacobian_to_cuda_mixed(cpu_storage, cuda_storage, analysis.pattern);
                 } else {
                     cuda_jacobian.run(cuda_ctx);
                 }
@@ -1064,11 +1038,13 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
                 newton_solver::utils::ScopedTimer stage("NR.iteration.linear_solve");
                 if (profile.use_cpu_superlu) {
                     copy_cuda_mismatch_to_cpu(cuda_storage, cpu_storage);
-                    copy_cuda_jacobian_to_cpu_csc(cuda_storage, cpu_storage, analysis.J);
-                    cpu_superlu.run(cpu_ctx);
+                    copy_cuda_jacobian_to_cpu_csc(cuda_storage, cpu_storage, analysis.pattern);
+                    cpu_superlu.factorize(cpu_ctx);
+                    cpu_superlu.solve(cpu_ctx);
                     copy_cpu_dx_to_cuda_mixed(cpu_storage, cuda_storage);
                 } else {
-                    cudss.run(cuda_ctx);
+                    cudss.factorize(cuda_ctx);
+                    cudss.solve(cuda_ctx);
                 }
             }
             {
@@ -1095,7 +1071,7 @@ BenchRun run_hybrid_cuda_mixed_edge_once(const cupf::tests::DumpCaseData& case_d
     run.success = result.converged && result.final_mismatch <= config.tolerance;
     run.iterations = result.iterations;
     run.final_mismatch = result.final_mismatch;
-    run.analyze_sec =
+    run.initialize_sec =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000000.0;
     run.solve_sec =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count()) / 1000000.0;
@@ -1185,7 +1161,7 @@ int main(int argc, char** argv)
                 << "success=" << run.success << ' '
                 << "iterations=" << run.iterations << ' '
                 << "final_mismatch=" << run.final_mismatch << ' '
-                << "analyze_sec=" << run.analyze_sec << ' '
+                << "initialize_sec=" << run.initialize_sec << ' '
                 << "solve_sec=" << run.solve_sec << ' '
                 << "total_sec=" << run.total_sec << ' '
                 << "max_abs_v_delta_from_v0=" << run.max_v_delta_from_v0 << ' '

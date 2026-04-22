@@ -6,8 +6,8 @@
 
 ## 목표
 
-1. 바깥 Newton loop는 지금처럼 4-stage를 유지한다.
-2. CUDA op 내부는 substage schedule로 분해한다.
+1. 바깥 Newton loop는 실제 계산 순서가 드러나는 stage를 유지한다.
+2. CUDA op 내부에 의미 없는 substage orchestrator를 숨기지 않는다.
 3. 한 파일은 한 개의 main kernel 또는 한 개의 얇은 orchestrator만 가진다.
 4. storage validation framework는 추가하지 않는다.
 
@@ -16,17 +16,21 @@
 ## 유지할 outer 구조
 
 대상 파일:
-- [cpp/inc/newton_solver/core/execution_plan.hpp](../../cpp/inc/newton_solver/core/execution_plan.hpp)
+- [cpp/inc/newton_solver/core/newton_solver.hpp](../../cpp/inc/newton_solver/core/newton_solver.hpp)
 - [cpp/src/newton_solver/core/newton_solver.cpp](../../cpp/src/newton_solver/core/newton_solver.cpp)
-- [cpp/inc/newton_solver/ops/op_interfaces.hpp](../../cpp/inc/newton_solver/ops/op_interfaces.hpp)
+- [cpp/src/newton_solver/ops/op_interfaces.hpp](../../cpp/src/newton_solver/ops/op_interfaces.hpp)
 
 유지할 형태:
 
 ```text
+ibus.run(ctx)
 mismatch.run(ctx)
+mismatch_norm.run(ctx)
 if converged: break
 jacobian.run(ctx)
-linear_solve.run(ctx)
+linear_solve.prepare_rhs(ctx)
+linear_solve.factorize(ctx)
+linear_solve.solve(ctx)
 voltage_update.run(ctx)
 ```
 
@@ -42,8 +46,8 @@ voltage_update.run(ctx)
 
 ```text
 launch_compute_ibus()
-launch_compute_mismatch()
-launch_reduce_norm()
+launch_compute_mismatch_from_ibus()
+launch_reduce_mismatch_norm()
 ```
 
 ### Jacobian
@@ -51,8 +55,11 @@ launch_reduce_norm()
 `CudaJacobianOp::run()` 내부에서 다음 순서를 따른다.
 
 ```text
-launch_fill_offdiag()
-launch_fill_diag_from_ibus()
+mixed:
+launch_fill_jacobian_gpu<float>()
+
+fp64:
+launch_fill_jacobian_gpu<double>()
 ```
 
 ### Linear solve
@@ -61,7 +68,7 @@ launch_fill_diag_from_ibus()
 
 ### Voltage update
 
-`CudaVoltageUpdateOp::run()`은 `Va/Vm` 갱신과 `V_re/V_im` cache 재구성을 담당한다.
+`CudaVoltageUpdateOp::run()`은 `Va/Vm` 갱신과 FP64 `V_re/V_im` cache 재구성을 담당한다.
 
 ---
 
@@ -72,7 +79,7 @@ launch_fill_diag_from_ibus()
 1. 얇은 orchestrator file
 
 ```text
-cuda_f64.cu
+cuda_mismatch.cu
   - CudaMismatchOp::run()
   - helper launch function declarations
   - no unrelated heavy kernel bodies
@@ -81,7 +88,7 @@ cuda_f64.cu
 2. main kernel file
 
 ```text
-compute_ibus_batch_fp32.cu
+ops/ibus/compute_ibus.cu
   - one main kernel family
   - small helper device functions allowed
 ```

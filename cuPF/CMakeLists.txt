@@ -173,18 +173,18 @@ endif()
 # ---------------------------------------------------------------------------
 set(CUPF_CORE_SOURCES
   # Core
-  cpp/src/newton_solver/core/jacobian_builder.cpp
+  cpp/src/newton_solver/ops/jacobian/jacobian_analysis.cpp
   cpp/src/newton_solver/core/newton_solver.cpp
-  cpp/src/newton_solver/core/plan_builder.cpp
 
   # Storage — CPU
   cpp/src/newton_solver/storage/cpu/cpu_fp64_storage.cpp
 
   # Ops — CPU
-  cpp/src/newton_solver/ops/mismatch/cpu_f64.cpp
-  cpp/src/newton_solver/ops/jacobian/cpu_f64.cpp
+  cpp/src/newton_solver/ops/ibus/compute_ibus.cpp
+  cpp/src/newton_solver/ops/mismatch/cpu_mismatch.cpp
+  cpp/src/newton_solver/ops/jacobian/fill_jacobian.cpp
   cpp/src/newton_solver/ops/linear_solve/cpu_klu.cpp
-  cpp/src/newton_solver/ops/voltage_update/cpu_f64.cpp
+  cpp/src/newton_solver/ops/voltage_update/cpu_voltage_update.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -196,29 +196,23 @@ if(WITH_CUDA)
     cpp/src/newton_solver/storage/cuda/cuda_mixed_storage.cpp
     cpp/src/newton_solver/storage/cuda/cuda_fp64_storage.cpp
 
+    # Ops — CUDA Ibus
+    cpp/src/newton_solver/ops/ibus/compute_ibus.cu
+
     # Ops — CUDA mismatch
-    cpp/src/newton_solver/ops/mismatch/cuda_f64.cu
-    cpp/src/newton_solver/ops/mismatch/compute_ibus_batch_fp32.cu
-    cpp/src/newton_solver/ops/mismatch/compute_mismatch_batch_f64.cu
-    cpp/src/newton_solver/ops/mismatch/reduce_norm_batch_f64.cu
+    cpp/src/newton_solver/ops/mismatch/cuda_mismatch.cu
+    cpp/src/newton_solver/ops/mismatch/compute_mismatch_from_ibus.cu
+    cpp/src/newton_solver/ops/mismatch/reduce_mismatch_norm.cu
 
     # Ops — CUDA jacobian
-    cpp/src/newton_solver/ops/jacobian/cuda_edge_fp32.cu
-    cpp/src/newton_solver/ops/jacobian/cuda_edge_fp64.cu
-    cpp/src/newton_solver/ops/jacobian/cuda_vertex_fp32.cu
-    cpp/src/newton_solver/ops/jacobian/cuda_vertex_fp64.cu
-    cpp/src/newton_solver/ops/jacobian/fill_jacobian_edge_offdiag_fp32.cu
-    cpp/src/newton_solver/ops/jacobian/fill_jacobian_vertex_offdiag_fp32.cu
-    cpp/src/newton_solver/ops/jacobian/fill_jacobian_diag_from_ibus_fp32.cu
+    cpp/src/newton_solver/ops/jacobian/fill_jacobian_gpu.cu
 
     # Ops — CUDA linear solve
-    cpp/src/newton_solver/ops/linear_solve/cast_rhs_f64_to_f32.cu
-    cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.cpp
-    cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.cpp
+    cpp/src/newton_solver/ops/linear_solve/prepare_rhs.cu
+    cpp/src/newton_solver/ops/linear_solve/cuda_cudss.cpp
 
     # Ops — CUDA voltage update
-    cpp/src/newton_solver/ops/voltage_update/cuda_mixed.cu
-    cpp/src/newton_solver/ops/voltage_update/cuda_fp64.cu
+    cpp/src/newton_solver/ops/voltage_update/cuda_voltage_update.cu
   )
 endif()
 

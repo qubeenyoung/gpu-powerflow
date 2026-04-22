@@ -10,15 +10,15 @@ namespace py = pybind11;
 
 
 // ---------------------------------------------------------------------------
-// Helper: numpy CSR 행렬을 YbusViewF64로 감싼다 (zero-copy).
+// Helper: numpy CSR 행렬을 YbusView로 감싼다 (zero-copy).
 // ---------------------------------------------------------------------------
-static YbusViewF64 make_ybus_view(
+static YbusView make_ybus_view(
     py::array_t<int32_t>             indptr,
     py::array_t<int32_t>             indices,
     py::array_t<std::complex<double>> data,
     int32_t rows, int32_t cols)
 {
-    return YbusViewF64{
+    return YbusView{
         indptr.data(),
         indices.data(),
         data.data(),
@@ -99,15 +99,15 @@ PYBIND11_MODULE(_cupf, m)
     // 결과 구조체 바인딩
     // -----------------------------------------------------------------------
 
-    py::class_<NRResultF64>(m, "NRResult",
+    py::class_<NRResult>(m, "NRResult",
         "solve() 결과. public I/O는 항상 FP64.")
-        .def_readonly("V",              &NRResultF64::V,
+        .def_readonly("V",              &NRResult::V,
             "최종 복소 전압 벡터 [n_bus]")
-        .def_readonly("iterations",     &NRResultF64::iterations,
+        .def_readonly("iterations",     &NRResult::iterations,
             "실제 수행한 반복 횟수")
-        .def_readonly("final_mismatch", &NRResultF64::final_mismatch,
+        .def_readonly("final_mismatch", &NRResult::final_mismatch,
             "최종 mismatch 노름 (수렴 시 tolerance 미만)")
-        .def_readonly("converged",      &NRResultF64::converged,
+        .def_readonly("converged",      &NRResult::converged,
             "수렴 여부");
 
     // -----------------------------------------------------------------------
@@ -118,11 +118,11 @@ PYBIND11_MODULE(_cupf, m)
         "Newton-Raphson 전력조류 solver.\n\n"
         "사용 예::\n\n"
         "    solver = NewtonSolver()\n"
-        "    solver.analyze(indptr, indices, data, rows, cols, pv, pq)\n"
+        "    solver.initialize(indptr, indices, data, rows, cols, pv, pq)\n"
         "    result = solver.solve(indptr, indices, data, rows, cols, sbus, V0, pv, pq)\n")
         .def(py::init<const NewtonOptions&>(),
              py::arg("options") = NewtonOptions{},
              "solver를 생성한다. options 생략 시 CPU FP64가 기본값이다.")
-        // TODO: analyze / solve를 numpy 래퍼로 노출
+        // TODO: initialize / solve를 numpy 래퍼로 노출
         ;
 }

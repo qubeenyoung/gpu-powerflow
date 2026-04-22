@@ -1,55 +1,59 @@
 # Phase 04 — Mismatch and Ibus Pipeline
 
-이 단계의 목적은 mismatch stage 안에 custom `Ibus` kernel과 residual pipeline을 넣고, `Ibus`를 Jacobian에서 재사용할 수 있게 하는 것이다.
+이 단계의 목적은 mismatch stage 안에 `Ibus` 계산과 residual pipeline을 분리하고,
+`Ibus`를 Jacobian에서 재사용할 수 있게 하는 것이다.
 
 ---
 
 ## 목표
 
-1. `Ibus = Ybus * V`는 custom batch CSR kernel이 기본이다.
+1. `Ibus = Ybus * V`는 독립된 ibus stage에서 계산한다.
 2. mismatch stage가 `Ibus` 생성과 residual 계산을 함께 담당한다.
-3. norm reduction은 device에서 수행한다.
+3. CUDA norm reduction은 device에서 수행한다.
 
 ---
 
 ## 대상 파일
 
-- [cpp/src/newton_solver/ops/mismatch/cuda_f64.cu](../../cpp/src/newton_solver/ops/mismatch/cuda_f64.cu)
+- [cpp/src/newton_solver/ops/ibus/compute_ibus.cpp](../../cpp/src/newton_solver/ops/ibus/compute_ibus.cpp)
+- [cpp/src/newton_solver/ops/ibus/compute_ibus.cu](../../cpp/src/newton_solver/ops/ibus/compute_ibus.cu)
+- [cpp/src/newton_solver/ops/mismatch/cuda_mismatch.cu](../../cpp/src/newton_solver/ops/mismatch/cuda_mismatch.cu)
 - 새 kernel file들
-  - `compute_ibus_batch_fp32*.cu`
-  - `compute_mismatch_batch_f64*.cu`
-  - `reduce_norm_batch_f64*.cu`
+  - `../ibus/compute_ibus*.cu`
+  - `compute_mismatch_from_ibus*.cu`
+  - `reduce_mismatch_norm*.cu`
 - storage header/cpp (Ibus buffer 추가)
 
 ---
 
 ## 내부 schedule
 
-`CudaMismatchOp::run()`은 다음 순서를 따른다.
+`CudaMismatchOp::run()`은 FP64와 Mixed 모두 `Ibus`를 만든 뒤 residual과 norm을 계산한다.
 
 ```text
 launch_compute_ibus()
-launch_compute_mismatch()
-launch_reduce_norm()
+launch_compute_mismatch_from_ibus()
+launch_reduce_mismatch_norm()
 ```
 
 ### compute_ibus
 
 ```text
-Ibus64 = Ybus32 * V64
+Ibus = Ybus * V
+Mixed: Ibus remains FP64 and is reused by mismatch and Jacobian
 ```
 
 기본 정책:
-- warp-per-(batch, bus)
+- tiled row × batch launch: blockIdx.x = bus, blockIdx.y = batch tile
 - row length histogram을 본 뒤 short/long row variant 추가 검토
 
-### compute_mismatch
+### compute_mismatch_from_ibus
 
 ```text
 F64 = V64 * conj(Ibus64) - Sbus64
 ```
 
-### reduce_norm
+### reduce_mismatch_norm
 
 batch별 `normF` 또는 convergence flag를 device에서 구한다.
 
@@ -62,10 +66,10 @@ batch별 `normF` 또는 convergence flag를 device에서 구한다.
 예:
 
 ```text
-cuda_f64.cu                     // thin mismatch op wrapper
-compute_ibus_batch_fp32.cu      // main Ibus kernel
-compute_mismatch_batch_f64.cu   // main mismatch kernel
-reduce_norm_batch_f64.cu        // main reduction kernel
+cuda_mismatch.cu                // thin mismatch op schedule
+../ibus/compute_ibus.cu         // Ybus + V -> Ibus
+compute_mismatch_from_ibus.cu   // Ibus + V + Sbus -> F
+reduce_mismatch_norm.cu         // F -> norm
 ```
 
 ---
@@ -73,7 +77,8 @@ reduce_norm_batch_f64.cu        // main reduction kernel
 ## 주의사항
 
 - cuSPARSE SpMM은 이 단계의 기본 경로가 아니다.
-- `Ibus`는 mismatch-produced reusable state다.
+- `Ibus`는 mismatch-produced reusable state다. Jacobian도 FP64 `Ibus`를 읽고
+  커널 안에서 FP32로 변환한다.
 - storage validation framework를 추가하지 않는다.
 
 ---

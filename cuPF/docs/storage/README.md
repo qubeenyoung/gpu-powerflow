@@ -7,31 +7,31 @@ Op는 `IStorage`를 통해 버퍼에 접근하며 계산 로직만 구현한다.
 
 ## IStorage 인터페이스
 
-**파일:** [op_interfaces.hpp](../../cpp/inc/newton_solver/ops/op_interfaces.hpp)
+**파일:** [op_interfaces.hpp](../../cpp/src/newton_solver/ops/op_interfaces.hpp)
 
 ```cpp
 class IStorage {
     virtual BackendKind   backend() const = 0;
     virtual ComputePolicy compute()  const = 0;
-    virtual void prepare(const AnalyzeContext& ctx) = 0;  // analyze 단계
+    virtual void prepare(const InitializeContext& ctx) = 0;  // initialize 단계
     virtual void upload(const SolveContext& ctx)    = 0;  // solve 시작 시
-    virtual void download_result(NRResultF64& result) const = 0;
-    virtual void download_batch_result(NRBatchResultF64& result) const;
+    virtual void download_result(NRResult& result) const = 0;
+    virtual void download_batch_result(NRBatchResult& result) const;
 };
 ```
 
 ### prepare()
 
-`analyze()` 단계에서 **한 번만** 호출된다. 다음을 수행한다.
+`initialize()` 단계에서 **한 번만** 호출된다. 다음을 수행한다.
 - 위상 메타데이터(n_bus, n_pvpq, n_pq, dimF) 계산
-- JacobianMaps, JacobianStructure 복사
+- JacobianScatterMap, JacobianPattern 복사
 - 버퍼 할당 및 초기화
 - Jacobian CSC/CSR 행렬 구성 (CPU) 또는 device 업로드 (CUDA)
 
 ### upload()
 
 `solve()` 시작 시마다 호출된다. Ybus 값, Sbus, V0를 device로 올린다.
-Ybus의 희소 구조가 `analyze()` 당시와 같은지 검증한다.
+Ybus의 희소 구조가 `initialize()` 당시와 같은지 검증한다.
 기본 실행 모델은 batch-major layout이며, single-case solve는 `batch_size=1`이다.
 
 ### download_result() / download_batch_result()
@@ -64,7 +64,7 @@ CPU FP64 경로의 host-side 버퍼와 Eigen/KLU 상태를 관리한다.
 
 ### 특이사항
 
-- Eigen은 내부적으로 CSC를 사용하지만 JacobianBuilder는 CSR 맵을 생성한다.
+- Eigen은 내부적으로 CSC를 사용하지만 JacobianMapBuilder는 CSR 맵을 생성한다.
   `prepare()`에서 CSR→CSC 리맵 테이블(`csr_to_csc`)을 만들어 `mapJ**`를 CSC 위치로 변환한다.
 - `has_cached_Ibus`: MismatchOp이 Ibus를 계산하면 true로 설정, JacobianOp이 재사용.
   VoltageUpdateOp이 V를 변경하면 false로 무효화.
@@ -112,9 +112,10 @@ SolveScalar    = double
 
 **파일:** [cuda_mixed_storage.hpp](../../cpp/src/newton_solver/storage/cuda/cuda_mixed_storage.hpp)
 
-Mixed 정밀도 경로. 전압 상태(`Va/Vm`), derived cache(`V_re/V_im`), `Sbus`, `Ibus`, `F`는
-FP64로 유지하고, `Ybus/J/dx`는 FP32로 둔다. Jacobian 커널은 FP64 `V/Ibus` 입력을
-load한 뒤 내부 산술만 FP32로 수행한다.
+Mixed 정밀도 경로. `Ybus`, 전압 상태(`Va/Vm`), mismatch용 derived cache(`V_re/V_im`),
+`Sbus`, `Ibus`, `F`는 FP64로 유지하고, `J/dx`는 FP32로 둔다.
+Ibus 커널은 FP64 `Ybus/V`를 읽어 FP64 `Ibus`를 만들고,
+Jacobian 커널은 FP64 `Ybus/V/Ibus`를 읽어 FP32 `J`를 채운다.
 
 ### 정밀도 레이아웃
 
@@ -122,10 +123,11 @@ load한 뒤 내부 산술만 FP32로 수행한다.
 PublicScalar   = double
 Va/Vm          = double  ← authoritative state
 V cache        = double  ← derived V_re/V_im
-Ybus           = float
+Ybus           = double
 Ibus           = double
 Sbus           = double
 F              = double
+Jacobian input = double Ybus + double voltage cache + double Ibus
 JacobianScalar = float
 SolveScalar    = float
 ```
@@ -134,18 +136,19 @@ SolveScalar    = float
 
 | 버퍼 | 타입 | 크기 | 설명 |
 |------|------|------|------|
-| `d_Ybus_re/im` | `float` | [nnz_Y] 또는 [B·nnz_Y] | Ybus 값, 구조는 batch 공통 |
+| `d_Ybus_re/im` | `double` | [nnz_Y] | Ybus 값, 구조와 값은 batch 공통 |
 | `d_Sbus_re/im` | `double` | [B·n_bus] | 지정 전력 |
 | `d_Ibus_re/im` | `double` | [B·n_bus] | custom CSR mismatch가 만든 재사용 전류 |
 | `d_Va/Vm` | `double` | [B·n_bus] | authoritative 전압 상태 |
-| `d_V_re/im` | `double` | [B·n_bus] | mismatch 입력, Jacobian FP32 내부 계산의 FP64 경계 입력 |
+| `d_V_re/im` | `double` | [B·n_bus] | mismatch 입력용 rectangular cache |
 | `d_F` | `double` | [B·dimF] | 수렴 판정용 미스매치 |
-| `d_normF` | `double` | [B] | batch별 L∞ norm |
+| `d_normF` | `double` | [B] | L∞ norm, single-case는 B=1 |
 | `d_J_values` | `float` | [B·nnz_J] | cuDSS uniform batch CSR values |
 | `d_dx` | `float` | [B·dimF] | cuDSS FP32 solution |
 
+Mixed Jacobian의 `Ybus`, 전압 입력, `Ibus`는 FP64 buffer에서 읽고 커널 안에서 `float`로 변환한다.
 Jacobian structure와 map 배열은 batch 공통이고, 값 버퍼만 batch-major다.
-최종 `NRResultF64`/`NRBatchResultF64` 전압은 FP64 `Va/Vm`에서 재구성한다.
+최종 `NRResult`/`NRBatchResult` 전압은 FP64 `Va/Vm`에서 재구성한다.
 
 ---
 

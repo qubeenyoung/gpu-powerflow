@@ -13,14 +13,12 @@
 //   5. B.Store → dx 복사 (SuperLU가 B를 in-place로 갱신하므로 B.Store에 결과 있음)
 //   6. 모든 SuperMatrix 자원 해제 (Destroy_*)
 //
-// analyze() 는 no-op: symbolic 분석이 run() 내부 dgssv()에 포함되어 있음.
+// initialize()/factorize() 는 no-op: symbolic/numeric/solve가 solve() 내부 dgssv()에 포함되어 있음.
 // ---------------------------------------------------------------------------
 
 #include "cpu_superlu_solve.hpp"
 
-#include "newton_solver/core/contexts.hpp"
 #include "newton_solver/storage/cpu/cpu_fp64_storage.hpp"
-#include "utils/timer.hpp"
 
 #include <superlu/slu_ddefs.h>
 
@@ -29,28 +27,22 @@
 #include <vector>
 
 
-CpuLinearSolveSuperLU::CpuLinearSolveSuperLU(IStorage& storage)
-    : storage_(static_cast<CpuFp64Storage&>(storage)) {}
+void CpuLinearSolveSuperLU::initialize(CpuFp64Buffers&, const InitializeContext&) {}
 
+void CpuLinearSolveSuperLU::prepare_rhs(CpuFp64Buffers&, IterationContext&) {}
 
-void CpuLinearSolveSuperLU::analyze(const AnalyzeContext& ctx)
-{
-    (void)ctx;
-}
+void CpuLinearSolveSuperLU::factorize(CpuFp64Buffers&, IterationContext&) {}
 
-
-void CpuLinearSolveSuperLU::run(IterationContext& ctx)
+void CpuLinearSolveSuperLU::solve(CpuFp64Buffers& storage_, IterationContext& ctx)
 {
     (void)ctx;
 
     if (storage_.J.rows() != storage_.dimF || storage_.J.cols() != storage_.dimF) {
-        throw std::runtime_error("CpuLinearSolveSuperLU::run: Jacobian shape does not match dimF");
+        throw std::runtime_error("CpuLinearSolveSuperLU::solve: Jacobian shape does not match dimF");
     }
     if (storage_.J.nonZeros() <= 0) {
-        throw std::runtime_error("CpuLinearSolveSuperLU::run: Jacobian is empty");
+        throw std::runtime_error("CpuLinearSolveSuperLU::solve: Jacobian is empty");
     }
-
-    newton_solver::utils::ScopedTimer timer("CPU.naive.solve.superlu");
 
     const int n = storage_.J.rows();
     const int nnz = storage_.J.nonZeros();
@@ -98,7 +90,7 @@ void CpuLinearSolveSuperLU::run(IterationContext& ctx)
         Destroy_SuperNode_Matrix(&L);
         Destroy_CompCol_Matrix(&U);
         throw std::runtime_error(
-            "CpuLinearSolveSuperLU::run: SuperLU dgssv failed, info=" +
+            "CpuLinearSolveSuperLU::solve: SuperLU dgssv failed, info=" +
             std::to_string(info));
     }
 

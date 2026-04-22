@@ -1,7 +1,5 @@
 #pragma once
 
-#include "jacobian_types.hpp"
-
 #include <complex>
 #include <cstdint>
 #include <vector>
@@ -25,10 +23,9 @@ struct CSRView {
 
 
 // ---------------------------------------------------------------------------
-// Ybus view 타입 별칭.
+// Ybus view 타입.
 // ---------------------------------------------------------------------------
-using YbusViewF64 = CSRView<std::complex<double>>;
-using YbusView    = YbusViewF64;
+using YbusView = CSRView<std::complex<double>>;
 
 
 // ---------------------------------------------------------------------------
@@ -57,6 +54,7 @@ enum class BackendKind {
 //           고정 프로파일이며, stage별 자유 조합이 아니다.
 //
 // Mixed 프로파일의 내부 구성:
+//   Ybus/V state   — FP64
 //   mismatch       — FP64
 //   jacobian       — FP32
 //   linear solve   — FP32 (cuDSS FP32)
@@ -95,21 +93,19 @@ struct CuDSSOptions {
 // ---------------------------------------------------------------------------
 // NewtonOptions: 생성자에 전달하는 solver 설정.
 //
-// 사용자는 backend, compute policy, Jacobian 빌드 알고리즘과 CUDA direct
-// solver 설정을 선택한다.
+// 사용자는 backend, compute policy와 CUDA direct solver 설정을 선택한다.
 // ---------------------------------------------------------------------------
 struct NewtonOptions {
-    BackendKind         backend = BackendKind::CPU;
-    ComputePolicy       compute = ComputePolicy::FP64;
-    JacobianBuilderType jacobian_builder = JacobianBuilderType::EdgeBased;
-    CuDSSOptions        cudss = {};
+    BackendKind   backend = BackendKind::CPU;
+    ComputePolicy compute = ComputePolicy::FP64;
+    CuDSSOptions  cudss = {};
 };
 
 
 // ---------------------------------------------------------------------------
-// NRResultF64: solve() 결과. public I/O는 항상 FP64.
+// NRResult: solve() 결과. public I/O는 항상 FP64.
 // ---------------------------------------------------------------------------
-struct NRResultF64 {
+struct NRResult {
     std::vector<std::complex<double>> V;
 
     int32_t iterations     = 0;
@@ -117,17 +113,15 @@ struct NRResultF64 {
     bool    converged      = false;
 };
 
-using NRResult = NRResultF64;
-
 
 // ---------------------------------------------------------------------------
-// NRBatchResultF64: batch solve() 결과.
+// NRBatchResult: batch solve() 결과.
 //
 // 단일 케이스 결과와 동일한 의미를 batch 차원으로 확장한다.
 // V는 batch-major contiguous layout [batch_size * n_bus]를 사용한다.
 // public I/O는 항상 FP64다.
 // ---------------------------------------------------------------------------
-struct NRBatchResultF64 {
+struct NRBatchResult {
     std::vector<std::complex<double>> V;
 
     int32_t n_bus      = 0;
@@ -137,5 +131,3 @@ struct NRBatchResultF64 {
     std::vector<double>  final_mismatch;
     std::vector<uint8_t> converged;
 };
-
-using NRBatchResult = NRBatchResultF64;

@@ -19,23 +19,19 @@ It separates clean end-to-end timing from operator-level timing.
 - `cpp_naive`: C++ PyPower-like Jacobian + SuperLU reference path.
 - `cpp`: core CPU FP64 path with edge-based Jacobian maps and KLU.
 - `cuda_edge`: CUDA Mixed profile with FP32 edge Jacobian and cuDSS32 solve.
-- `cuda_vertex`: CUDA Mixed profile with FP32 vertex Jacobian and cuDSS32 solve.
 
 The user-facing profile names above map to these internal cuPF profiles:
 
 - `cpp_naive` -> `cpp_pypowerlike`
 - `cpp` -> `cpu_fp64_edge`
 - `cuda_edge` -> `cuda_mixed_edge`
-- `cuda_vertex` -> `cuda_mixed_vertex`
 
 Additional internal profiles remain available when needed:
 
 - `cpp_pypowerlike`: reference CPU baseline using the PyPower-like Jacobian and SuperLU solve from `cpp/src/newton_solver/reference`.
 - `cpu_fp64_edge`: core CPU FP64 path with edge-based Jacobian maps and KLU.
 - `cuda_mixed_edge`: CUDA Mixed profile with FP32 edge Jacobian and cuDSS32 solve.
-- `cuda_mixed_vertex`: CUDA Mixed profile with FP32 vertex Jacobian and cuDSS32 solve.
 - `cuda_fp64_edge`: CUDA FP64 profile with FP64 edge Jacobian and cuDSS64 solve.
-- `cuda_fp64_vertex`: CUDA FP64 profile with FP64 vertex Jacobian and cuDSS64 solve.
 
 ## Quick Start
 
@@ -48,7 +44,7 @@ The default dataset root is the external workspace dump set:
 ```bash
 python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --cases case30_ieee case118_ieee \
-  --profiles pypower cpp_naive cpp cuda_edge cuda_vertex \
+  --profiles pypower cpp_naive cpp cuda_edge \
   --warmup 1 \
   --repeats 10
 ```
@@ -60,12 +56,12 @@ breakdown results. To run only one side:
 python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --mode end2end \
   --cases case30_ieee case118_ieee \
-  --profiles pypower cpp_naive cpp cuda_edge cuda_vertex
+  --profiles pypower cpp_naive cpp cuda_edge
 
 python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --mode operators \
   --cases case30_ieee case118_ieee \
-  --profiles pypower cpp_naive cpp cuda_edge cuda_vertex
+  --profiles pypower cpp_naive cpp cuda_edge
 ```
 
 For a broader CPU/CUDA sweep, list the cases explicitly or pass your own `--case-list` file:
@@ -73,7 +69,7 @@ For a broader CPU/CUDA sweep, list the cases explicitly or pass your own `--case
 ```bash
 python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --cases case30_ieee case118_ieee case793_goc case1354_pegase case2746wop_k case4601_goc case8387_pegase case9241_pegase \
-  --profiles pypower cpp_naive cpp cuda_edge cuda_vertex \
+  --profiles pypower cpp_naive cpp cuda_edge \
   --warmup 1 \
   --repeats 10
 ```
@@ -83,7 +79,7 @@ CUDA profiles automatically enable a CUDA benchmark build:
 ```bash
 python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --cases case30_ieee case118_ieee \
-  --profiles cpp cuda_edge cuda_vertex \
+  --profiles cpp cuda_edge \
   --warmup 1 \
   --repeats 10
 ```
@@ -95,7 +91,7 @@ benchmark paths.
 ```bash
 python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --cases case30_ieee case118_ieee \
-  --profiles cuda_edge cuda_vertex \
+  --profiles cuda_edge \
   --batch-size 8 \
   --warmup 1 \
   --repeats 10
@@ -107,7 +103,7 @@ The selected value is passed to CMake and recorded in `manifest.json`:
 ```bash
 python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --cases case30_ieee case118_ieee \
-  --profiles cuda_edge cuda_vertex cuda_fp64_edge cuda_fp64_vertex \
+  --profiles cuda_edge cuda_fp64_edge \
   --cudss-reordering-alg ALG_1 \
   --warmup 1 \
   --repeats 10
@@ -120,7 +116,7 @@ reordering path:
 ```bash
 python3 /workspace/cuPF/benchmarks/run_benchmarks.py \
   --cases case30_ieee case118_ieee \
-  --profiles cuda_edge cuda_vertex \
+  --profiles cuda_edge \
   --cudss-use-matching \
   --cudss-matching-alg ALG_5 \
   --cudss-pivot-epsilon 1e-12 \
@@ -140,18 +136,9 @@ Results are written to `benchmarks/results/<run-name>/`:
 
 When `--dump-residuals` or `--dump-newton-diagnostics` is enabled, the Python
 runner builds with `ENABLE_DUMP=ON` and writes dump files under
-`residuals/<mode>/<profile>/<case>/repeat_XX/`. CUDA cuDSS runs now include:
+`residuals/<mode>/<profile>/<case>/repeat_XX/`. CUDA runs include:
 
 - `residual_before_update_iterN.txt`: nonlinear residual at the start of iteration `N`.
-- `residual_solve_iterN.txt`: the `F_k` vector used for CUDA `J dx = F_k`.
-- `jacobian_row_ptr_iter0.txt` / `jacobian_col_idx_iter0.txt`: CSR structure.
-- `jacobian_values_used_iterN.txt`: CSR values actually passed to cuDSS at iteration `N`.
-- `dx_iterN.txt`: cuDSS solve result.
-- `linear_residual_iterN.txt`: CUDA `J_used dx - F_k`.
-- `linear_diagnostics.csv`: per-iteration norms, refactorization phase, Jacobian age, and cuDSS pivot counts when available.
-
-For CUDA Mixed `--batch-size > 1`, linear residual diagnostics currently record
-the batch 0 slice.
 
 ## Direct C++ Runner
 
@@ -204,10 +191,10 @@ cmake --build /workspace/cuPF/build/bench-operators --target cupf_case_benchmark
 For Nsight Systems:
 
 ```bash
-nsys profile --trace=cuda,nvtx -o cupf_mixed_vertex \
+nsys profile --trace=cuda,nvtx -o cupf_mixed_edge \
   /workspace/cuPF/build/bench-operators/benchmarks/cupf_case_benchmark \
   --case-dir /workspace/datasets/cuPF_benchmark_dumps/case118_ieee \
-  --profile cuda_mixed_vertex \
+  --profile cuda_mixed_edge \
   --warmup 1 \
   --repeats 1
 ```
@@ -218,7 +205,7 @@ For Nsight Compute, start with the Jacobian kernels:
 ncu --set full \
   /workspace/cuPF/build/bench-operators/benchmarks/cupf_case_benchmark \
   --case-dir /workspace/datasets/cuPF_benchmark_dumps/case118_ieee \
-  --profile cuda_mixed_vertex \
+  --profile cuda_mixed_edge \
   --warmup 1 \
   --repeats 1
 ```

@@ -3,26 +3,23 @@
 //
 // NewtonSolver의 구현.
 //
-// public I/O는 항상 FP64다. Mixed 모드에서 내부 FP32 연산이 사용되더라도
-// 이 파일에는 precision 분기가 없다. backend·precision 결정은 모두 생성자
-// 시점에 PlanBuilder가 완료하며, 이후 hot path는 인터페이스 호출만 한다.
+// public I/O는 항상 FP64다. backend·precision 결정은 생성자 시점에 완료되며,
+// 이후 hot path는 std::visit를 통해 pipeline으로 위임한다.
 // ---------------------------------------------------------------------------
 
 #include "newton_solver/core/newton_solver.hpp"
-#include "newton_solver/core/contexts.hpp"
-#include "newton_solver/core/plan_builder.hpp"
+#include "newton_solver/core/pipeline.hpp"
+#include "newton_solver/core/solver_contexts.hpp"
+#include "newton_solver/ops/jacobian/jacobian_analysis.hpp"
 #include "utils/nvtx_trace.hpp"
 #include "utils/timer.hpp"
 
 #include <stdexcept>
+#include <variant>
 
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// StageScope: 하나의 NR stage에 대한 NVTX range + 타이머를 묶어 관리한다.
-// 스택에 올라가고 소멸 시 자동으로 range·타이머를 닫는다.
-// ---------------------------------------------------------------------------
 struct StageScope {
     explicit StageScope(const char* label)
         : range(label)
@@ -48,99 +45,108 @@ void validate_batch_args(int32_t batch_size, int64_t stride, int32_t n_bus, cons
 
 
 // ---------------------------------------------------------------------------
-// 생성자: NewtonOptions로부터 ExecutionPlan을 조립한다.
-//
-// JacobianBuilder 알고리즘은 NewtonOptions에서 선택한다.
-// 기본값은 EdgeBased이며, VertexBased는 CUDA Jacobian에서 warp-per-row 커널을 사용한다.
+// Constructor: assemble the pipeline from NewtonOptions.
 // ---------------------------------------------------------------------------
 NewtonSolver::NewtonSolver(const NewtonOptions& options)
-    : options_(options)
-    , plan_(PlanBuilder::build(options))
-    , jac_builder_(options.jacobian_builder)
-{}
+{
+    if (options.backend == BackendKind::CPU) {
+        pipeline_ = std::make_unique<SolverPipeline>(
+            SolverPipeline{CpuFp64Pipeline{}});
+        return;
+    }
+
+#ifdef CUPF_WITH_CUDA
+    if (options.backend == BackendKind::CUDA) {
+        if (options.compute == ComputePolicy::FP64) {
+            pipeline_ = std::make_unique<SolverPipeline>(
+                SolverPipeline{CudaFp64Pipeline{options.cudss}});
+            return;
+        }
+        if (options.compute == ComputePolicy::Mixed) {
+            pipeline_ = std::make_unique<SolverPipeline>(
+                SolverPipeline{CudaMixedPipeline{options.cudss}});
+            return;
+        }
+    }
+#else
+    if (options.backend == BackendKind::CUDA) {
+        throw std::invalid_argument(
+            "NewtonSolver: CUDA backend를 요청했지만 cuPF가 CUDA 없이 빌드되었습니다.");
+    }
+#endif
+
+    throw std::invalid_argument(
+        "NewtonSolver: 지원하지 않는 backend/compute 조합입니다.");
+}
 
 
 NewtonSolver::~NewtonSolver() = default;
 
 
 // ---------------------------------------------------------------------------
-// analyze: Ybus 희소 구조를 분석하고 solve()에 필요한 내부 상태를 준비한다.
-//
-// 단계:
-//   1. JacobianBuilder::analyze() — 희소 맵과 Jacobian CSR 패턴 생성
-//   2. IStorage::prepare()         — device-side 디스크립터 초기화
-//   3. ILinearSolveOp::analyze()   — solver symbolic 분석
-//
-// 네트워크 위상(pv/pq 집합)이 바뀌지 않는 한 한 번만 호출하면 된다.
+// initialize: Jacobian analysis → pipeline::initialize (prepare + KLU/cuDSS)
 // ---------------------------------------------------------------------------
-void NewtonSolver::analyze(
-    const YbusViewF64& ybus,
+void NewtonSolver::initialize(
+    const YbusView& ybus,
     const int32_t* pv, int32_t n_pv,
     const int32_t* pq, int32_t n_pq)
 {
-    StageScope total("NR.analyze.total");
+    StageScope total("NR.initialize.total");
 
-    JacobianBuilder::Result analysis;
+    JacobianPattern pattern;
+    JacobianScatterMap scatter_map;
     {
-        StageScope stage("NR.analyze.jacobian_builder");
-        analysis = jac_builder_.analyze(ybus, pv, n_pv, pq, n_pq);
+        StageScope stage("NR.initialize.jacobian_analysis");
+        const JacobianIndexing indexing =
+            make_jacobian_indexing(ybus.rows, pv, n_pv, pq, n_pq);
+        pattern = JacobianPatternGenerator().generate(ybus, indexing);
+        scatter_map = JacobianMapBuilder().build(ybus, indexing, pattern);
     }
 
-    AnalyzeContext ctx{
+    InitializeContext ctx{
         .ybus  = ybus,
-        .maps  = analysis.maps,
-        .J     = analysis.J,
+        .maps  = scatter_map,
+        .J     = pattern,
         .n_bus = ybus.rows,
         .pv    = pv, .n_pv = n_pv,
         .pq    = pq, .n_pq = n_pq,
     };
 
-    run_analyze_stages(ctx);
-    analyzed_ = true;
+    {
+        StageScope stage("NR.initialize.pipeline");
+        std::visit([&](auto& p) { p.initialize(ctx); }, pipeline_->v);
+    }
+
+    initialized_ = true;
 }
 
 
 // ---------------------------------------------------------------------------
-// solve: Newton-Raphson 반복을 실행하고 result를 채운다.
-//
-// 단계:
-//   1. IStorage::upload()           — Ybus 값, V0, Sbus를 device로 올린다
-//   2. run_iteration_stages()       — NR 반복 루프 (mismatch→J→solve→dV)
-//   3. IStorage::download_result()  — 최종 전압을 host로 내린다
+// solve: single-case wrapper around solve_batch
 // ---------------------------------------------------------------------------
 void NewtonSolver::solve(
-    const YbusViewF64&          ybus,
+    const YbusView&          ybus,
     const std::complex<double>* sbus,
     const std::complex<double>* V0,
     const int32_t*              pv, int32_t n_pv,
     const int32_t*              pq, int32_t n_pq,
     const NRConfig&             config,
-    NRResultF64&                result)
+    NRResult&                result)
 {
-    NRBatchResultF64 batch_result;
-    solve_batch(ybus,
-                sbus,
-                ybus.rows,
-                V0,
-                ybus.rows,
-                1,
-                pv,
-                n_pv,
-                pq,
-                n_pq,
-                config,
-                batch_result);
+    NRBatchResult batch_result;
+    solve_batch(ybus, sbus, ybus.rows, V0, ybus.rows, 1,
+                pv, n_pv, pq, n_pq, config, batch_result);
 
     result = {};
     result.V = std::move(batch_result.V);
-    result.iterations = batch_result.iterations.empty() ? 0 : batch_result.iterations[0];
-    result.final_mismatch = batch_result.final_mismatch.empty() ? 0.0 : batch_result.final_mismatch[0];
-    result.converged = !batch_result.converged.empty() && batch_result.converged[0] != 0;
+    result.iterations    = batch_result.iterations.empty()     ? 0    : batch_result.iterations[0];
+    result.final_mismatch= batch_result.final_mismatch.empty() ? 0.0  : batch_result.final_mismatch[0];
+    result.converged     = !batch_result.converged.empty() && batch_result.converged[0] != 0;
 }
 
 
 void NewtonSolver::solve_batch(
-    const YbusViewF64&          ybus,
+    const YbusView&          ybus,
     const std::complex<double>* sbus,
     int64_t                     sbus_stride,
     const std::complex<double>* V0,
@@ -149,31 +155,31 @@ void NewtonSolver::solve_batch(
     const int32_t*              pv, int32_t n_pv,
     const int32_t*              pq, int32_t n_pq,
     const NRConfig&             config,
-    NRBatchResultF64&           result)
+    NRBatchResult&           result)
 {
     StageScope total("NR.solve.total");
 
-    if (!analyzed_) {
+    if (!initialized_) {
         throw std::runtime_error(
-            "NewtonSolver::solve_batch(): analyze()를 먼저 호출해야 합니다.");
+            "NewtonSolver::solve_batch(): initialize()를 먼저 호출해야 합니다.");
     }
 
     validate_batch_args(batch_size, sbus_stride, ybus.rows, "sbus");
-    validate_batch_args(batch_size, V0_stride, ybus.rows, "V0");
+    validate_batch_args(batch_size, V0_stride,   ybus.rows, "V0");
+
+    if (batch_size != 1) {
+        const bool supported = std::visit(
+            [](const auto& p) { return p.batch_supported; }, pipeline_->v);
+        if (!supported) {
+            throw std::runtime_error(
+                "NewtonSolver::solve_batch(): batch_size > 1 is currently supported "
+                "only by the CUDA Mixed pipeline.");
+        }
+    }
 
     result = {};
-    result.n_bus = ybus.rows;
-    result.batch_size = batch_size;
-
-    // 현재 실제 B>1 실행은 CUDA Mixed optimized path에서만 활성화되어 있다.
-    // CPU/FP64 CUDA 경로는 single-case compatibility path로 남긴다.
-    if (batch_size != 1 &&
-        !(plan_.storage->backend() == BackendKind::CUDA &&
-          plan_.storage->compute() == ComputePolicy::Mixed)) {
-        throw std::runtime_error(
-            "NewtonSolver::solve_batch(): batch_size > 1 is currently supported "
-            "only by the CUDA Mixed path.");
-    }
+    result.n_bus       = ybus.rows;
+    result.batch_size  = batch_size;
 
     {
         StageScope stage("NR.solve.upload");
@@ -182,39 +188,41 @@ void NewtonSolver::solve_batch(
             .sbus   = sbus,
             .V0     = V0,
             .config = &config,
-            .batch_size = batch_size,
-            .sbus_stride = sbus_stride,
-            .V0_stride = V0_stride,
+            .batch_size          = batch_size,
+            .sbus_stride         = sbus_stride,
+            .V0_stride           = V0_stride,
             .ybus_values_batched = false,
-            .ybus_value_stride = ybus.nnz,
+            .ybus_value_stride   = ybus.nnz,
         };
-        plan_.storage->upload(upload_ctx);
+        std::visit([&](auto& p) { p.upload(upload_ctx); }, pipeline_->v);
     }
 
     IterationContext iter_ctx{
-        .storage = *plan_.storage,
-        .config  = config,
-        .pv      = pv, .n_pv = n_pv,
-        .pq      = pq, .n_pq = n_pq,
+        .config = config,
+        .pv     = pv, .n_pv = n_pv,
+        .pq     = pq, .n_pq = n_pq,
     };
 
     const int32_t iterations = run_iteration_stages(iter_ctx);
 
     {
         StageScope stage("NR.solve.download");
-        plan_.storage->download_batch_result(result);
+        std::visit([&](auto& p) { p.download_batch(result); }, pipeline_->v);
     }
 
-    result.n_bus = ybus.rows;
+    result.n_bus      = ybus.rows;
     result.batch_size = batch_size;
     result.iterations.assign(static_cast<std::size_t>(batch_size), iterations);
+
     if (result.final_mismatch.size() != static_cast<std::size_t>(batch_size)) {
         result.final_mismatch.assign(static_cast<std::size_t>(batch_size), iter_ctx.normF);
     }
     result.converged.resize(static_cast<std::size_t>(batch_size));
     for (int32_t b = 0; b < batch_size; ++b) {
         const double norm =
-            result.final_mismatch.empty() ? iter_ctx.normF : result.final_mismatch[static_cast<std::size_t>(b)];
+            result.final_mismatch.empty()
+                ? iter_ctx.normF
+                : result.final_mismatch[static_cast<std::size_t>(b)];
         result.converged[static_cast<std::size_t>(b)] =
             static_cast<uint8_t>(norm <= config.tolerance ? 1 : 0);
     }
@@ -222,31 +230,7 @@ void NewtonSolver::solve_batch(
 
 
 // ---------------------------------------------------------------------------
-// run_analyze_stages: storage 준비 → linear_solve symbolic 분석
-// ---------------------------------------------------------------------------
-void NewtonSolver::run_analyze_stages(const AnalyzeContext& ctx)
-{
-    {
-        StageScope stage("NR.analyze.storage_prepare");
-        plan_.storage->prepare(ctx);
-    }
-    {
-        StageScope stage("NR.analyze.linear_solve");
-        plan_.linear_solve->analyze(ctx);
-    }
-}
-
-
-// ---------------------------------------------------------------------------
-// run_iteration_stages: NR 반복 루프
-//
-// 각 반복은 4개의 stage로 구성된다.
-//   mismatch     — F = S_calculated - S_specified, normF 계산
-//   jacobian     — Jacobian J 채우기
-//   linear_solve — 선형계 풀이
-//   voltage_update — dx 적용, V cache 재구성
-//
-// mismatch 단계 후 수렴하면 루프를 즉시 종료한다.
+// run_iteration_stages: NR loop — ibus → mismatch → norm → jac → solve → update
 // ---------------------------------------------------------------------------
 int32_t NewtonSolver::run_iteration_stages(IterationContext& ctx)
 {
@@ -258,28 +242,26 @@ int32_t NewtonSolver::run_iteration_stages(IterationContext& ctx)
         ctx.jacobian_updated_this_iter = false;
         completed = iter + 1;
 
-        {
-            StageScope stage("NR.iteration.mismatch");
-            plan_.mismatch->run(ctx);
-        }
-        if (ctx.converged) {
-            break;
-        }
+        std::visit([&](auto& p) {
+            { StageScope s("NR.iteration.ibus");          p.ibus(ctx); }
+            { StageScope s("NR.iteration.mismatch");      p.mismatch(ctx); }
+            { StageScope s("NR.iteration.mismatch_norm"); p.mismatch_norm(ctx); }
+        }, pipeline_->v);
 
-        {
-            StageScope stage("NR.iteration.jacobian");
-            plan_.jacobian->run(ctx);
-            ctx.jacobian_updated_this_iter = true;
-            ctx.jacobian_age = 0;
-        }
-        {
-            StageScope stage("NR.iteration.linear_solve");
-            plan_.linear_solve->run(ctx);
-        }
-        {
-            StageScope stage("NR.iteration.voltage_update");
-            plan_.voltage_update->run(ctx);
-        }
+        if (ctx.converged) break;
+
+        std::visit([&](auto& p) {
+            { StageScope s("NR.iteration.jacobian");       p.jacobian(ctx); }
+        }, pipeline_->v);
+        ctx.jacobian_updated_this_iter = true;
+        ctx.jacobian_age = 0;
+
+        std::visit([&](auto& p) {
+            { StageScope s("NR.iteration.prepare_rhs");    p.prepare_rhs(ctx); }
+            { StageScope s("NR.iteration.factorize");      p.factorize(ctx); }
+            { StageScope s("NR.iteration.solve");          p.solve(ctx); }
+            { StageScope s("NR.iteration.voltage_update"); p.voltage_update(ctx); }
+        }, pipeline_->v);
     }
 
     return completed;

@@ -1,9 +1,9 @@
 #pragma once
 
-#include "newton_solver/ops/op_interfaces.hpp"
+#include "newton_solver/core/solver_contexts.hpp"
 
 
-class CpuFp64Storage;
+struct CpuFp64Buffers;
 
 
 // ---------------------------------------------------------------------------
@@ -12,12 +12,9 @@ class CpuFp64Storage;
 // Mirrors the v2 naive CPU path and SciPy's spsolve() fallback:
 // symbolic ordering + numeric factorization + triangular solve every call.
 // ---------------------------------------------------------------------------
-class CpuLinearSolveSuperLU final : public ILinearSolveOp {
-public:
-    explicit CpuLinearSolveSuperLU(IStorage& storage);
-    void analyze(const AnalyzeContext& ctx) override;
-    void run(IterationContext& ctx) override;
-
-private:
-    CpuFp64Storage& storage_;
+struct CpuLinearSolveSuperLU {
+    void initialize(CpuFp64Buffers& buf, const InitializeContext& ctx);
+    void prepare_rhs(CpuFp64Buffers& buf, IterationContext& ctx);
+    void factorize(CpuFp64Buffers& buf, IterationContext& ctx);
+    void solve(CpuFp64Buffers& buf, IterationContext& ctx);
 };

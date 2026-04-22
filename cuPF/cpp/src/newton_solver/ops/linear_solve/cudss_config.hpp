@@ -5,7 +5,7 @@
 //
 // cuDSS 관련 CMake 옵션과 NewtonOptions.cudss 런타임 설정을
 // cudssHandle/cudssConfig API 에 연결한다.
-// cuda_cudss32.cpp / cuda_cudss64.cpp 에서만 include 한다.
+// cuda_cudss.cpp 에서만 include 한다.
 //
 // CMake 옵션 설명:
 //
@@ -90,15 +90,28 @@ inline bool analysis_requires_matrix_values(const CuDSSOptions& options)
     return options.use_matching;
 }
 
-// 재순서화 알고리즘, matching, pivot epsilon 등 solver config 적용.
-inline void configure_solver(cudssConfig_t config, const CuDSSOptions& options)
+// 재순서화 알고리즘, matching, pivot epsilon, uniform batch size 등 solver config 적용.
+inline void configure_solver(cudssConfig_t config, const CuDSSOptions& options, int32_t batch_size)
 {
+    if (batch_size <= 0) {
+        throw std::invalid_argument("cuDSS batch_size must be positive");
+    }
+
     cudssAlgType_t reordering_alg = CUPF_CUDSS_REORDERING_ALG;
     CUDSS_CHECK(cudssConfigSet(
         config,
         CUDSS_CONFIG_REORDERING_ALG,
         &reordering_alg,
         sizeof(reordering_alg)));
+
+    if (batch_size > 1) {
+        int ubatch_size = batch_size;
+        CUDSS_CHECK(cudssConfigSet(
+            config,
+            CUDSS_CONFIG_UBATCH_SIZE,
+            &ubatch_size,
+            sizeof(ubatch_size)));
+    }
 
     if (options.use_matching) {
         if (reordering_alg == CUDSS_ALG_1 || reordering_alg == CUDSS_ALG_2) {

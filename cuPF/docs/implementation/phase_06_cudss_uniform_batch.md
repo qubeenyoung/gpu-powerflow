@@ -14,8 +14,7 @@
 
 ## 대상 파일
 
-- [cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.cpp](../../cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.cpp)
-- [cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.cpp](../../cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.cpp)
+- [cpp/src/newton_solver/ops/linear_solve/cuda_cudss.cpp](../../cpp/src/newton_solver/ops/linear_solve/cuda_cudss.cpp)
 - [cpp/src/newton_solver/ops/linear_solve/cudss_config.hpp](../../cpp/src/newton_solver/ops/linear_solve/cudss_config.hpp)
 
 ---

@@ -1,9 +1,9 @@
 #pragma once
 
-#include "newton_solver/ops/op_interfaces.hpp"
+#include "newton_solver/core/solver_contexts.hpp"
 
 
-class CpuFp64Storage;
+struct CpuFp64Buffers;
 
 
 // ---------------------------------------------------------------------------
@@ -14,11 +14,6 @@ class CpuFp64Storage;
 //   2. slice J11/J12/J21/J22
 //   3. rebuild J from triplets every iteration
 // ---------------------------------------------------------------------------
-class CpuNaiveJacobianOpF64 final : public IJacobianOp {
-public:
-    explicit CpuNaiveJacobianOpF64(IStorage& storage);
-    void run(IterationContext& ctx) override;
-
-private:
-    CpuFp64Storage& storage_;
+struct CpuNaiveJacobianOpF64 {
+    void run(CpuFp64Buffers& buf, IterationContext& ctx);
 };

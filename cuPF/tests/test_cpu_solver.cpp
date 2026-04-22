@@ -30,13 +30,13 @@ double max_voltage_delta(const std::vector<std::complex<double>>& lhs,
     return max_delta;
 }
 
-NRResultF64 run_solver(const NewtonOptions& options)
+NRResult run_solver(const NewtonOptions& options)
 {
     const auto data = cupf::tests::load_dump_case(kCase30IeeePath);
-    const YbusViewF64 ybus = data.ybus();
+    const YbusView ybus = data.ybus();
 
     NewtonSolver solver(options);
-    solver.analyze(ybus,
+    solver.initialize(ybus,
                    data.pv.data(), static_cast<int32_t>(data.pv.size()),
                    data.pq.data(), static_cast<int32_t>(data.pq.size()));
 
@@ -44,7 +44,7 @@ NRResultF64 run_solver(const NewtonOptions& options)
     cfg.tolerance = 1e-8;
     cfg.max_iter = 15;
 
-    NRResultF64 result;
+    NRResult result;
     solver.solve(ybus,
                  data.sbus.data(),
                  data.v0.data(),
@@ -126,7 +126,7 @@ TEST(CudaSolverSmoke, MixedCase30BatchConverges)
     }
 
     const auto data = cupf::tests::load_dump_case(kCase30IeeePath);
-    const YbusViewF64 ybus = data.ybus();
+    const YbusView ybus = data.ybus();
     constexpr int32_t batch_size = 2;
     const auto batched_sbus = repeat_complex_vector(data.sbus, batch_size);
     const auto batched_v0 = repeat_complex_vector(data.v0, batch_size);
@@ -136,7 +136,7 @@ TEST(CudaSolverSmoke, MixedCase30BatchConverges)
     options.compute = ComputePolicy::Mixed;
 
     NewtonSolver solver(options);
-    solver.analyze(ybus,
+    solver.initialize(ybus,
                    data.pv.data(), static_cast<int32_t>(data.pv.size()),
                    data.pq.data(), static_cast<int32_t>(data.pq.size()));
 
@@ -144,7 +144,7 @@ TEST(CudaSolverSmoke, MixedCase30BatchConverges)
     cfg.tolerance = 1e-8;
     cfg.max_iter = 15;
 
-    NRBatchResultF64 result;
+    NRBatchResult result;
     solver.solve_batch(ybus,
                        batched_sbus.data(),
                        ybus.rows,

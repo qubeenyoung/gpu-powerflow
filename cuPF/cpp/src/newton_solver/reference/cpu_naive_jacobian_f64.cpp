@@ -27,9 +27,8 @@
 
 #include "cpu_naive_jacobian_f64.hpp"
 
-#include "newton_solver/core/contexts.hpp"
+#include "newton_solver/ops/ibus/compute_ibus.hpp"
 #include "newton_solver/storage/cpu/cpu_fp64_storage.hpp"
-#include "utils/timer.hpp"
 
 #include <Eigen/Sparse>
 
@@ -50,11 +49,7 @@ constexpr std::complex<double> kImaginaryUnit(0.0, 1.0);
 }  // namespace
 
 
-CpuNaiveJacobianOpF64::CpuNaiveJacobianOpF64(IStorage& storage)
-    : storage_(static_cast<CpuFp64Storage&>(storage)) {}
-
-
-void CpuNaiveJacobianOpF64::run(IterationContext& ctx)
+void CpuNaiveJacobianOpF64::run(CpuFp64Buffers& storage_, IterationContext& ctx)
 {
     if (storage_.n_bus <= 0 || storage_.dimF <= 0) {
         throw std::runtime_error("CpuNaiveJacobianOpF64::run: storage is not prepared");
@@ -86,12 +81,10 @@ void CpuNaiveJacobianOpF64::run(IterationContext& ctx)
     }
 
     Eigen::Map<const CpuComplexVectorF64> V(storage_.V.data(), n);
-    Eigen::Map<CpuComplexVectorF64> Ibus(storage_.Ibus.data(), n);
 
     // Ibus = Ybus·V  캐시 재사용 (MismatchOp이 이미 계산했으면 생략)
     if (!storage_.has_cached_Ibus) {
-        Ibus = storage_.Ybus * V;
-        storage_.has_cached_Ibus = true;
+        compute_ibus(storage_);
     }
 
     // V̂ = V / |V|  (단위 벡터, 영전압 방어를 위해 1e-8 clamp)
@@ -103,8 +96,6 @@ void CpuNaiveJacobianOpF64::run(IterationContext& ctx)
     // 단계 1: dS_dVm = diag(V)·conj(Ybus·diag(V̂)) + diag(conj(Ibus)·V̂)
     CpuComplexMatrixF64 dS_dVm(n, n);
     {
-        newton_solver::utils::ScopedTimer timer("CPU.naive.jacobian.dS_dVm");
-
         std::vector<ComplexTriplet> trips;
         trips.reserve(static_cast<std::size_t>(storage_.Ybus.nonZeros() + n));
 
@@ -132,8 +123,6 @@ void CpuNaiveJacobianOpF64::run(IterationContext& ctx)
     //   dS_dVa[i,j] = j·V[i]·conj(tmp[i,j])
     CpuComplexMatrixF64 dS_dVa(n, n);
     {
-        newton_solver::utils::ScopedTimer timer("CPU.naive.jacobian.dS_dVa");
-
         std::vector<ComplexTriplet> trips;
         trips.reserve(static_cast<std::size_t>(storage_.Ybus.nonZeros() + n));
 
@@ -175,8 +164,6 @@ void CpuNaiveJacobianOpF64::run(IterationContext& ctx)
     //   J[:n_pvpq, n_pvpq:] = Re(dS_dVm)[pvpq, pq]     (J12 = ∂P/∂|V|)
     //   J[n_pvpq:, n_pvpq:] = Im(dS_dVm)[pq,   pq]     (J22 = ∂Q/∂|V|)
     {
-        newton_solver::utils::ScopedTimer timer("CPU.naive.jacobian.assemble");
-
         std::vector<RealTriplet> trips;
         trips.reserve(static_cast<std::size_t>(dS_dVa.nonZeros() + dS_dVm.nonZeros()));
 

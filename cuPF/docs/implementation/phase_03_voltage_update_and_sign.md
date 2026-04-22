@@ -7,17 +7,17 @@
 ## 목표
 
 1. `Va/Vm`은 FP64 authoritative state다.
-2. `V_re/V_im`은 FP64 derived cache다.
-3. 부호 convention은 `F = S_calc - S_spec`, `J * dx = F`, `state -= dx`로 통일한다.
+2. `V_re/V_im`은 FP64 mismatch용 derived cache다.
+3. Jacobian 전압 입력은 `V_re/V_im`, `Vm`을 읽고 필요한 계산 타입으로 변환한다.
+4. 부호 convention은 `F = S_calc - S_spec`, `J * dx = F`, `state -= dx`로 통일한다.
 
 ---
 
 ## 대상 파일
 
-- [cpp/src/newton_solver/ops/voltage_update/cuda_mixed.cu](../../cpp/src/newton_solver/ops/voltage_update/cuda_mixed.cu)
-- [cpp/src/newton_solver/ops/voltage_update/cuda_fp64.cu](../../cpp/src/newton_solver/ops/voltage_update/cuda_fp64.cu)
-- [cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.cpp](../../cpp/src/newton_solver/ops/linear_solve/cuda_cudss32.cpp)
-- [cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.cpp](../../cpp/src/newton_solver/ops/linear_solve/cuda_cudss64.cpp)
+- [cpp/src/newton_solver/ops/voltage_update/cuda_voltage_update.cu](../../cpp/src/newton_solver/ops/voltage_update/cuda_voltage_update.cu)
+- [cpp/src/newton_solver/ops/voltage_update/cpu_voltage_update.cpp](../../cpp/src/newton_solver/ops/voltage_update/cpu_voltage_update.cpp)
+- [cpp/src/newton_solver/ops/linear_solve/cuda_cudss.cpp](../../cpp/src/newton_solver/ops/linear_solve/cuda_cudss.cpp)
 - 관련 주석이 있는 core/ops 문서와 코드
 
 ---
@@ -44,6 +44,7 @@ V_re/V_im cache 재구성
 ### 2. V cache 재구성
 
 update 이후 `Va/Vm`에서 FP64 `V_re/V_im` cache를 재구성한다.
+Jacobian은 이 cache를 읽고 커널 안에서 필요한 타입으로 변환한다.
 
 ### 3. 결과 복원은 FP64 authoritative state에서
 

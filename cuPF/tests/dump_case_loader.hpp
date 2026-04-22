@@ -26,9 +26,9 @@ struct DumpCaseData {
     std::vector<int32_t> pv;
     std::vector<int32_t> pq;
 
-    YbusViewF64 ybus() const
+    YbusView ybus() const
     {
-        return YbusViewF64{
+        return YbusView{
             indptr.data(),
             indices.data(),
             ybus_data.data(),

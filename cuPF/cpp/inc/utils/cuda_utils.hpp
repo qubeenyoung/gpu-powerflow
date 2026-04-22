@@ -51,6 +51,13 @@
   #endif
 #endif
 
+inline void sync_cuda_for_timing()
+{
+#ifdef CUPF_ENABLE_TIMING
+    CUDA_CHECK(cudaDeviceSynchronize());
+#endif
+}
+
 template <typename T>
 class DeviceBuffer {
 public:
