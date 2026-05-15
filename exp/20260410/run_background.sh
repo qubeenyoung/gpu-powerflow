@@ -12,7 +12,7 @@ PID_FILE="$LOG_DIR/${RUN_NAME}.pid"
 
 nohup env PYTHONPATH=/workspace python3 "$SCRIPT" \
   --run-name "$RUN_NAME" \
-  --benchmark-binary /workspace/cuPF/build/bench-cuda-timing/cupf_case_benchmark \
+  --benchmark-binary /workspace/gpu-powerflow/build/bench-cuda-timing/cupf_case_benchmark \
   --warmup 1 \
   --cpu-repeats 10 \
   --gpu-repeats 10 \

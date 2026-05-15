@@ -85,7 +85,7 @@ def write_breakdown(run_root: Path) -> Path:
         "# Timing Breakdown",
         "",
         f"- run: `{run_root.name}`",
-        "- benchmark binary: `/workspace/cuPF/build/bench-cuda-timing/cupf_case_benchmark`",
+        "- benchmark binary: `/workspace/gpu-powerflow/build/bench-cuda-timing/cupf_case_benchmark`",
         "- units: `ms`",
     ]
 

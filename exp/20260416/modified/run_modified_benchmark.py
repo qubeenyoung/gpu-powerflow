@@ -14,7 +14,7 @@ SCRIPT_PATH = Path(__file__).resolve()
 EXP_ROOT = SCRIPT_PATH.parent
 WORKSPACE_ROOT = EXP_ROOT.parents[2]
 CUPF_ROOT = WORKSPACE_ROOT / "cuPF"
-BENCHMARK_SCRIPT = CUPF_ROOT / "benchmarks" / "run_benchmarks.py"
+BENCHMARK_SCRIPT = WORKSPACE_ROOT / "benchmarks" / "run_benchmarks.py"
 
 DEFAULT_DATASET_ROOT = WORKSPACE_ROOT / "datasets" / "texas_univ_cases" / "cuPF_datasets"
 DEFAULT_RESULTS_ROOT = EXP_ROOT / "results"
