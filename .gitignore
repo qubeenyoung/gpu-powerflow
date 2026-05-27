@@ -46,14 +46,17 @@ exp/**/third_party/
 exp/unkown/
 exp/**/*.csv
 exp/**/*.json
+exp/**/*.err
 exp/**/*.log
 exp/**/*.pid
+exp/**/*.out
 exp/**/*.png
 exp/**/*.pdf
 exp/**/*.mtx
 exp/**/*.mat
 exp/**/*.npy
 exp/**/*.npz
+exp/**/*.tar.gz
 exp/**/*.ncu-rep
 exp/**/*.nsys-rep
 exp/**/*.sqlite

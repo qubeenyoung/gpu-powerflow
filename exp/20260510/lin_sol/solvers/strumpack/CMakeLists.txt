@@ -15,14 +15,18 @@ find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP)
 find_package(STRUMPACK CONFIG REQUIRED
     PATHS
+        "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/lin_sol/strumpack/install/lib/cmake/STRUMPACK"
         "${CMAKE_CURRENT_LIST_DIR}/../../third_party/strumpack/install_accel_on/lib/cmake/STRUMPACK"
         "${CMAKE_CURRENT_LIST_DIR}/../../third_party/strumpack/install_nolto/lib/cmake/STRUMPACK"
         "${CMAKE_CURRENT_LIST_DIR}/../../third_party/strumpack/install/lib/cmake/STRUMPACK"
 )
 
 set(STRUMPACK_BENCH_LIBRARY_PATH
-    "${CMAKE_CURRENT_LIST_DIR}/../../third_party/strumpack/install_nolto/lib/libstrumpack.a")
-if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../third_party/strumpack/install_accel_on/lib/libstrumpack.a")
+    "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/lin_sol/strumpack/install/lib/libstrumpack.a")
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/lin_sol/strumpack/install/lib/libstrumpack.a")
+    set(STRUMPACK_BENCH_LIBRARY_PATH
+        "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/lin_sol/strumpack/install/lib/libstrumpack.a")
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../third_party/strumpack/install_accel_on/lib/libstrumpack.a")
     set(STRUMPACK_BENCH_LIBRARY_PATH
         "${CMAKE_CURRENT_LIST_DIR}/../../third_party/strumpack/install_accel_on/lib/libstrumpack.a")
 elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../third_party/strumpack/install/lib/libstrumpack.a")
@@ -53,6 +57,17 @@ target_compile_definitions(strumpack_seq_benchmark PRIVATE
     STRUMPACK_LIBRARY_PATH_STR="${STRUMPACK_BENCH_LIBRARY_PATH}"
 )
 set_target_properties(strumpack_seq_benchmark PROPERTIES
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    LINKER_LANGUAGE CUDA
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+
+add_executable(strumpack_ybus_benchmark strumpack_ybus_benchmark.cpp strumpack_cuda_link.cu)
+target_link_libraries(strumpack_ybus_benchmark PRIVATE STRUMPACK::strumpack CUDA::cudart)
+target_compile_definitions(strumpack_ybus_benchmark PRIVATE
+    STRUMPACK_LIBRARY_PATH_STR="${STRUMPACK_BENCH_LIBRARY_PATH}"
+)
+set_target_properties(strumpack_ybus_benchmark PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     LINKER_LANGUAGE CUDA
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
