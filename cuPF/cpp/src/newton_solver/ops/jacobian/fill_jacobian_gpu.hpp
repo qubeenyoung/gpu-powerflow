@@ -6,6 +6,7 @@
 
 
 struct CudaFp64Buffers;
+struct CudaFp32Buffers;
 struct CudaMixedBuffers;
 
 
@@ -13,7 +14,7 @@ struct CudaMixedBuffers;
 // CudaJacobianOp<T>: edge one-pass CUDA Jacobian fill.
 //
 // T = double : CUDA FP64 프로파일 (d_J_values = double)
-// T = float  : CUDA Mixed 프로파일 (d_J_values = float)
+// T = float  : CUDA FP32/Mixed 프로파일 (d_J_values = float)
 //
 // 각 특수화는 대응하는 Buffers 타입을 직접 받는다.
 // ---------------------------------------------------------------------------
@@ -27,6 +28,7 @@ struct CudaJacobianOp<double> {
 
 template <>
 struct CudaJacobianOp<float> {
+    void run(CudaFp32Buffers& buf, IterationContext& ctx);
     void run(CudaMixedBuffers& buf, IterationContext& ctx);
 };
 

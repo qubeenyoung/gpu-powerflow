@@ -19,6 +19,7 @@ wheel.packages = ["python/cupf"]
 
 [tool.scikit-build.cmake.define]
 WITH_CUDA = {env = "CUPF_WITH_CUDA", default = "OFF"}
+CUPF_WITH_TORCH = {env = "CUPF_WITH_TORCH", default = "OFF"}
 CUPF_CUDSS_REORDERING_ALG = {env = "CUPF_CUDSS_REORDERING_ALG", default = "DEFAULT"}
 CUPF_CUDSS_ENABLE_MT = {env = "CUPF_CUDSS_ENABLE_MT", default = "OFF"}
 CUPF_CUDSS_HOST_NTHREADS = {env = "CUPF_CUDSS_HOST_NTHREADS", default = "AUTO"}

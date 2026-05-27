@@ -13,6 +13,7 @@
 
 #ifdef CUPF_WITH_CUDA
 #include "newton_solver/storage/cuda/cuda_fp64_storage.hpp"
+#include "newton_solver/storage/cuda/cuda_fp32_storage.hpp"
 #include "newton_solver/storage/cuda/cuda_mixed_storage.hpp"
 #include "newton_solver/ops/mismatch/cuda_mismatch.hpp"
 #include "newton_solver/ops/jacobian/fill_jacobian_gpu.hpp"
@@ -27,6 +28,7 @@
 struct CpuFp64Pipeline {
     CpuFp64Buffers    buf;
     CpuLinearSolveKLU linear_solve;
+    AdjointCache      adjoint_cache;
 
     void initialize(const InitializeContext& ctx) {
         buf.prepare(ctx);
@@ -64,6 +66,7 @@ struct CpuFp64Pipeline {
 struct CudaFp64Pipeline {
     CudaFp64Buffers                                   buf;
     CudaLinearSolveCuDSS<double, CudaFp64Buffers>     linear_solve;
+    AdjointCache                                      adjoint_cache;
 
     explicit CudaFp64Pipeline(CuDSSOptions opts = {}) : linear_solve(opts) {}
 
@@ -96,11 +99,48 @@ struct CudaFp64Pipeline {
 
 
 // ---------------------------------------------------------------------------
+// CudaFp32Pipeline
+// ---------------------------------------------------------------------------
+struct CudaFp32Pipeline {
+    CudaFp32Buffers                                   buf;
+    CudaLinearSolveCuDSS<float, CudaFp32Buffers>      linear_solve;
+    AdjointCache                                      adjoint_cache;
+
+    explicit CudaFp32Pipeline(CuDSSOptions opts = {}) : linear_solve(opts) {}
+
+    void initialize(const InitializeContext& ctx) {
+        buf.prepare(ctx);
+        linear_solve.initialize(buf, ctx);
+    }
+
+    void upload(const SolveContext& ctx) {
+        buf.upload(ctx);
+    }
+
+    void download_batch(NRBatchResult& result) const {
+        buf.download_batch(result);
+    }
+
+    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp32Buffers>{}.run(buf, ctx); }
+    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaFp32Buffers>{}.run(buf, ctx); }
+    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaFp32Buffers>{}.run(buf, ctx); }
+    void jacobian(IterationContext& ctx)      { CudaJacobianOp<float>{}.run(buf, ctx); }
+    void prepare_rhs(IterationContext& ctx)   { linear_solve.prepare_rhs(buf, ctx); }
+    void factorize(IterationContext& ctx)     { linear_solve.factorize(buf, ctx); }
+    void solve(IterationContext& ctx)         { linear_solve.solve(buf, ctx); }
+    void voltage_update(IterationContext& ctx){ CudaVoltageUpdateOp<float>{}.run(buf, ctx); }
+
+    static constexpr bool batch_supported = true;
+};
+
+
+// ---------------------------------------------------------------------------
 // CudaMixedPipeline
 // ---------------------------------------------------------------------------
 struct CudaMixedPipeline {
     CudaMixedBuffers                                   buf;
     CudaLinearSolveCuDSS<float, CudaMixedBuffers>      linear_solve;
+    AdjointCache                                       adjoint_cache;
 
     explicit CudaMixedPipeline(CuDSSOptions opts = {}) : linear_solve(opts) {}
 
@@ -141,6 +181,7 @@ struct SolverPipeline {
         CpuFp64Pipeline
 #ifdef CUPF_WITH_CUDA
         , CudaFp64Pipeline
+        , CudaFp32Pipeline
         , CudaMixedPipeline
 #endif
     > v;

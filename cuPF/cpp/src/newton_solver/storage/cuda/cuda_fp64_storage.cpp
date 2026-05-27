@@ -65,6 +65,7 @@ void CudaFp64Buffers::prepare(const InitializeContext& ctx)
 
     d_Ybus_re.resize(nnz_ybus);
     d_Ybus_im.resize(nnz_ybus);
+    upload_complex_components(d_Ybus_re, d_Ybus_im, ctx.ybus.data, nnz_ybus);
     d_Ybus_indptr.assign(ctx.ybus.indptr,  static_cast<std::size_t>(ctx.ybus.rows + 1));
     d_Ybus_indices.assign(ctx.ybus.indices, static_cast<std::size_t>(nnz_ybus));
 

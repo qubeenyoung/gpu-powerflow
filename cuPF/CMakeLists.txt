@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.22)
 # ---------------------------------------------------------------------------
 option(WITH_CUDA             "Build the CUDA backend"           OFF)
 option(BUILD_PYTHON_BINDINGS "Build the pybind11 Python module" OFF)
+option(CUPF_WITH_TORCH      "Build torch::Tensor zero-copy Python extension APIs" OFF)
 option(BUILD_BENCHMARKS      "Build benchmark executables"      OFF)
 option(ENABLE_LOG            "Enable spdlog logging when available" ON)
 option(ENABLE_DUMP           "Enable debug dump utilities"      OFF)
@@ -35,6 +36,41 @@ endif()
 # ---------------------------------------------------------------------------
 find_package(Eigen3 REQUIRED)
 find_package(spdlog QUIET)
+
+if(CUPF_WITH_TORCH)
+  if(NOT BUILD_PYTHON_BINDINGS)
+    message(FATAL_ERROR "CUPF_WITH_TORCH=ON requires BUILD_PYTHON_BINDINGS=ON")
+  endif()
+  if(NOT WITH_CUDA)
+    message(FATAL_ERROR "CUPF_WITH_TORCH=ON currently requires WITH_CUDA=ON")
+  endif()
+  find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c "import torch; print(torch.utils.cmake_prefix_path)"
+    OUTPUT_VARIABLE CUPF_TORCH_CMAKE_PREFIX
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(CUPF_TORCH_CMAKE_PREFIX)
+    list(APPEND CMAKE_PREFIX_PATH "${CUPF_TORCH_CMAKE_PREFIX}")
+  endif()
+  find_package(Torch REQUIRED)
+  find_library(TORCH_PYTHON_LIBRARY
+    NAMES torch_python
+    HINTS "${CUPF_TORCH_CMAKE_PREFIX}/../../lib" "${Python_SITEARCH}/torch/lib"
+          /usr/local/lib/python3.10/dist-packages/torch/lib)
+  if(NOT TORCH_PYTHON_LIBRARY)
+    execute_process(
+      COMMAND "${Python_EXECUTABLE}" -c "import torch, pathlib; print(pathlib.Path(torch.__file__).parent / 'lib')"
+      OUTPUT_VARIABLE CUPF_TORCH_LIB_DIR
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    find_library(TORCH_PYTHON_LIBRARY NAMES torch_python HINTS "${CUPF_TORCH_LIB_DIR}")
+  endif()
+  if(NOT TORCH_PYTHON_LIBRARY)
+    message(FATAL_ERROR "CUPF_WITH_TORCH=ON requires libtorch_python.so")
+  endif()
+  message(STATUS "Torch CMake prefix: ${CUPF_TORCH_CMAKE_PREFIX}")
+endif()
 
 set(CUPF_LOGGING_ENABLED OFF)
 if(ENABLE_LOG AND spdlog_FOUND)
@@ -194,6 +230,7 @@ if(WITH_CUDA)
   set(CUPF_CUDA_SOURCES
     # Storage — CUDA
     cpp/src/newton_solver/storage/cuda/cuda_mixed_storage.cpp
+    cpp/src/newton_solver/storage/cuda/cuda_fp32_storage.cpp
     cpp/src/newton_solver/storage/cuda/cuda_fp64_storage.cpp
 
     # Ops — CUDA Ibus
@@ -274,16 +311,50 @@ endif()
 # ---------------------------------------------------------------------------
 if(BUILD_PYTHON_BINDINGS)
   find_package(pybind11 REQUIRED)
-  pybind11_add_module(_cupf bindings/pybind_cupf.cpp)
+  set(CUPF_PYBIND_SOURCES bindings/pybind_cupf.cpp)
+  if(CUPF_WITH_TORCH)
+    list(APPEND CUPF_PYBIND_SOURCES bindings/torch_cupf_extension.cpp)
+  endif()
+  pybind11_add_module(_cupf MODULE NO_EXTRAS ${CUPF_PYBIND_SOURCES})
   target_link_libraries(_cupf PRIVATE cupf)
   target_include_directories(_cupf PRIVATE cpp/inc)
+  if(CUPF_WITH_TORCH)
+    get_filename_component(CUPF_TORCH_LIBRARY_DIR "${TORCH_PYTHON_LIBRARY}" DIRECTORY)
+    target_link_libraries(_cupf PRIVATE ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARY})
+    target_compile_definitions(_cupf PRIVATE CUPF_WITH_TORCH)
+    target_compile_options(_cupf PRIVATE ${TORCH_CXX_FLAGS})
+    target_include_directories(_cupf PRIVATE ${TORCH_INCLUDE_DIRS})
+  endif()
+  if(WITH_CUDA)
+    get_filename_component(CUPF_CUDSS_LIBRARY_DIR "${CUDSS_LIBRARY}" DIRECTORY)
+    set(CUPF_PYBIND_RPATH "${CUPF_CUDSS_LIBRARY_DIR};${CUDAToolkit_LIBRARY_DIR}")
+    if(CUPF_WITH_TORCH)
+      string(APPEND CUPF_PYBIND_RPATH ";${CUPF_TORCH_LIBRARY_DIR}")
+    endif()
+    set_target_properties(_cupf PROPERTIES
+      BUILD_RPATH "${CUPF_PYBIND_RPATH}"
+      INSTALL_RPATH "${CUPF_PYBIND_RPATH}")
+  endif()
+  install(TARGETS _cupf LIBRARY DESTINATION cupf)
 endif()
 
 # ---------------------------------------------------------------------------
 # Benchmarks
 # ---------------------------------------------------------------------------
 if(BUILD_BENCHMARKS)
-  add_subdirectory(benchmarks)
+  set(CUPF_BENCHMARKS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks" CACHE PATH
+      "Path to cuPF benchmark sources")
+  if(NOT EXISTS "${CUPF_BENCHMARKS_DIR}/CMakeLists.txt")
+    get_filename_component(CUPF_WORKSPACE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+    set(CUPF_BENCHMARKS_DIR "${CUPF_WORKSPACE_ROOT}/benchmarks" CACHE PATH
+        "Path to cuPF benchmark sources" FORCE)
+  endif()
+  if(NOT EXISTS "${CUPF_BENCHMARKS_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "BUILD_BENCHMARKS=ON but benchmark sources were not found. "
+      "Set CUPF_BENCHMARKS_DIR to the benchmarks directory.")
+  endif()
+  add_subdirectory("${CUPF_BENCHMARKS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/benchmarks")
 endif()
 
 # ---------------------------------------------------------------------------

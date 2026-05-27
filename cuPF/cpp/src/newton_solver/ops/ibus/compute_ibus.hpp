@@ -13,9 +13,11 @@ struct CpuIbusOp {
 #ifdef CUPF_WITH_CUDA
 
 struct CudaFp64Buffers;
+struct CudaFp32Buffers;
 struct CudaMixedBuffers;
 
 void launch_compute_ibus(CudaFp64Buffers& buf);
+void launch_compute_ibus(CudaFp32Buffers& buf);
 void launch_compute_ibus(CudaMixedBuffers& buf);
 
 template <typename Buffers>

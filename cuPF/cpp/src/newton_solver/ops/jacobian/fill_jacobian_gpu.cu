@@ -4,11 +4,14 @@
 
 #include "newton_solver/core/solver_contexts.hpp"
 #include "newton_solver/storage/cuda/cuda_fp64_storage.hpp"
+#include "newton_solver/storage/cuda/cuda_fp32_storage.hpp"
 #include "newton_solver/storage/cuda/cuda_mixed_storage.hpp"
 #include "utils/cuda_utils.hpp"
+#include "utils/dump.hpp"
 
 #include <cstdint>
 #include <stdexcept>
+#include <vector>
 
 
 namespace {
@@ -164,7 +167,7 @@ void launch_fill_jacobian_gpu(
     const int32_t total_edges = batch_size * nnz_ybus;
     const int32_t grid = (total_edges + block - 1) / block;
 
-    fill_jacobian_gpu_kernel<JScalar, YbusScalar, VoltageScalar, IbusScalar><<<grid, block>>>(
+    fill_jacobian_gpu_kernel<JScalar, YbusScalar, VoltageScalar, IbusScalar><<<grid, block, 0, cupf_current_cuda_stream()>>>(
         total_edges, nnz_ybus, nnz_J, n_bus,
         ybus_values_batched ? 1 : 0,
         use_cached_ibus ? 1 : 0,
@@ -176,7 +179,38 @@ void launch_fill_jacobian_gpu(
         diag11.data(), diag21.data(), diag12.data(), diag22.data(),
         J_values.data());
     CUDA_CHECK(cudaGetLastError());
-    sync_cuda_for_timing();
+sync_cuda_for_timing();
+}
+
+template <typename ValueType>
+void dump_cuda_jacobian_if_enabled(const char* name,
+                                   int32_t iteration,
+                                   int32_t dim,
+                                   const DeviceBuffer<int32_t>& d_row_ptr,
+                                   const DeviceBuffer<int32_t>& d_col_idx,
+                                   const DeviceBuffer<ValueType>& d_values,
+                                   int32_t nnz)
+{
+    if (!newton_solver::utils::isDumpEnabled()) {
+        return;
+    }
+    if (dim <= 0 || nnz <= 0) {
+        return;
+    }
+
+    std::vector<int32_t> row_ptr(static_cast<std::size_t>(dim + 1));
+    std::vector<int32_t> col_idx(static_cast<std::size_t>(nnz));
+    std::vector<ValueType> values(static_cast<std::size_t>(nnz));
+    d_row_ptr.copyTo(row_ptr.data(), row_ptr.size());
+    d_col_idx.copyTo(col_idx.data(), col_idx.size());
+    d_values.copyTo(values.data(), values.size());
+    newton_solver::utils::dumpCSR(name,
+                                  iteration,
+                                  row_ptr.data(),
+                                  col_idx.data(),
+                                  values.data(),
+                                  dim,
+                                  dim);
 }
 
 }  // namespace
@@ -184,7 +218,6 @@ void launch_fill_jacobian_gpu(
 
 void CudaJacobianOp<double>::run(CudaFp64Buffers& buf, IterationContext& ctx)
 {
-    (void)ctx;
     launch_fill_jacobian_gpu<double, double, double, double>(
         static_cast<int32_t>(buf.d_Y_row.size()),
         static_cast<int32_t>(buf.d_J_values.size()),
@@ -199,12 +232,18 @@ void CudaJacobianOp<double>::run(CudaFp64Buffers& buf, IterationContext& ctx)
         buf.d_mapJ11, buf.d_mapJ21, buf.d_mapJ12, buf.d_mapJ22,
         buf.d_diagJ11, buf.d_diagJ21, buf.d_diagJ12, buf.d_diagJ22,
         buf.d_J_values);
+    dump_cuda_jacobian_if_enabled("jacobian",
+                                  ctx.iter,
+                                  buf.dimF,
+                                  buf.d_J_row_ptr,
+                                  buf.d_J_col_idx,
+                                  buf.d_J_values,
+                                  static_cast<int32_t>(buf.d_J_values.size()));
 }
 
 
 void CudaJacobianOp<float>::run(CudaMixedBuffers& buf, IterationContext& ctx)
 {
-    (void)ctx;
     launch_fill_jacobian_gpu<float, double, double, double>(
         buf.nnz_ybus, buf.nnz_J, buf.n_bus, buf.batch_size,
         buf.ybus_values_batched,
@@ -216,6 +255,36 @@ void CudaJacobianOp<float>::run(CudaMixedBuffers& buf, IterationContext& ctx)
         buf.d_mapJ11, buf.d_mapJ21, buf.d_mapJ12, buf.d_mapJ22,
         buf.d_diagJ11, buf.d_diagJ21, buf.d_diagJ12, buf.d_diagJ22,
         buf.d_J_values);
+    dump_cuda_jacobian_if_enabled("jacobian",
+                                  ctx.iter,
+                                  buf.dimF,
+                                  buf.d_J_row_ptr,
+                                  buf.d_J_col_idx,
+                                  buf.d_J_values,
+                                  buf.nnz_J);
+}
+
+
+void CudaJacobianOp<float>::run(CudaFp32Buffers& buf, IterationContext& ctx)
+{
+    launch_fill_jacobian_gpu<float, float, float, float>(
+        buf.nnz_ybus, buf.nnz_J, buf.n_bus, buf.batch_size,
+        buf.ybus_values_batched,
+        true,
+        buf.d_Ybus_re, buf.d_Ybus_im,
+        buf.d_Y_row, buf.d_Ybus_indices, buf.d_Ybus_indptr,
+        buf.d_V_re, buf.d_V_im, buf.d_Vm,
+        &buf.d_Ibus_re, &buf.d_Ibus_im,
+        buf.d_mapJ11, buf.d_mapJ21, buf.d_mapJ12, buf.d_mapJ22,
+        buf.d_diagJ11, buf.d_diagJ21, buf.d_diagJ12, buf.d_diagJ22,
+        buf.d_J_values);
+    dump_cuda_jacobian_if_enabled("jacobian",
+                                  ctx.iter,
+                                  buf.dimF,
+                                  buf.d_J_row_ptr,
+                                  buf.d_J_col_idx,
+                                  buf.d_J_values,
+                                  buf.nnz_J);
 }
 
 #endif  // CUPF_WITH_CUDA

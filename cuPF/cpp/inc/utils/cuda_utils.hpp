@@ -58,6 +58,37 @@ inline void sync_cuda_for_timing()
 #endif
 }
 
+inline cudaStream_t& cupf_active_cuda_stream_ref()
+{
+    static thread_local cudaStream_t stream = nullptr;
+    return stream;
+}
+
+inline cudaStream_t cupf_current_cuda_stream()
+{
+    return cupf_active_cuda_stream_ref();
+}
+
+class ScopedCudaStream {
+public:
+    explicit ScopedCudaStream(cudaStream_t stream)
+        : previous_(cupf_active_cuda_stream_ref())
+    {
+        cupf_active_cuda_stream_ref() = stream;
+    }
+
+    ~ScopedCudaStream()
+    {
+        cupf_active_cuda_stream_ref() = previous_;
+    }
+
+    ScopedCudaStream(const ScopedCudaStream&) = delete;
+    ScopedCudaStream& operator=(const ScopedCudaStream&) = delete;
+
+private:
+    cudaStream_t previous_ = nullptr;
+};
+
 template <typename T>
 class DeviceBuffer {
 public:
@@ -115,7 +146,27 @@ public:
         if (count == 0 || src == nullptr) {
             return;
         }
-        CUDA_CHECK(cudaMemcpy(ptr_, src, count * sizeof(T), kind));
+        cudaStream_t stream = cupf_current_cuda_stream();
+        if (stream != nullptr) {
+            CUDA_CHECK(cudaMemcpyAsync(ptr_, src, count * sizeof(T), kind, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+        } else {
+            CUDA_CHECK(cudaMemcpy(ptr_, src, count * sizeof(T), kind));
+        }
+    }
+
+    void assignAsync(const T* src,
+                     std::size_t count,
+                     cudaMemcpyKind kind = cudaMemcpyHostToDevice,
+                     cudaStream_t stream = cupf_current_cuda_stream())
+    {
+        if (count != count_ || ptr_ == nullptr) {
+            resize(count);
+        }
+        if (count == 0 || src == nullptr) {
+            return;
+        }
+        CUDA_CHECK(cudaMemcpyAsync(ptr_, src, count * sizeof(T), kind, stream));
     }
 
     void copyTo(T* dst, std::size_t count, cudaMemcpyKind kind = cudaMemcpyDeviceToHost) const
@@ -126,13 +177,33 @@ public:
         if (count > count_) {
             throw std::runtime_error("DeviceBuffer::copyTo count exceeds allocation");
         }
-        CUDA_CHECK(cudaMemcpy(dst, ptr_, count * sizeof(T), kind));
+        cudaStream_t stream = cupf_current_cuda_stream();
+        if (stream != nullptr) {
+            CUDA_CHECK(cudaMemcpyAsync(dst, ptr_, count * sizeof(T), kind, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+        } else {
+            CUDA_CHECK(cudaMemcpy(dst, ptr_, count * sizeof(T), kind));
+        }
+    }
+
+    void copyToAsync(T* dst,
+                     std::size_t count,
+                     cudaMemcpyKind kind = cudaMemcpyDeviceToHost,
+                     cudaStream_t stream = cupf_current_cuda_stream()) const
+    {
+        if (dst == nullptr || count == 0) {
+            return;
+        }
+        if (count > count_) {
+            throw std::runtime_error("DeviceBuffer::copyToAsync count exceeds allocation");
+        }
+        CUDA_CHECK(cudaMemcpyAsync(dst, ptr_, count * sizeof(T), kind, stream));
     }
 
     void memsetZero()
     {
         if (ptr_ != nullptr && count_ > 0) {
-            CUDA_CHECK(cudaMemset(ptr_, 0, count_ * sizeof(T)));
+            CUDA_CHECK(cudaMemsetAsync(ptr_, 0, count_ * sizeof(T), cupf_current_cuda_stream()));
         }
     }
 

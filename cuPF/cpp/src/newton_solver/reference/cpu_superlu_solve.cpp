@@ -6,7 +6,7 @@
 //
 // SuperLU API 호출 순서:
 //   1. dCreate_CompCol_Matrix() : J CSC → SuperMatrix A 등록 (값 복사 없음, 포인터 공유)
-//   2. rhs 준비: rhs[i] = -F[i]  (J·dx = -F)
+//   2. rhs 준비: rhs[i] = F[i]  (J·dx = F, voltage_update에서 x -= dx)
 //   3. dCreate_Dense_Matrix()   : rhs → SuperMatrix B 등록
 //   4. dgssv()                  : DOFACT 모드 — symbolic + numeric + solve 한 번에 수행
 //      → perm_c (열 치환), perm_r (행 치환), L, U 는 내부 생성
@@ -56,10 +56,10 @@ void CpuLinearSolveSuperLU::solve(CpuFp64Buffers& storage_, IterationContext& ct
         const_cast<int*>(storage_.J.outerIndexPtr()),
         SLU_NC, SLU_D, SLU_GE);
 
-    // RHS = -F
+    // RHS = F. CpuVoltageUpdateOp applies x -= dx, matching the core CPU path.
     std::vector<double> rhs(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
-        rhs[static_cast<std::size_t>(i)] = -storage_.F[static_cast<std::size_t>(i)];
+        rhs[static_cast<std::size_t>(i)] = storage_.F[static_cast<std::size_t>(i)];
     }
 
     // dense RHS → SuperMatrix B 등록

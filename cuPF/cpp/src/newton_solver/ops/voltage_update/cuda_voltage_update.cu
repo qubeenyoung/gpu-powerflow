@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
 // cuda_voltage_update.cu
 //
-// CUDA voltage update. T selects the linear-solve correction dtype while the
-// voltage state/cache remains double.
+// CUDA voltage update. The buffer type selects state dtype; FP32 keeps voltage
+// state/cache in float, Mixed keeps state/cache in double with float dx.
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
@@ -11,6 +11,7 @@
 
 #include "newton_solver/core/solver_contexts.hpp"
 #include "newton_solver/storage/cuda/cuda_fp64_storage.hpp"
+#include "newton_solver/storage/cuda/cuda_fp32_storage.hpp"
 #include "newton_solver/storage/cuda/cuda_mixed_storage.hpp"
 #include "utils/cuda_utils.hpp"
 #include "voltage_update_kernels.hpp"
@@ -26,7 +27,7 @@ void CudaVoltageUpdateOp<double>::run(CudaFp64Buffers& buf, IterationContext& ct
     }
 
     const int32_t n_pv = buf.n_pvpq - buf.n_pq;
-    launch_voltage_update_state<double>(
+    launch_voltage_update_state<double, double>(
         1,
         buf.n_bus,
         buf.dimF,
@@ -38,8 +39,40 @@ void CudaVoltageUpdateOp<double>::run(CudaFp64Buffers& buf, IterationContext& ct
         buf.d_pv.data(),
         buf.d_pq.data());
 
-    launch_reconstruct_voltage(
+    launch_reconstruct_voltage<double>(
         buf.n_bus,
+        buf.d_Va.data(),
+        buf.d_Vm.data(),
+        buf.d_V_re.data(),
+        buf.d_V_im.data());
+
+    sync_cuda_for_timing();
+}
+
+
+void CudaVoltageUpdateOp<float>::run(CudaFp32Buffers& buf, IterationContext& ctx)
+{
+    (void)ctx;
+    if (buf.n_bus <= 0 || buf.dimF <= 0 || buf.batch_size <= 0) {
+        throw std::runtime_error("CudaVoltageUpdateOp<float>::run: buffers are not prepared");
+    }
+
+    const int32_t n_pv = buf.n_pvpq - buf.n_pq;
+    const int32_t total_buses = buf.batch_size * buf.n_bus;
+    launch_voltage_update_state<float, float>(
+        buf.batch_size,
+        buf.n_bus,
+        buf.dimF,
+        n_pv,
+        buf.n_pq,
+        buf.d_Va.data(),
+        buf.d_Vm.data(),
+        buf.d_dx.data(),
+        buf.d_pv.data(),
+        buf.d_pq.data());
+
+    launch_reconstruct_voltage<float>(
+        total_buses,
         buf.d_Va.data(),
         buf.d_Vm.data(),
         buf.d_V_re.data(),
@@ -58,7 +91,7 @@ void CudaVoltageUpdateOp<float>::run(CudaMixedBuffers& buf, IterationContext& ct
 
     const int32_t n_pv = buf.n_pvpq - buf.n_pq;
     const int32_t total_buses = buf.batch_size * buf.n_bus;
-    launch_voltage_update_state<float>(
+    launch_voltage_update_state<double, float>(
         buf.batch_size,
         buf.n_bus,
         buf.dimF,
@@ -70,7 +103,7 @@ void CudaVoltageUpdateOp<float>::run(CudaMixedBuffers& buf, IterationContext& ct
         buf.d_pv.data(),
         buf.d_pq.data());
 
-    launch_reconstruct_voltage(
+    launch_reconstruct_voltage<double>(
         total_buses,
         buf.d_Va.data(),
         buf.d_Vm.data(),

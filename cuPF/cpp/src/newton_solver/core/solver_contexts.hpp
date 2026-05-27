@@ -4,6 +4,7 @@
 #include "newton_solver/ops/jacobian/jacobian_analysis.hpp"
 
 #include <cstdint>
+#include <string>
 
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,28 @@ struct SolveContext {
 
     bool    ybus_values_batched = false;
     int64_t ybus_value_stride   = 0;
+};
+
+
+struct AdjointCache {
+    bool has_adjoint_cache = false;
+    bool adjoint_cache_matches_final_state = false;
+    bool factorization_supports_transpose_solve = false;
+    bool refactorized_for_adjoint_cache = false;
+    bool reused_forward_factorization = false;
+    bool used_explicit_transpose = false;
+    bool includes_host_device_transfer = false;
+    bool jt_symbolic_analyzed_at_initialize = false;
+    bool jt_values_transposed_on_device = false;
+    bool jt_factorized_during_forward_cache = false;
+    bool host_roundtrip_for_jt_transpose = false;
+    int64_t final_state_generation = 0;
+    double final_mismatch_norm = 0.0;
+    int32_t batch_size = 0;
+    int32_t dimF = 0;
+    std::string backend_name;
+    std::string transpose_solve_backend_name;
+    double factorization_time_ms = 0.0;
 };
 
 

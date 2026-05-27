@@ -159,14 +159,12 @@
 - 실제 구현:
   `B>1` benchmark 실행은 CUDA Mixed 기본 경로에서만 허용했다.
 - 차이:
-  modified schedule 및 hybrid ablation benchmark는 수동 stage 조합이라 batch-aware execution plan을
-  우회한다. 이 경로들은 이번 단계에서 명시적으로 `B=1`만 받도록 막았다.
+  pipeline refactor 이후 수동 modified/hybrid ablation benchmark 경로는 제거했다.
 
 - 계획:
   `Va/Vm` authoritative state 설명과 구현을 통일한다.
 - 실제 구현:
-  hybrid ablation의 CUDA→CPU 전압 복사를 FP32 `V_re/V_im` cache가 아니라 FP64 `Va/Vm` 기반
-  재구성으로 바꿨다.
+  CUDA Mixed 기본 경로는 FP64 `Va/Vm`을 authoritative state로 유지한다.
 - 차이:
   없음. 이는 원래 전압 상태 계획과 맞춘 cleanup이다.
 

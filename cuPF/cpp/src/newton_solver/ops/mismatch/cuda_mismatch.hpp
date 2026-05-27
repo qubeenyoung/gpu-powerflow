@@ -6,6 +6,7 @@
 
 
 struct CudaFp64Buffers;
+struct CudaFp32Buffers;
 struct CudaMixedBuffers;
 
 

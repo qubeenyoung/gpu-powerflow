@@ -1,6 +1,6 @@
 #ifdef CUPF_WITH_CUDA
 
-#include "cuda_mixed_storage.hpp"
+#include "cuda_fp32_storage.hpp"
 
 #include <cmath>
 #include <complex>
@@ -30,9 +30,8 @@ std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
     return rows;
 }
 
-template <typename DeviceScalar>
-void upload_complex_components(DeviceBuffer<DeviceScalar>& dst_re,
-                               DeviceBuffer<DeviceScalar>& dst_im,
+void upload_complex_components(DeviceBuffer<float>& dst_re,
+                               DeviceBuffer<float>& dst_im,
                                const std::complex<double>* src,
                                int32_t logical_count,
                                int32_t batch_size,
@@ -40,25 +39,24 @@ void upload_complex_components(DeviceBuffer<DeviceScalar>& dst_re,
 {
     const std::size_t total =
         static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(logical_count);
-    std::vector<DeviceScalar> h_re(total);
-    std::vector<DeviceScalar> h_im(total);
+    std::vector<float> h_re(total);
+    std::vector<float> h_im(total);
 
     for (int32_t b = 0; b < batch_size; ++b) {
         const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(logical_count);
         const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(stride);
         for (int32_t i = 0; i < logical_count; ++i) {
             const auto& val = src[src_base + static_cast<std::size_t>(i)];
-            h_re[dst_base + static_cast<std::size_t>(i)] = static_cast<DeviceScalar>(val.real());
-            h_im[dst_base + static_cast<std::size_t>(i)] = static_cast<DeviceScalar>(val.imag());
+            h_re[dst_base + static_cast<std::size_t>(i)] = static_cast<float>(val.real());
+            h_im[dst_base + static_cast<std::size_t>(i)] = static_cast<float>(val.imag());
         }
     }
     dst_re.assign(h_re.data(), h_re.size());
     dst_im.assign(h_im.data(), h_im.size());
 }
 
-template <typename DeviceScalar>
-void upload_ybus_components(DeviceBuffer<DeviceScalar>& dst_re,
-                            DeviceBuffer<DeviceScalar>& dst_im,
+void upload_ybus_components(DeviceBuffer<float>& dst_re,
+                            DeviceBuffer<float>& dst_im,
                             const std::complex<double>* src,
                             int32_t nnz_ybus,
                             int32_t batch_size,
@@ -68,8 +66,8 @@ void upload_ybus_components(DeviceBuffer<DeviceScalar>& dst_re,
     const int32_t stored = values_batched ? batch_size : 1;
     const std::size_t total =
         static_cast<std::size_t>(stored) * static_cast<std::size_t>(nnz_ybus);
-    std::vector<DeviceScalar> h_re(total);
-    std::vector<DeviceScalar> h_im(total);
+    std::vector<float> h_re(total);
+    std::vector<float> h_im(total);
 
     for (int32_t b = 0; b < stored; ++b) {
         const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(nnz_ybus);
@@ -77,8 +75,8 @@ void upload_ybus_components(DeviceBuffer<DeviceScalar>& dst_re,
             values_batched ? static_cast<std::size_t>(b) * static_cast<std::size_t>(stride) : 0;
         for (int32_t k = 0; k < nnz_ybus; ++k) {
             const auto& val = src[src_base + static_cast<std::size_t>(k)];
-            h_re[dst_base + static_cast<std::size_t>(k)] = static_cast<DeviceScalar>(val.real());
-            h_im[dst_base + static_cast<std::size_t>(k)] = static_cast<DeviceScalar>(val.imag());
+            h_re[dst_base + static_cast<std::size_t>(k)] = static_cast<float>(val.real());
+            h_im[dst_base + static_cast<std::size_t>(k)] = static_cast<float>(val.imag());
         }
     }
     dst_re.assign(h_re.data(), h_re.size());
@@ -88,7 +86,7 @@ void upload_ybus_components(DeviceBuffer<DeviceScalar>& dst_re,
 }  // namespace
 
 
-void CudaMixedBuffers::prepare(const InitializeContext& ctx)
+void CudaFp32Buffers::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr,  "InitializeContext.ybus.indptr",  ctx.ybus.rows + 1);
     require_pointer(ctx.ybus.indices, "InitializeContext.ybus.indices", ctx.ybus.nnz);
@@ -159,15 +157,15 @@ void CudaMixedBuffers::prepare(const InitializeContext& ctx)
 }
 
 
-void CudaMixedBuffers::upload(const SolveContext& ctx)
+void CudaFp32Buffers::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
-        throw std::invalid_argument("CudaMixedBuffers::upload: solve context is incomplete");
+        throw std::invalid_argument("CudaFp32Buffers::upload: solve context is incomplete");
     }
 
     const YbusView& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus || ybus.nnz != nnz_ybus) {
-        throw std::runtime_error("CudaMixedBuffers::upload: Ybus dimensions do not match initialize()");
+        throw std::runtime_error("CudaFp32Buffers::upload: Ybus dimensions do not match initialize()");
     }
 
     require_pointer(ybus.data, "SolveContext.ybus->data", ybus.nnz);
@@ -175,10 +173,10 @@ void CudaMixedBuffers::upload(const SolveContext& ctx)
     require_pointer(ctx.V0,    "SolveContext.V0",         n_bus);
 
     if (ctx.batch_size <= 0) {
-        throw std::invalid_argument("CudaMixedBuffers::upload: batch_size must be positive");
+        throw std::invalid_argument("CudaFp32Buffers::upload: batch_size must be positive");
     }
     if (ctx.sbus_stride < n_bus || ctx.V0_stride < n_bus) {
-        throw std::invalid_argument("CudaMixedBuffers::upload: batch strides must be at least n_bus");
+        throw std::invalid_argument("CudaFp32Buffers::upload: batch strides must be at least n_bus");
     }
 
     batch_size = ctx.batch_size;
@@ -209,20 +207,20 @@ void CudaMixedBuffers::upload(const SolveContext& ctx)
                            ybus.nnz, batch_size, ctx.ybus_value_stride, ybus_values_batched);
     upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
 
-    std::vector<double> h_V_re(bus_count);
-    std::vector<double> h_V_im(bus_count);
-    std::vector<double> h_Va(bus_count);
-    std::vector<double> h_Vm(bus_count);
+    std::vector<float> h_V_re(bus_count);
+    std::vector<float> h_V_im(bus_count);
+    std::vector<float> h_Va(bus_count);
+    std::vector<float> h_Vm(bus_count);
     for (int32_t b = 0; b < batch_size; ++b) {
         const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
         const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(ctx.V0_stride);
         for (int32_t bus = 0; bus < n_bus; ++bus) {
             const auto& v0  = ctx.V0[src_base + static_cast<std::size_t>(bus)];
             const std::size_t dst = dst_base + static_cast<std::size_t>(bus);
-            h_V_re[dst] = v0.real();
-            h_V_im[dst] = v0.imag();
-            h_Va[dst]   = std::arg(v0);
-            h_Vm[dst]   = std::abs(v0);
+            h_V_re[dst] = static_cast<float>(v0.real());
+            h_V_im[dst] = static_cast<float>(v0.imag());
+            h_Va[dst]   = static_cast<float>(std::arg(v0));
+            h_Vm[dst]   = static_cast<float>(std::abs(v0));
         }
     }
     d_V_re.assign(h_V_re.data(), h_V_re.size());
@@ -239,36 +237,35 @@ void CudaMixedBuffers::upload(const SolveContext& ctx)
 }
 
 
-void CudaMixedBuffers::download(NRResult& result) const
+void CudaFp32Buffers::download(NRResult& result) const
 {
     if (batch_size != 1) {
-        throw std::runtime_error("CudaMixedBuffers::download: use download_batch for batch_size > 1");
+        throw std::runtime_error("CudaFp32Buffers::download: use download_batch for batch_size > 1");
     }
 
-    std::vector<double> h_Va(static_cast<std::size_t>(n_bus));
-    std::vector<double> h_Vm(static_cast<std::size_t>(n_bus));
+    std::vector<float> h_re(static_cast<std::size_t>(n_bus));
+    std::vector<float> h_im(static_cast<std::size_t>(n_bus));
 
-    d_Va.copyTo(h_Va.data(), h_Va.size());
-    d_Vm.copyTo(h_Vm.data(), h_Vm.size());
+    d_V_re.copyTo(h_re.data(), h_re.size());
+    d_V_im.copyTo(h_im.data(), h_im.size());
 
     result.V.resize(static_cast<std::size_t>(n_bus));
     for (int32_t bus = 0; bus < n_bus; ++bus) {
-        const double va = h_Va[static_cast<std::size_t>(bus)];
-        const double vm = h_Vm[static_cast<std::size_t>(bus)];
         result.V[static_cast<std::size_t>(bus)] = std::complex<double>(
-            vm * std::cos(va), vm * std::sin(va));
+            static_cast<double>(h_re[static_cast<std::size_t>(bus)]),
+            static_cast<double>(h_im[static_cast<std::size_t>(bus)]));
     }
 }
 
 
-void CudaMixedBuffers::download_batch(NRBatchResult& result) const
+void CudaFp32Buffers::download_batch(NRBatchResult& result) const
 {
     const std::size_t total = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
-    std::vector<double> h_Va(total);
-    std::vector<double> h_Vm(total);
+    std::vector<float> h_re(total);
+    std::vector<float> h_im(total);
 
-    d_Va.copyTo(h_Va.data(), h_Va.size());
-    d_Vm.copyTo(h_Vm.data(), h_Vm.size());
+    d_V_re.copyTo(h_re.data(), h_re.size());
+    d_V_im.copyTo(h_im.data(), h_im.size());
 
     result.n_bus      = n_bus;
     result.batch_size = batch_size;
@@ -279,14 +276,19 @@ void CudaMixedBuffers::download_batch(NRBatchResult& result) const
         for (int32_t bus = 0; bus < n_bus; ++bus) {
             const std::size_t idx = base + static_cast<std::size_t>(bus);
             result.V[idx] = std::complex<double>(
-                h_Vm[idx] * std::cos(h_Va[idx]),
-                h_Vm[idx] * std::sin(h_Va[idx]));
+                static_cast<double>(h_re[idx]),
+                static_cast<double>(h_im[idx]));
         }
     }
 
     if (!d_normF.empty()) {
+        std::vector<float> h_norm(static_cast<std::size_t>(batch_size));
+        d_normF.copyTo(h_norm.data(), h_norm.size());
         result.final_mismatch.resize(static_cast<std::size_t>(batch_size));
-        d_normF.copyTo(result.final_mismatch.data(), result.final_mismatch.size());
+        for (int32_t b = 0; b < batch_size; ++b) {
+            result.final_mismatch[static_cast<std::size_t>(b)] =
+                static_cast<double>(h_norm[static_cast<std::size_t>(b)]);
+        }
     }
 }
 

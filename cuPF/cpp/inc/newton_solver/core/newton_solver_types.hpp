@@ -2,6 +2,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 
@@ -37,6 +38,19 @@ struct NRConfig {
 };
 
 
+enum class AdjointCacheMode {
+    None,
+    FinalStateFactorization,
+    ReuseLastNewtonFactorizationIfExact,
+};
+
+struct SolveOptions {
+    bool prepare_adjoint_cache = false;
+    AdjointCacheMode adjoint_cache_mode = AdjointCacheMode::FinalStateFactorization;
+    bool allow_explicit_transpose_fallback = false;
+};
+
+
 // ---------------------------------------------------------------------------
 // BackendKind: 연산 백엔드 선택.
 // ---------------------------------------------------------------------------
@@ -50,6 +64,7 @@ enum class BackendKind {
 // ComputePolicy: 내부 계산 정밀도 정책.
 //
 //   FP64  — 내부 전 단계 FP64 (CPU 또는 CUDA).
+//   FP32  — GPU 내부 numeric buffers/operators are FP32 (CUDA 전용).
 //   Mixed — public I/O는 FP64, 내부 Jacobian/solve는 FP32 (CUDA 전용).
 //           고정 프로파일이며, stage별 자유 조합이 아니다.
 //
@@ -62,6 +77,7 @@ enum class BackendKind {
 // ---------------------------------------------------------------------------
 enum class ComputePolicy {
     FP64,
+    FP32,
     Mixed,
 };
 
@@ -130,4 +146,71 @@ struct NRBatchResult {
     std::vector<int32_t> iterations;
     std::vector<double>  final_mismatch;
     std::vector<uint8_t> converged;
+};
+
+
+// ---------------------------------------------------------------------------
+// AdjointOptions / AdjointResult: implicit PF backward API.
+//
+// The residual convention in cuPF is:
+//
+//   F(x, Sbus) = S_calc(x) - Sbus
+//
+// with x = [Va[pv], Va[pq], Vm[pq]] and
+// F = [Pmis[pv], Pmis[pq], Qmis[pq]].
+//
+// A demand/load increase decreases net injection Sbus. Therefore, after
+// solving J^T lambda = dL/dx, load gradients are -lambda projected onto the
+// corresponding P/Q residual rows.
+// ---------------------------------------------------------------------------
+struct AdjointOptions {
+    bool reuse_forward_factorization = false;
+    bool allow_refactorize = true;
+    bool require_cached_factorization = false;
+    bool allow_refactorize_for_backward = true;
+    bool allow_inexact_last_newton_factorization = false;
+    bool use_transpose_solve = true;
+    bool allow_explicit_transpose_fallback = false;
+    bool compute_load_gradients = true;
+    bool check_residual = true;
+};
+
+struct AdjointResult {
+    std::vector<double> lambda;
+    std::vector<double> grad_load_p;
+    std::vector<double> grad_load_q;
+
+    int32_t n_bus = 0;
+    int32_t batch_size = 0;
+    int32_t dimF = 0;
+
+    bool success = false;
+    bool used_adjoint_cache = false;
+    bool adjoint_cache_matches_final_state = false;
+    bool reused_forward_factorization = false;
+    bool reused_final_state_factorization = false;
+    bool refactorized_for_backward = false;
+    bool used_explicit_transpose = false;
+    bool used_python_scipy = false;
+    bool includes_host_device_transfer = false;
+    bool zero_copy = false;
+    bool torch_extension_zero_copy = false;
+    bool raw_pointer_api_used = false;
+    bool current_stream_integrated = false;
+    bool jt_symbolic_analyzed_at_initialize = false;
+    bool jt_values_transposed_on_device = false;
+    bool jt_factorized_during_forward_cache = false;
+    bool jt_refactorized_during_backward = false;
+    bool host_roundtrip_for_jt_transpose = false;
+
+    double jt_residual_norm = 0.0;
+    double solve_time_ms = 0.0;
+    double transpose_solve_time_ms = 0.0;
+    double factorization_time_ms = 0.0;
+    double total_time_ms = 0.0;
+
+    std::string backend;
+    std::string transpose_solve_backend;
+    std::string sign_convention =
+        "F=S_calc-S_spec; load increase decreases Sbus; grad_load=-lambda";
 };

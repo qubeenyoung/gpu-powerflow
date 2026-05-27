@@ -85,12 +85,10 @@
 
 ## 2026-04-21 수행 기록
 
-- `cupf_case_benchmark`에 `--batch-size`를 추가했다. `B>1`은 CUDA Mixed 기본 경로에서만 허용하고,
-  modified/hybrid ablation 경로는 명시적으로 `B=1`만 받는다.
+- `cupf_case_benchmark`에 `--batch-size`를 추가했다. `B>1`은 CUDA Mixed 기본 경로에서만 허용한다.
 - CUDA Mixed batch smoke test를 추가했다. dump dataset이 있으면 `B=2` 동일 입력을 `solve_batch()`로 실행해
   batch별 convergence, final mismatch, batch 간 전압 일치를 확인한다.
-- 수동 CUDA benchmark path의 `SolveContext`에 batch metadata와 stride를 명시했다.
-- hybrid ablation에서 CUDA 전압을 CPU로 복사할 때 FP32 `V_re/V_im` cache가 아니라 FP64 `Va/Vm`에서 재구성하도록 바꿨다.
+- 수동 CUDA benchmark path는 pipeline refactor 이후 제거했다.
 - cuDSS FP32 uniform batch dense RHS/solution descriptor의 column count를 `dimF`가 아니라 `1`로 분리했다.
 - v1 브랜치의 cuDSS uniform batch 구현을 참고해 `cudssMatrixCreateBatchCsr` 방식에서
   `CUDSS_CONFIG_UBATCH_SIZE + 단일 CSR/Dn descriptor + flat batch-major buffer` 방식으로 교체했다.
