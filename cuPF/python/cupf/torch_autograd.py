@@ -7,6 +7,24 @@ import torch
 from . import AdjointOptions, NRConfig, SolveOptions
 
 
+_SOLVER_GENERATIONS: dict[int, int] = {}
+
+
+def _prepare_backward_solve_options(solve_options: Any | None) -> Any:
+    if solve_options is None:
+        solve_options = SolveOptions()
+    solve_options.prepare_adjoint_cache = True
+    solve_options.allow_explicit_transpose_fallback = True
+    return solve_options
+
+
+def _next_solver_generation(solver: Any) -> tuple[int, int]:
+    solver_id = id(solver)
+    generation = _SOLVER_GENERATIONS.get(solver_id, 0) + 1
+    _SOLVER_GENERATIONS[solver_id] = generation
+    return solver_id, generation
+
+
 class CuPFFunction(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -23,13 +41,11 @@ class CuPFFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if config is None:
             config = NRConfig()
-        if solve_options is None:
-            solve_options = SolveOptions()
-            solve_options.prepare_adjoint_cache = True
-            solve_options.allow_explicit_transpose_fallback = True
+        solve_options = _prepare_backward_solve_options(solve_options)
 
         va = torch.empty_like(load_p)
         vm = torch.empty_like(load_q)
+        solver_id, solver_generation = _next_solver_generation(solver)
         solver.solve_with_adjoint_cache_torch(
             sbus_base_re,
             sbus_base_im,
@@ -43,10 +59,18 @@ class CuPFFunction(torch.autograd.Function):
             solve_options,
         )
         ctx.solver = solver
+        ctx.solver_id = solver_id
+        ctx.solver_generation = solver_generation
         return va, vm
 
     @staticmethod
     def backward(ctx: Any, grad_va: torch.Tensor, grad_vm: torch.Tensor) -> tuple[Any, ...]:
+        if _SOLVER_GENERATIONS.get(ctx.solver_id) != ctx.solver_generation:
+            raise RuntimeError(
+                "cuPF autograd detected that the same NewtonSolver was reused "
+                "before this graph's backward pass. Use one solver per active "
+                "autograd graph or run backward before issuing another forward."
+            )
         grad_load_p = torch.empty_like(grad_va)
         grad_load_q = torch.empty_like(grad_vm)
         opts = AdjointOptions()

@@ -190,7 +190,7 @@ PYBIND11_MODULE(_cupf, m)
         .def_readwrite("backend", &NewtonOptions::backend,
             "연산 백엔드 (BackendKind.CPU 또는 BackendKind.CUDA)")
         .def_readwrite("compute", &NewtonOptions::compute,
-            "내부 계산 정밀도 정책 (ComputePolicy.FP64 또는 ComputePolicy.Mixed)")
+            "내부 계산 정밀도 정책 (ComputePolicy.FP64, ComputePolicy.FP32 또는 ComputePolicy.Mixed)")
         .def_readwrite("cudss", &NewtonOptions::cudss,
             "CUDA direct solver 런타임 설정");
 
@@ -493,69 +493,6 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("options") = AdjointOptions{},
              "마지막 forward state에서 native adjoint solve J^T lambda = dL/dx를 실행한다. "
              "grad_va/grad_vm은 full-bus layout이며 1D 또는 batch-major 2D 배열이다.")
-        .def("solve_adjoint_cuda_raw",
-             [](NewtonSolver& self,
-                std::uintptr_t grad_va_device_ptr,
-                std::uintptr_t grad_vm_device_ptr,
-                std::uintptr_t grad_load_p_device_ptr,
-                std::uintptr_t grad_load_q_device_ptr,
-                int32_t batch_size,
-                int32_t n_bus,
-                const std::string& dtype,
-                const AdjointOptions& options) {
-                 AdjointResult result;
-                 self.solve_adjoint_cuda_raw(grad_va_device_ptr,
-                                             grad_vm_device_ptr,
-                                             grad_load_p_device_ptr,
-                                             grad_load_q_device_ptr,
-                                             batch_size,
-                                             n_bus,
-                                             dtype.c_str(),
-                                             options,
-                                             result);
-                 return result;
-             },
-             py::arg("grad_va_device_ptr"),
-             py::arg("grad_vm_device_ptr"),
-             py::arg("grad_load_p_device_ptr"),
-             py::arg("grad_load_q_device_ptr"),
-             py::arg("batch_size"),
-             py::arg("n_bus"),
-             py::arg("dtype"),
-             py::arg("options") = AdjointOptions{},
-             "Preallocated CUDA tensor data_ptr() values를 받는 raw zero-copy adjoint solve. "
-             "debug/compatibility-only alias이며 solve_adjoint_cuda_raw_unsafe를 사용하라.")
-        .def("solve_adjoint_cuda_raw_unsafe",
-             [](NewtonSolver& self,
-                std::uintptr_t grad_va_device_ptr,
-                std::uintptr_t grad_vm_device_ptr,
-                std::uintptr_t grad_load_p_device_ptr,
-                std::uintptr_t grad_load_q_device_ptr,
-                int32_t batch_size,
-                int32_t n_bus,
-                const std::string& dtype,
-                const AdjointOptions& options) {
-                 AdjointResult result;
-                 self.solve_adjoint_cuda_raw_unsafe(grad_va_device_ptr,
-                                                    grad_vm_device_ptr,
-                                                    grad_load_p_device_ptr,
-                                                    grad_load_q_device_ptr,
-                                                    batch_size,
-                                                    n_bus,
-                                                    dtype.c_str(),
-                                                    options,
-                                                    result);
-                 return result;
-             },
-             py::arg("grad_va_device_ptr"),
-             py::arg("grad_vm_device_ptr"),
-             py::arg("grad_load_p_device_ptr"),
-             py::arg("grad_load_q_device_ptr"),
-             py::arg("batch_size"),
-             py::arg("n_bus"),
-             py::arg("dtype"),
-             py::arg("options") = AdjointOptions{},
-             "Unsafe debug-only raw CUDA pointer adjoint API. 논문용 benchmark path에서는 사용하지 않는다.")
 #ifdef CUPF_WITH_TORCH
         .def("solve_with_adjoint_cache_torch",
              &solve_with_adjoint_cache_torch_binding,

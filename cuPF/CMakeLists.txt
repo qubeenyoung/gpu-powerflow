@@ -69,6 +69,16 @@ if(CUPF_WITH_TORCH)
   if(NOT TORCH_PYTHON_LIBRARY)
     message(FATAL_ERROR "CUPF_WITH_TORCH=ON requires libtorch_python.so")
   endif()
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c "import pathlib, sys; out=[]; [out.append(str(p)) for b in map(pathlib.Path, sys.path) for p in sorted((b / 'nvidia').glob('*/lib')) if p.is_dir() and str(p) not in out]; print(';'.join(out))"
+    OUTPUT_VARIABLE CUPF_PYTHON_NVIDIA_LIBRARY_DIRS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c "import pathlib, sys; libs=[]; [libs.extend(sorted((b / 'nvidia' / 'cublas' / 'lib').glob('libcublasLt.so*'))) for b in map(pathlib.Path, sys.path)]; print(libs[0] if libs else '')"
+    OUTPUT_VARIABLE CUPF_PYTHON_CUBLASLT_LIBRARY
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
   message(STATUS "Torch CMake prefix: ${CUPF_TORCH_CMAKE_PREFIX}")
 endif()
 
@@ -211,6 +221,8 @@ set(CUPF_CORE_SOURCES
   # Core
   cpp/src/newton_solver/ops/jacobian/jacobian_analysis.cpp
   cpp/src/newton_solver/core/newton_solver.cpp
+  cpp/src/newton_solver/core/newton_solver_adjoint.cpp
+  cpp/src/newton_solver/core/newton_solver_torch_bridge.cpp
 
   # Storage — CPU
   cpp/src/newton_solver/storage/cpu/cpu_fp64_storage.cpp
@@ -283,6 +295,8 @@ target_link_libraries(cupf PUBLIC
   $<$<BOOL:${CUPF_LOGGING_ENABLED}>:spdlog::spdlog>
 )
 
+target_compile_definitions(cupf PRIVATE CUPF_INTERNAL_TORCH_API)
+
 target_compile_definitions(cupf PUBLIC
   $<$<BOOL:${WITH_CUDA}>:CUPF_WITH_CUDA>
   $<$<BOOL:${WITH_CUDA}>:CUPF_ENABLE_CUDSS>
@@ -317,20 +331,29 @@ if(BUILD_PYTHON_BINDINGS)
   endif()
   pybind11_add_module(_cupf MODULE NO_EXTRAS ${CUPF_PYBIND_SOURCES})
   target_link_libraries(_cupf PRIVATE cupf)
-  target_include_directories(_cupf PRIVATE cpp/inc)
+  target_include_directories(_cupf PRIVATE cpp/inc cpp/src)
   if(CUPF_WITH_TORCH)
     get_filename_component(CUPF_TORCH_LIBRARY_DIR "${TORCH_PYTHON_LIBRARY}" DIRECTORY)
-    target_link_libraries(_cupf PRIVATE ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARY})
+    target_link_libraries(_cupf PRIVATE
+      $<$<BOOL:${CUPF_PYTHON_CUBLASLT_LIBRARY}>:-Wl,--no-as-needed>
+      $<$<BOOL:${CUPF_PYTHON_CUBLASLT_LIBRARY}>:${CUPF_PYTHON_CUBLASLT_LIBRARY}>
+      $<$<BOOL:${CUPF_PYTHON_CUBLASLT_LIBRARY}>:-Wl,--as-needed>
+      ${TORCH_LIBRARIES}
+      ${TORCH_PYTHON_LIBRARY})
     target_compile_definitions(_cupf PRIVATE CUPF_WITH_TORCH)
     target_compile_options(_cupf PRIVATE ${TORCH_CXX_FLAGS})
     target_include_directories(_cupf PRIVATE ${TORCH_INCLUDE_DIRS})
   endif()
   if(WITH_CUDA)
     get_filename_component(CUPF_CUDSS_LIBRARY_DIR "${CUDSS_LIBRARY}" DIRECTORY)
-    set(CUPF_PYBIND_RPATH "${CUPF_CUDSS_LIBRARY_DIR};${CUDAToolkit_LIBRARY_DIR}")
+    set(CUPF_PYBIND_RPATH "${CUPF_CUDSS_LIBRARY_DIR}")
     if(CUPF_WITH_TORCH)
+      foreach(_cupf_nvidia_library_dir IN LISTS CUPF_PYTHON_NVIDIA_LIBRARY_DIRS)
+        string(APPEND CUPF_PYBIND_RPATH ";${_cupf_nvidia_library_dir}")
+      endforeach()
       string(APPEND CUPF_PYBIND_RPATH ";${CUPF_TORCH_LIBRARY_DIR}")
     endif()
+    string(APPEND CUPF_PYBIND_RPATH ";${CUDAToolkit_LIBRARY_DIR}")
     set_target_properties(_cupf PROPERTIES
       BUILD_RPATH "${CUPF_PYBIND_RPATH}"
       INSTALL_RPATH "${CUPF_PYBIND_RPATH}")

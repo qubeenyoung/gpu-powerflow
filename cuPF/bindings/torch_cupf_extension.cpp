@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAStream.h>
 
 #include "newton_solver/core/newton_solver.hpp"
+#include "newton_solver/core/newton_solver_cuda_bridge.hpp"
 #include "newton_solver/core/newton_solver_types.hpp"
 #include "utils/cuda_utils.hpp"
 
@@ -90,7 +91,8 @@ AdjointResult solve_with_adjoint_cache_torch_binding(NewtonSolver& self,
     ScopedCudaStream scoped_stream(stream);
 
     AdjointResult result;
-    self.solve_cuda_load_pq_device(sbus_base_re.data_ptr(),
+    cupf::torch_api::solve_forward(self,
+                                   sbus_base_re.data_ptr(),
                                    sbus_base_im.data_ptr(),
                                    load_p.data_ptr(),
                                    load_q.data_ptr(),
@@ -133,16 +135,16 @@ AdjointResult solve_adjoint_torch_binding(NewtonSolver& self,
     ScopedCudaStream scoped_stream(stream);
 
     AdjointResult result;
-    self.solve_adjoint_cuda_device(grad_va.data_ptr(),
-                                   grad_vm.data_ptr(),
-                                   grad_load_p_out.data_ptr(),
-                                   grad_load_q_out.data_ptr(),
-                                   batch_size,
-                                   n_bus,
-                                   tensor_dtype_name(grad_va),
-                                   options,
-                                   false,
-                                   result);
+    cupf::torch_api::solve_backward(self,
+                                    grad_va.data_ptr(),
+                                    grad_vm.data_ptr(),
+                                    grad_load_p_out.data_ptr(),
+                                    grad_load_q_out.data_ptr(),
+                                    batch_size,
+                                    n_bus,
+                                    tensor_dtype_name(grad_va),
+                                    options,
+                                    result);
     result.torch_extension_zero_copy = true;
     result.raw_pointer_api_used = false;
     result.current_stream_integrated = true;

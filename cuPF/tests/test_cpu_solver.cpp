@@ -1,4 +1,5 @@
 #include "dump_case_loader.hpp"
+#include "small_cases.hpp"
 
 #include "newton_solver/core/newton_solver.hpp"
 
@@ -51,6 +52,7 @@ NRResult run_solver(const NewtonOptions& options)
                  data.pv.data(), static_cast<int32_t>(data.pv.size()),
                  data.pq.data(), static_cast<int32_t>(data.pq.size()),
                  cfg,
+                 SolveOptions{},
                  result);
 
     EXPECT_TRUE(result.converged);
@@ -59,6 +61,41 @@ NRResult run_solver(const NewtonOptions& options)
     EXPECT_EQ(static_cast<int32_t>(result.V.size()), data.rows);
     EXPECT_GT(max_voltage_delta(data.v0, result.V), 0.0);
 
+    return result;
+}
+
+NRResult run_two_bus_solver(const NewtonOptions& options,
+                            double tolerance,
+                            double voltage_tolerance)
+{
+    const auto data = cupf::tests::make_two_bus_case();
+    const YbusView ybus = data.ybus();
+
+    NewtonSolver solver(options);
+    solver.initialize(ybus,
+                      data.pv.data(), static_cast<int32_t>(data.pv.size()),
+                      data.pq.data(), static_cast<int32_t>(data.pq.size()));
+
+    NRConfig cfg;
+    cfg.tolerance = tolerance;
+    cfg.max_iter = 20;
+
+    NRResult result;
+    solver.solve(ybus,
+                 data.sbus.data(),
+                 data.v0.data(),
+                 data.pv.data(), static_cast<int32_t>(data.pv.size()),
+                 data.pq.data(), static_cast<int32_t>(data.pq.size()),
+                 cfg,
+                 SolveOptions{},
+                 result);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_TRUE(std::isfinite(result.final_mismatch));
+    EXPECT_LE(result.final_mismatch, cfg.tolerance);
+    ASSERT_EQ(result.V.size(), data.expected_v.size());
+    EXPECT_LE(std::abs(result.V[0] - data.expected_v[0]), voltage_tolerance);
+    EXPECT_LE(std::abs(result.V[1] - data.expected_v[1]), voltage_tolerance);
     return result;
 }
 
@@ -86,6 +123,34 @@ bool cuda_device_available()
 
 }  // namespace
 
+TEST(CpuSolverDeterministic, SolveBeforeInitializeThrows)
+{
+    const auto data = cupf::tests::make_two_bus_case();
+    NewtonSolver solver;
+    NRConfig cfg;
+    NRResult result;
+
+    EXPECT_THROW(
+        solver.solve(data.ybus(),
+                     data.sbus.data(),
+                     data.v0.data(),
+                     data.pv.data(), static_cast<int32_t>(data.pv.size()),
+                     data.pq.data(), static_cast<int32_t>(data.pq.size()),
+                     cfg,
+                     SolveOptions{},
+                     result),
+        std::runtime_error);
+}
+
+TEST(CpuSolverDeterministic, TwoBusConvergesWithoutExternalDump)
+{
+    NewtonOptions options;
+    options.backend = BackendKind::CPU;
+    options.compute = ComputePolicy::FP64;
+
+    (void)run_two_bus_solver(options, 1e-10, 1e-8);
+}
+
 TEST(CpuSolverSmoke, EdgeBasedCase30Converges)
 {
     if (!std::filesystem::exists(kCase30IeeePath)) {
@@ -100,6 +165,90 @@ TEST(CpuSolverSmoke, EdgeBasedCase30Converges)
 }
 
 #ifdef CUPF_WITH_CUDA
+TEST(CudaSolverDeterministic, Fp64TwoBusConvergesWithoutExternalDump)
+{
+    if (!cuda_device_available()) {
+        GTEST_SKIP() << "CUDA device not available";
+    }
+
+    NewtonOptions options;
+    options.backend = BackendKind::CUDA;
+    options.compute = ComputePolicy::FP64;
+
+    (void)run_two_bus_solver(options, 1e-10, 1e-8);
+}
+
+TEST(CudaSolverDeterministic, Fp32TwoBusConvergesWithoutExternalDump)
+{
+    if (!cuda_device_available()) {
+        GTEST_SKIP() << "CUDA device not available";
+    }
+
+    NewtonOptions options;
+    options.backend = BackendKind::CUDA;
+    options.compute = ComputePolicy::FP32;
+
+    (void)run_two_bus_solver(options, 1e-6, 5e-4);
+}
+
+TEST(CudaSolverDeterministic, MixedTwoBusBatchConvergesWithoutExternalDump)
+{
+    if (!cuda_device_available()) {
+        GTEST_SKIP() << "CUDA device not available";
+    }
+
+    const auto data = cupf::tests::make_two_bus_case();
+    const YbusView ybus = data.ybus();
+    constexpr int32_t batch_size = 2;
+    const auto batched_sbus = cupf::tests::repeat_complex_vector(data.sbus, batch_size);
+    const auto batched_v0 = cupf::tests::repeat_complex_vector(data.v0, batch_size);
+
+    NewtonOptions options;
+    options.backend = BackendKind::CUDA;
+    options.compute = ComputePolicy::Mixed;
+
+    NewtonSolver solver(options);
+    solver.initialize(ybus,
+                      data.pv.data(), static_cast<int32_t>(data.pv.size()),
+                      data.pq.data(), static_cast<int32_t>(data.pq.size()));
+
+    NRConfig cfg;
+    cfg.tolerance = 1e-6;
+    cfg.max_iter = 20;
+
+    NRBatchResult result;
+    solver.solve_batch(ybus,
+                       batched_sbus.data(),
+                       ybus.rows,
+                       batched_v0.data(),
+                       ybus.rows,
+                       batch_size,
+                       data.pv.data(), static_cast<int32_t>(data.pv.size()),
+                       data.pq.data(), static_cast<int32_t>(data.pq.size()),
+                       cfg,
+                       SolveOptions{},
+                       result);
+
+    ASSERT_EQ(result.n_bus, data.rows);
+    ASSERT_EQ(result.batch_size, batch_size);
+    ASSERT_EQ(result.V.size(), static_cast<std::size_t>(batch_size) *
+                               static_cast<std::size_t>(data.rows));
+    ASSERT_EQ(result.final_mismatch.size(), static_cast<std::size_t>(batch_size));
+    ASSERT_EQ(result.converged.size(), static_cast<std::size_t>(batch_size));
+
+    for (int32_t b = 0; b < batch_size; ++b) {
+        EXPECT_TRUE(result.converged[static_cast<std::size_t>(b)] != 0);
+        EXPECT_TRUE(std::isfinite(result.final_mismatch[static_cast<std::size_t>(b)]));
+        EXPECT_LE(result.final_mismatch[static_cast<std::size_t>(b)], cfg.tolerance);
+        for (int32_t bus = 0; bus < data.rows; ++bus) {
+            const auto actual =
+                result.V[static_cast<std::size_t>(b) * static_cast<std::size_t>(data.rows) +
+                         static_cast<std::size_t>(bus)];
+            EXPECT_LE(std::abs(actual - data.expected_v[static_cast<std::size_t>(bus)]), 5e-4);
+        }
+    }
+}
+
 TEST(CudaSolverSmoke, MixedCase30Converges)
 {
     if (!std::filesystem::exists(kCase30IeeePath)) {
@@ -154,6 +303,7 @@ TEST(CudaSolverSmoke, MixedCase30BatchConverges)
                        data.pv.data(), static_cast<int32_t>(data.pv.size()),
                        data.pq.data(), static_cast<int32_t>(data.pq.size()),
                        cfg,
+                       SolveOptions{},
                        result);
 
     EXPECT_EQ(result.n_bus, data.rows);
