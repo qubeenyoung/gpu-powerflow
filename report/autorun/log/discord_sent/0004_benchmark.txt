@@ -1,0 +1,10 @@
+[mysolver] cycle 4 | M1:in_progress | 2026-05-26T03:56Z
+📊 benchmark_report
+  set:   M1 풀셋 12 (SuiteSparse 5 + MATPOWER case30..case8387pegase) × 4 solvers
+  accuracy (gate A, M1 = berr ≤ KLU): ✅ 12/12
+    onetone2 해결: ND(4.43e-7) → AMD 선택(1.31e-7 = KLU)
+  ordering 선택 (min-fill): ND = wang3, rajat15 / AMD = 나머지 10
+    fill: wang3 -31%, rajat15 -11% (ND 이득 유지); 나머지는 AMD = KLU
+  ⚠️ factor_ms +46~239% (의도된 회귀): AMD+ND 둘 다 분해하는 비용
+    → M2 symbolic fill예측으로 패자 분해 제거 예정. M1 perf gate 없음 + §3.2 의도된회귀 → keep
+  📎 report/benchmark/cycle_0004.csv

@@ -1,0 +1,9 @@
+[mysolver] cycle 1 | M0:in_progress | 2026-05-26T03:28:07Z
+📊 benchmark_report
+  set:   smoke   (6 matrices, 4 solvers)
+  accuracy:  🚨 1 VIOLATION(S): rajat27(berr=1.53e-05,ok=True)
+  vs best:
+    ⚪ baseline (M0 first run — no prior best recorded)
+  vs cudss-gpu (wang3): mysolver 3444.50ms / cudss 34.28ms (100.49x)
+  vs klu (factor, smoke): mysolver 0.97x KLU avg
+  📎 report/benchmark/cycle_0001.csv

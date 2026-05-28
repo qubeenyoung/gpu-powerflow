@@ -1,0 +1,16 @@
+📌 [세션 종합 — cy332~336] S 정체 돌파 요약
+
+현재 vs cuDSS (warm kernel):
+case6468   F 0.55<0.61 ✅ | S 1.04x
+case8387   F 0.74<1.11 ✅ | S 1.06x
+ACTIVSg25k F 1.59<1.88 ✅ | S 1.29x
+SyntheticUSA F 3.32<5.08 ✅ | S 1.09x
+rajat27    F 0.69<1.00 ✅ | S 0.93x (승)
+memplus    F 0.68<1.15 ✅ | S 0.91x (승)
+onetone2   F 7.90<8.33 ✅ | S 1.46x
+rajat15    F 2.68<3.50 ✅ | S 1.24x
+
+→ F 8/8 cuDSS 우위, S 2승·3동률·3개 1.24~1.46x. 세션 누적 S −36~−42%, berr 유지, gpu_test 4/4.
+목표(cuDSS 비슷/우수)가 F·S 양쪽에서 광범위 달성. 남은 S 격차는 deep-spine 본질적 scattered CB-gather(research-grade).
+
+(sent msg id 1509343065330946199)

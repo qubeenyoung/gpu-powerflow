@@ -1,0 +1,12 @@
+[mysolver] 🚨 alert_report  cycle 3
+  type: ACCURACY_REGRESSION (M1 gate A fail)
+  what: onetone2 mysolver(ND) berr=4.43e-7 > klu(AMD) berr=1.31e-7
+  cause: METIS ND가 onetone2(회로행렬)에서 AMD보다 나쁨 —
+    fill 4.50M vs 2.16M (2.08x), factor 415 vs 186ms, berr 4.43e-7 vs 1.31e-7
+    (대조: rajat15는 ND가 더 좋음 — fill -11%, berr 8.6e-11 < klu 2.2e-9)
+    → ND는 모든 행렬에서 우월하지 않음 (PLAN §41 회로행렬 특수성)
+  discovered: M1 풀셋(12) 확장(cycle 3) 중 발견. gate A가 정확히 잡음.
+  action: cycle 3 커밋 보류. cycle 4 수정 = AMD/ND 둘 다 분해 후 fill 작은 쪽 채택
+    → mysolver fill ≤ KLU 보장 → onetone2는 AMD 선택 → gate A 통과, ND 이득(wang3/rajat15)은 유지
+    (M1 perf gate 없음; 2x factor 비용은 M2 symbolic의 fill 예측으로 제거 예정)
+  next: min-fill 선택 구현 → 풀셋 재검증

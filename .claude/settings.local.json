@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p ~/.claude/channels/discord)",
+      "Read(//root/.claude/channels/discord/**)",
+      "Bash(chmod 600 ~/.claude/channels/discord/.env)"
+    ]
+  }
+}

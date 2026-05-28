@@ -1,0 +1,15 @@
+📊 [벤치 cy332] S(solve) ms — warm, clock-locked, 변동 <0.5%. 전 8개 행렬 개선:
+
+power-grid (vs cuDSS):
+• case6468   0.516 → 0.504  (-2.3%)
+• case8387   0.657 → 0.638  (-2.9%)
+• ACTIVSg25k 1.441 → 1.390  (-3.5%)
+• SyntheticUSA 2.482 → 2.386 (-3.9%)
+
+circuit (vs cuDSS):
+• rajat27  0.629 → 0.600  (-4.6%)
+• memplus  0.618 → 0.586  (-5.2%)
+• onetone2 3.537 → 3.271  (-7.5%)  ← S-worst, cuDSS 대비 2.31x→2.14x
+• rajat15  1.794 → 1.683  (-6.2%)
+
+깊은 spine 회로(onetone2/rajat15)에서 가장 큰 이득. F는 cuDSS 8/8 우위 유지, A -13% 유지.

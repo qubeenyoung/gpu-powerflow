@@ -1,0 +1,10 @@
+[mysolver] cycle 17 | M3:in_progress | 2026-05-26T05:45:57Z
+📊 benchmark_report
+  set:   memplus,rajat27,wang3,onetone2,rajat15,case30,case118,case1197,case_ACTIVSg2000,case3012wp,case6468rte,case8387pegase   (12 matrices, 4 solvers)
+  accuracy:  ✅ berr ≤ 1.53e-05 (worst rajat27), absolute ≤ 1.67e-04
+  vs best:
+    🟡 case30 factor_ms 0.0197 → 0.0276 (+39.9%, regression flag)
+    🟡 rajat15 solve_ms 2.05 → 2.3 (+11.8%, regression flag)
+  vs cudss-gpu (wang3): mysolver 5438.42ms / cudss 34.45ms (157.86x)
+  vs klu (factor, memplus,rajat27,wang3,onetone2,rajat15,case30,case118,case1197,case_ACTIVSg2000,case3012wp,case6468rte,case8387pegase): mysolver 1.52x KLU avg
+  📎 report/benchmark/cycle_0017.csv

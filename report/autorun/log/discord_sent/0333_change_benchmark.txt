@@ -1,0 +1,11 @@
+📝📊 [cy333] ncu 기반 두 번째 S 최적화 — narrow spine를 single-warp로
+
+cy332 후 재프로파일하니 backward가 여전히 64스레드인데 deep narrow spine은 warp당 ~10/32만 활성 → 두 번째 warp와 그 cross-warp 축약(wsum)+블록 배리어 2개가 순전히 오버헤드. 커널에 single-warp fast-path(nt≤32: shuffle가 lane0에 합을 모아 wsum·배리어 제거) 추가 + narrow few-front 레벨을 32스레드로 라우팅(임계값 MF_TS_SW_MX 스윕 → 40 최적).
+
+검증: gpu_test 4/4, berr 동일, F/A 완전 동일.
+
+누적 cy332+cy333 S 개선 (vs 기존 baseline):
+• case6468 -5.2% / case8387 -5.0% / ACTIVSg25k -5.1% / SyntheticUSA -5.4%
+• rajat27 -6.5% / memplus -7.4% / onetone2 -8.3% (S-worst, cuDSS 대비 2.31x→2.12x) / rajat15 -7.3%
+
+commit 66600c3.
