@@ -1,0 +1,12 @@
+[mysolver] cycle 12 | M3:in_progress | 2026-05-26T05:00Z
+🛠 change_report
+  files:
+    - src/mysolver/factorize/dense_lu.{hpp,cpp}  (신규: dense block LU + solve, partial pivoting)
+    - tests/mysolver/test_solver.cpp             (8x8 100건 검증)
+    - CMakeLists.txt                             (dense_lu.cpp)
+  intent: M3 factorize_dense_block (§269) — supernode 단위 dense LU 커널. CPU 레퍼런스로 정확도 먼저
+  build:  OK   unit: 15/15
+    ✅ 랜덤 대각우세 8x8 100건 전부 residual < 1e-10
+  isolated: 아직 solver 미연결 → production은 KLU 유지 (정확도 게이트 무영향)
+  🔗 ref: §M3 factorize_dense_block, §666 (8x8 randomized)
+  next:  supernodal numeric assembly (fill_pattern 위에 dense_lu + supernode 간 sparse update)

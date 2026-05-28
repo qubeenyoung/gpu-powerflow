@@ -1,0 +1,11 @@
+[mysolver] cycle 16 | M3:in_progress | 2026-05-26T05:38Z
+🛠 change_report / 📊 benchmark — own-numeric를 production에 통합 (옵션 c)
+  files: solver_registry.cpp (own pipeline 먼저 시도, berr≤1e-10이면 채택, 아니면 KLU fallback)
+         own_pipeline.{hpp,cpp} (phase 타이밍), analyze_csv.py (M3 hybrid gate), CMakeLists
+  결과: mysolver가 벤치마크에서 **9/12를 KLU 없이 자체 분해** (case6468rte 포함):
+    accuracy gate A: ✅ 12/12 (own-numeric berr ~1e-16 ≥ KLU; 회로 3종은 KLU fallback)
+    🎯 case6468rte: own-numeric berr 3.6e-16
+  ⚠️ 속도 회귀 (의도됨): factor +13~83%, solve +500~900% (미최적 CPU sparse LU + refinement 3회)
+     → 다음 단계 supernodal + GPU에서 해결 (cuDSS 경쟁 목표의 본체)
+  unit: 19/19
+  deferred: 회로행렬 3종 → 최적 MC64 (별도 사이클)

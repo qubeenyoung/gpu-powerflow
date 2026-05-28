@@ -1,0 +1,12 @@
+[mysolver] cycle 6 | M2:in_progress | 2026-05-26T04:19Z
+🛠 change_report
+  files:
+    - src/mysolver/symbolic/elimination_tree.{hpp,cpp}  (postorder, column_counts, predicted_fill)
+    - tests/mysolver/test_solver.cpp                    (column count 검증 2건)
+  intent: M2 — fill 예측기 (etree → postorder → column counts → nnz(L+U) proxy)
+  build:  OK   unit: 8/8
+    ✅ column_counts = tridiagonal L [2,2,2,2,1]
+    ✅ CXSparse cs_di_counts parity
+  bench:  변화 없음 (예측기 아직 solver 미연결)
+  🔗 ref: §M2, CXSparse cs_counts(A,0)
+  next:  predicted_fill로 ordering 선택 → double-factor 제거

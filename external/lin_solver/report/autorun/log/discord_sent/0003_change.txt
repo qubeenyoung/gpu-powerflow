@@ -1,0 +1,10 @@
+[mysolver] cycle 3 | M1:in_progress | 2026-05-26T03:48Z
+🛠 change_report
+  files:
+    - src/benchmark/third_party_solvers.cpp  (--matrices 명시 선택 옵션)
+    - src/autorun/run_cycle.py               (active_matrix_set 콤마목록 지원)
+    - report/autorun/STATE.json              (active set → M1 풀셋 12개)
+  intent: M1 검증셋 확장 — SuiteSparse 5종(+onetone2,rajat15) + MATPOWER case30..case8387pegase (§214)
+  build:  OK (/tmp/profile-build)
+  unit:   4/4 (변경 없음)
+  next:   M1 풀셋 벤치 → gate A 12/12 + M1 exit criteria 확인

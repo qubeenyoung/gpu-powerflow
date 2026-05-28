@@ -1,0 +1,14 @@
+[mysolver] cycle 2 | M1:in_progress | 2026-05-26T03:42Z
+🛠 change_report
+  files:
+    - src/mysolver/reordering/metis_nd.{hpp,cpp}   (신규: METIS ND + KLU user_order 콜백)
+    - src/mysolver/solver.{hpp,cpp}                (analyze: ordering=3 + user_order; FactorState lnz/unz)
+    - src/benchmark/solver_registry.cpp            (mysolver 메시지에 fill 노출)
+    - src/third_party_solvers/suitesparse_solvers.cpp (klu 메시지에 fill — 비교용)
+    - tests/mysolver/test_solver.cpp               (ND perm 유효성 검사 추가)
+    - CMakeLists.txt                               (metis_nd.cpp + link metis)
+  intent: M1 — mysolver가 METIS ND fill-reducing perm 생성, KLU user_order 훅으로 주입 (BTF+numeric은 KLU 위임)
+  build:  OK (/tmp/profile-build)
+  unit:   4/4 passed (tests/mysolver)  [solve x2 + metis_nd perm 유효성 x2]
+  🔗 ref: cudss/tips_and_tricks.html (REORDERING_ALG), KLU user_order (ordering=3)
+  next:   smoke 벤치 → 정확도(berr≤KLU) + fill-in(nnz(L+U)) vs KLU 확인

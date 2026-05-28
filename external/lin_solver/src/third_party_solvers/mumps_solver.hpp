@@ -1,0 +1,12 @@
+#pragma once
+
+#include <memory>
+
+#include "third_party_solvers/linear_solver.hpp"
+
+namespace sparse_direct::solver {
+
+std::unique_ptr<LinearSolver> make_mumps_cpu_solver();
+std::unique_ptr<LinearSolver> make_mumps_gpu_solver();
+
+}  // namespace sparse_direct::solver

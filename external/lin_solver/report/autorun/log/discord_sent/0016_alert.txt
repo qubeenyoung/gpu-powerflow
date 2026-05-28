@@ -1,0 +1,9 @@
+[mysolver] 🚨 alert_report  cycle 16-experiment (reverted)
+  type: REVERTED_REGRESSION (gate-safe, isolated tool)
+  what: greedy value-aware matching regressed own-numeric 9/12 → 7/12
+        (case3012wp, case6468rte broke; rajat15 diverged)
+  cause: 전력망 Jacobian은 자연 대각이 이미 강함 → greedy 매칭이 불필요하게 컬럼을
+         재배치해서 구조를 망침. greedy ≠ MC64.
+  insight: 최적 MC64는 대각이 이미 좋으면 identity를 유지함(최적성). greedy는 그 성질이 없음.
+  action: revert 완료 (커밋 안 됨, production 무영향). own-numeric 9/12로 복구.
+  next: 진짜 MC64(최적 max-product 매칭 + dual scaling)는 큰 전용 알고리즘. 또는 동적 pivoting.

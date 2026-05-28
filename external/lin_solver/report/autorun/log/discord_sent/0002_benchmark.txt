@@ -1,0 +1,14 @@
+[mysolver] cycle 2 | M1:in_progress | 2026-05-26T03:43Z
+📊 benchmark_report
+  set:   smoke (6 matrices × 4 solvers)
+  accuracy (gate A, M1 = berr ≤ KLU): ✅ 6/6
+    🎯 rajat27 berr 개선: KLU 1.53e-5 → mysolver(ND) 1.05e-8 (3자리↑)
+  fill-in nnz(L+U) vs KLU (§204 권장 5%, 초과는 보고만):
+    wang3   -30.8%  🟢   case118 +1.2%   case30 +2.8%
+    rajat27 +7.1%        memplus +7.2%   case1197 +13.7%
+  factor_ms (mysolver ND / klu AMD):
+    wang3   1460 / 3413   (-57% 🟢)
+    소형행렬은 +sub-ms (case30 0.017/0.015 등) — ND 오버헤드, noise 수준
+  결정: KEEP (M1 의도된 ordering 교체). 소형 fill/time 증가는 §205대로 보고만,
+        회귀처리 안 함. best_metrics를 M1-ND 기준으로 리셋.
+  📎 report/benchmark/cycle_0002.csv
