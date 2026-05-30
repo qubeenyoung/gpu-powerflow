@@ -82,6 +82,12 @@ enum class ComputePolicy {
 };
 
 
+enum class CudaLinearSolverKind {
+    CuDSS,
+    Custom,
+};
+
+
 // ---------------------------------------------------------------------------
 // CuDSSAlgorithm / CuDSSOptions: CUDA direct solver 런타임 설정.
 //
@@ -112,9 +118,10 @@ struct CuDSSOptions {
 // 사용자는 backend, compute policy와 CUDA direct solver 설정을 선택한다.
 // ---------------------------------------------------------------------------
 struct NewtonOptions {
-    BackendKind   backend = BackendKind::CPU;
-    ComputePolicy compute = ComputePolicy::FP64;
-    CuDSSOptions  cudss = {};
+    BackendKind          backend = BackendKind::CPU;
+    ComputePolicy        compute = ComputePolicy::FP64;
+    CudaLinearSolverKind cuda_linear_solver = CudaLinearSolverKind::CuDSS;
+    CuDSSOptions         cudss = {};
 };
 
 

@@ -178,6 +178,22 @@ TEST(CudaSolverDeterministic, Fp64TwoBusConvergesWithoutExternalDump)
     (void)run_two_bus_solver(options, 1e-10, 1e-8);
 }
 
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+TEST(CudaSolverDeterministic, CustomFp64TwoBusConvergesWithoutExternalDump)
+{
+    if (!cuda_device_available()) {
+        GTEST_SKIP() << "CUDA device not available";
+    }
+
+    NewtonOptions options;
+    options.backend = BackendKind::CUDA;
+    options.compute = ComputePolicy::FP64;
+    options.cuda_linear_solver = CudaLinearSolverKind::Custom;
+
+    (void)run_two_bus_solver(options, 1e-10, 1e-8);
+}
+#endif
+
 TEST(CudaSolverDeterministic, Fp32TwoBusConvergesWithoutExternalDump)
 {
     if (!cuda_device_available()) {

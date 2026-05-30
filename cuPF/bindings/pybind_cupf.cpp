@@ -142,6 +142,12 @@ PYBIND11_MODULE(_cupf, m)
         .value("Mixed", ComputePolicy::Mixed)
         .export_values();
 
+    py::enum_<CudaLinearSolverKind>(m, "CudaLinearSolverKind",
+        "CUDA FP64 linear solver backend.")
+        .value("CuDSS",  CudaLinearSolverKind::CuDSS)
+        .value("Custom", CudaLinearSolverKind::Custom)
+        .export_values();
+
     py::enum_<AdjointCacheMode>(m, "AdjointCacheMode",
         "forward 종료 시 adjoint cache 준비 방식.")
         .value("None", AdjointCacheMode::None)
@@ -191,6 +197,8 @@ PYBIND11_MODULE(_cupf, m)
             "연산 백엔드 (BackendKind.CPU 또는 BackendKind.CUDA)")
         .def_readwrite("compute", &NewtonOptions::compute,
             "내부 계산 정밀도 정책 (ComputePolicy.FP64, ComputePolicy.FP32 또는 ComputePolicy.Mixed)")
+        .def_readwrite("cuda_linear_solver", &NewtonOptions::cuda_linear_solver,
+            "CUDA FP64 linear solver backend (CudaLinearSolverKind.CuDSS 또는 Custom)")
         .def_readwrite("cudss", &NewtonOptions::cudss,
             "CUDA direct solver 런타임 설정");
 

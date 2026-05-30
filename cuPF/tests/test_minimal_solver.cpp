@@ -9,6 +9,10 @@
 #include <stdexcept>
 #include <string>
 
+#if defined(CUPF_WITH_CUDA) && defined(CUPF_ENABLE_CUSTOM_SOLVER)
+  #include <cuda_runtime.h>
+#endif
+
 
 namespace {
 
@@ -85,6 +89,57 @@ void cpu_two_bus_converges()
     require_near(result.V[1], data.expected_v[1], 1e-8, "PQ voltage mismatch");
 }
 
+#if defined(CUPF_WITH_CUDA) && defined(CUPF_ENABLE_CUSTOM_SOLVER)
+bool cuda_device_available()
+{
+    int device_count = 0;
+    return cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0;
+}
+
+void custom_cuda_fp64_two_bus_converges()
+{
+    if (!cuda_device_available()) {
+        return;
+    }
+
+    const auto data = cupf::tests::make_two_bus_case();
+    const YbusView ybus = data.ybus();
+
+    NewtonOptions options;
+    options.backend = BackendKind::CUDA;
+    options.compute = ComputePolicy::FP64;
+    options.cuda_linear_solver = CudaLinearSolverKind::Custom;
+
+    NewtonSolver solver(options);
+    solver.initialize(ybus,
+                      data.pv.data(), static_cast<int32_t>(data.pv.size()),
+                      data.pq.data(), static_cast<int32_t>(data.pq.size()));
+
+    NRConfig config;
+    config.tolerance = 1e-10;
+    config.max_iter = 20;
+
+    NRResult result;
+    solver.solve(ybus,
+                 data.sbus.data(),
+                 data.v0.data(),
+                 data.pv.data(), static_cast<int32_t>(data.pv.size()),
+                 data.pq.data(), static_cast<int32_t>(data.pq.size()),
+                 config,
+                 SolveOptions{},
+                 result);
+
+    require(result.converged, "two-bus custom CUDA FP64 solve did not converge");
+    require(std::isfinite(result.final_mismatch), "custom CUDA FP64 final mismatch must be finite");
+    require(result.final_mismatch <= config.tolerance,
+            "custom CUDA FP64 final mismatch exceeds tolerance");
+    require(result.V.size() == data.expected_v.size(),
+            "unexpected custom CUDA FP64 voltage result size");
+    require_near(result.V[0], data.expected_v[0], 1e-10, "custom CUDA FP64 slack voltage changed");
+    require_near(result.V[1], data.expected_v[1], 1e-8, "custom CUDA FP64 PQ voltage mismatch");
+}
+#endif
+
 }  // namespace
 
 
@@ -93,6 +148,9 @@ int main()
     try {
         solve_before_initialize_throws();
         cpu_two_bus_converges();
+#if defined(CUPF_WITH_CUDA) && defined(CUPF_ENABLE_CUSTOM_SOLVER)
+        custom_cuda_fp64_two_bus_converges();
+#endif
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';
         return 1;

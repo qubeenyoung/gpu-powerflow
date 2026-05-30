@@ -114,9 +114,20 @@ void ensure_cuda_tensor_batch(CudaMixedBuffers& buf, int32_t batch_size)
 }
 
 template <typename PipelineT>
+struct IsCudaFp64Pipeline : std::bool_constant<
+    std::is_same_v<PipelineT, CudaFp64Pipeline>
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+    || std::is_same_v<PipelineT, CudaFp64CustomPipeline>
+#endif
+> {};
+
+template <typename PipelineT>
+constexpr bool is_cuda_fp64_pipeline_v = IsCudaFp64Pipeline<PipelineT>::value;
+
+template <typename PipelineT>
 const char* cuda_pipeline_dtype_name()
 {
-    if constexpr (std::is_same_v<PipelineT, CudaFp64Pipeline>) {
+    if constexpr (is_cuda_fp64_pipeline_v<PipelineT>) {
         return "float64";
     } else {
         return "float32";
@@ -128,6 +139,10 @@ const char* cuda_pipeline_backend_name()
 {
     if constexpr (std::is_same_v<PipelineT, CudaFp64Pipeline>) {
         return "cuda_cudss_fp64";
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+    } else if constexpr (std::is_same_v<PipelineT, CudaFp64CustomPipeline>) {
+        return "cuda_custom_fp64";
+#endif
     } else if constexpr (std::is_same_v<PipelineT, CudaFp32Pipeline>) {
         return "cuda_cudss_fp32";
     } else {
@@ -208,7 +223,7 @@ void NewtonSolver::solve_torch_backward(
             throw std::runtime_error("cupf::torch_api::solve_backward(): CPU pipeline is not supported");
         } else {
             using ValueT = std::conditional_t<
-                std::is_same_v<PipelineT, CudaFp64Pipeline>, double, float>;
+                is_cuda_fp64_pipeline_v<PipelineT>, double, float>;
             const char* expected_dtype = cuda_pipeline_dtype_name<PipelineT>();
             if (dtype_name != expected_dtype) {
                 throw std::invalid_argument(
@@ -334,7 +349,7 @@ void NewtonSolver::solve_torch_forward(
             p.buf.d_Ibus_re.memsetZero();
             p.buf.d_Ibus_im.memsetZero();
 
-            if constexpr (std::is_same_v<PipelineT, CudaFp64Pipeline>) {
+            if constexpr (is_cuda_fp64_pipeline_v<PipelineT>) {
                 const double* base_re = static_cast<const double*>(sbus_base_re_device_ptr);
                 const double* base_im = static_cast<const double*>(sbus_base_im_device_ptr);
                 const double* load_p = static_cast<const double*>(load_p_device_ptr);
@@ -388,7 +403,7 @@ void NewtonSolver::solve_torch_forward(
             }
 
             const int32_t total_bus = batch_size * p.buf.n_bus;
-            if constexpr (std::is_same_v<PipelineT, CudaFp64Pipeline>) {
+            if constexpr (is_cuda_fp64_pipeline_v<PipelineT>) {
                 launch_copy_voltage_outputs<double, double>(
                     p.buf.d_Va.data(), p.buf.d_Vm.data(),
                     static_cast<double*>(va_out_device_ptr),

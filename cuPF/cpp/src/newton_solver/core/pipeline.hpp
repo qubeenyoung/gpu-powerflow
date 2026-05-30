@@ -18,6 +18,9 @@
 #include "newton_solver/ops/mismatch/cuda_mismatch.hpp"
 #include "newton_solver/ops/jacobian/fill_jacobian_gpu.hpp"
 #include "newton_solver/ops/linear_solve/cuda_cudss.hpp"
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+#include "newton_solver/ops/linear_solve/cuda_custom_solver.hpp"
+#endif
 #include "newton_solver/ops/voltage_update/cuda_voltage_update.hpp"
 #endif
 
@@ -96,6 +99,44 @@ struct CudaFp64Pipeline {
 
     static constexpr bool batch_supported = false;
 };
+
+
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+// ---------------------------------------------------------------------------
+// CudaFp64CustomPipeline
+// ---------------------------------------------------------------------------
+struct CudaFp64CustomPipeline {
+    CudaFp64Buffers              buf;
+    CudaLinearSolveCustomFp64    linear_solve;
+    AdjointCache                 adjoint_cache;
+
+    void initialize(const InitializeContext& ctx) {
+        buf.prepare(ctx);
+        linear_solve.initialize(buf, ctx);
+    }
+
+    void upload(const SolveContext& ctx) {
+        buf.upload(ctx);
+    }
+
+    void download_batch(NRBatchResult& result) const {
+        NRResult single;
+        buf.download(single);
+        result.V = std::move(single.V);
+    }
+
+    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp64Buffers>{}.run(buf, ctx); }
+    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaFp64Buffers>{}.run(buf, ctx); }
+    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaFp64Buffers>{}.run(buf, ctx); }
+    void jacobian(IterationContext& ctx)      { CudaJacobianOp<double>{}.run(buf, ctx); }
+    void prepare_rhs(IterationContext& ctx)   { linear_solve.prepare_rhs(buf, ctx); }
+    void factorize(IterationContext& ctx)     { linear_solve.factorize(buf, ctx); }
+    void solve(IterationContext& ctx)         { linear_solve.solve(buf, ctx); }
+    void voltage_update(IterationContext& ctx){ CudaVoltageUpdateOp<double>{}.run(buf, ctx); }
+
+    static constexpr bool batch_supported = false;
+};
+#endif
 
 
 // ---------------------------------------------------------------------------
@@ -181,6 +222,9 @@ struct SolverPipeline {
         CpuFp64Pipeline
 #ifdef CUPF_WITH_CUDA
         , CudaFp64Pipeline
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+        , CudaFp64CustomPipeline
+#endif
         , CudaFp32Pipeline
         , CudaMixedPipeline
 #endif

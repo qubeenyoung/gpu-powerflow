@@ -42,6 +42,7 @@ _cupf = _load_extension()
 
 BackendKind = _cupf.BackendKind
 ComputePolicy = _cupf.ComputePolicy
+CudaLinearSolverKind = _cupf.CudaLinearSolverKind
 AdjointCacheMode = _cupf.AdjointCacheMode
 CuDSSAlgorithm = _cupf.CuDSSAlgorithm
 CuDSSOptions = _cupf.CuDSSOptions
@@ -56,6 +57,7 @@ NewtonSolver = _cupf.NewtonSolver
 __all__ = [
     "BackendKind",
     "ComputePolicy",
+    "CudaLinearSolverKind",
     "AdjointCacheMode",
     "CuDSSAlgorithm",
     "CuDSSOptions",

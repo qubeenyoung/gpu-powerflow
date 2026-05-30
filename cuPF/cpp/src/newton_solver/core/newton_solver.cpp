@@ -76,7 +76,25 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
 
 #ifdef CUPF_WITH_CUDA
     if (options.backend == BackendKind::CUDA) {
+        if (options.cuda_linear_solver == CudaLinearSolverKind::Custom &&
+            options.compute != ComputePolicy::FP64) {
+            throw std::invalid_argument(
+                "NewtonSolver: custom CUDA linear solver는 FP64 단일 케이스만 지원합니다.");
+        }
         if (options.compute == ComputePolicy::FP64) {
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+            if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
+                pipeline_ = std::make_unique<SolverPipeline>(
+                    SolverPipeline{CudaFp64CustomPipeline{}});
+                return;
+            }
+#else
+            if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
+                throw std::invalid_argument(
+                    "NewtonSolver: custom CUDA linear solver를 요청했지만 "
+                    "cuPF가 CUPF_ENABLE_CUSTOM_SOLVER 없이 빌드되었습니다.");
+            }
+#endif
             pipeline_ = std::make_unique<SolverPipeline>(
                 SolverPipeline{CudaFp64Pipeline{options.cudss}});
             return;
@@ -370,6 +388,10 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
             p.adjoint_cache.host_roundtrip_for_jt_transpose = false;
             if constexpr (std::is_same_v<std::decay_t<decltype(p)>, CudaFp64Pipeline>) {
                 p.adjoint_cache.backend_name = "cuda_cudss_fp64";
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+            } else if constexpr (std::is_same_v<std::decay_t<decltype(p)>, CudaFp64CustomPipeline>) {
+                p.adjoint_cache.backend_name = "cuda_custom_fp64";
+#endif
             } else if constexpr (std::is_same_v<std::decay_t<decltype(p)>, CudaFp32Pipeline>) {
                 p.adjoint_cache.backend_name = "cuda_cudss_fp32";
             } else {

@@ -11,6 +11,7 @@ option(ENABLE_LOG            "Enable spdlog logging when available" ON)
 option(ENABLE_DUMP           "Enable debug dump utilities"      OFF)
 option(ENABLE_TIMING         "Enable ScopedTimer timing collection" OFF)
 option(ENABLE_NVTX           "Enable NVTX tracing utility when headers are available" OFF)
+option(CUPF_ENABLE_CUSTOM_SOLVER "Build the custom CUDA FP64 linear solver backend" OFF)
 set(CUPF_CUDSS_REORDERING_ALG "DEFAULT" CACHE STRING "cuDSS reordering algorithm: DEFAULT, ALG_1, or ALG_2")
 set_property(CACHE CUPF_CUDSS_REORDERING_ALG PROPERTY STRINGS DEFAULT ALG_1 ALG_2)
 option(CUPF_CUDSS_ENABLE_MT "Enable cuDSS multi-threaded mode via CUDSS_THREADING_LIB" OFF)
@@ -193,6 +194,17 @@ if(WITH_CUDA)
   endif()
 endif()
 
+if(CUPF_ENABLE_CUSTOM_SOLVER)
+  if(NOT WITH_CUDA)
+    message(FATAL_ERROR "CUPF_ENABLE_CUSTOM_SOLVER=ON requires WITH_CUDA=ON")
+  endif()
+  set(CLS_BUILD_CUDA_OPS ON CACHE BOOL "" FORCE)
+  set(CLS_BUILD_SCRIPTS OFF CACHE BOOL "" FORCE)
+  set(CLS_BUILD_CUDSS_SCRIPT OFF CACHE BOOL "" FORCE)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../custom_linear_solver"
+                   "${CMAKE_CURRENT_BINARY_DIR}/custom_linear_solver")
+endif()
+
 set(CUPF_NVTX_ENABLED OFF)
 if(ENABLE_NVTX)
   set(_cupf_nvtx_search_paths
@@ -263,6 +275,11 @@ if(WITH_CUDA)
     # Ops — CUDA voltage update
     cpp/src/newton_solver/ops/voltage_update/cuda_voltage_update.cu
   )
+  if(CUPF_ENABLE_CUSTOM_SOLVER)
+    list(APPEND CUPF_CUDA_SOURCES
+      cpp/src/newton_solver/ops/linear_solve/cuda_custom_solver.cpp
+    )
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -300,6 +317,7 @@ target_compile_definitions(cupf PRIVATE CUPF_INTERNAL_TORCH_API)
 target_compile_definitions(cupf PUBLIC
   $<$<BOOL:${WITH_CUDA}>:CUPF_WITH_CUDA>
   $<$<BOOL:${WITH_CUDA}>:CUPF_ENABLE_CUDSS>
+  $<$<BOOL:${CUPF_ENABLE_CUSTOM_SOLVER}>:CUPF_ENABLE_CUSTOM_SOLVER>
   $<$<BOOL:${WITH_CUDA}>:CUPF_CUDSS_REORDERING_ALG=${CUPF_CUDSS_REORDERING_ALG_DEFINE}>
   $<$<BOOL:${CUPF_CUDSS_ENABLE_MT}>:CUPF_CUDSS_ENABLE_MT>
   $<$<BOOL:${CUPF_CUDSS_SET_HOST_NTHREADS}>:CUPF_CUDSS_HOST_NTHREADS=${CUPF_CUDSS_HOST_NTHREADS_DEFINE}>
@@ -317,6 +335,9 @@ if(WITH_CUDA)
     CUDA::cusparse
     ${CUDSS_LIBRARY}
   )
+  if(CUPF_ENABLE_CUSTOM_SOLVER)
+    target_link_libraries(cupf PUBLIC custom_linear_solver_api)
+  endif()
   set_target_properties(cupf PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
 

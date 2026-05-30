@@ -499,6 +499,26 @@ void solve_adjoint_pipeline(CudaFp64Pipeline& p,
         batch_size, pv, n_pv, pq, n_pq, options, cudss_options, "cuda_cudss_fp64", result);
 }
 
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+void solve_adjoint_pipeline(CudaFp64CustomPipeline&,
+                            const double*,
+                            int64_t,
+                            const double*,
+                            int64_t,
+                            int32_t,
+                            const int32_t*,
+                            int32_t,
+                            const int32_t*,
+                            int32_t,
+                            const AdjointOptions&,
+                            const CuDSSOptions&,
+                            AdjointResult&)
+{
+    throw std::runtime_error(
+        "NewtonSolver::solve_adjoint(): custom CUDA FP64 solver does not implement adjoint solve");
+}
+#endif
+
 void solve_adjoint_pipeline(CudaFp32Pipeline& p,
                             const double* grad_va,
                             int64_t grad_va_stride,
