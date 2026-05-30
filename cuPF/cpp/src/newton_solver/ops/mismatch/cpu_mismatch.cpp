@@ -3,17 +3,12 @@
 #include "newton_solver/storage/cpu/cpu_fp64_storage.hpp"
 #include "utils/dump.hpp"
 
-#include <Eigen/Sparse>
-
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
-
-
-namespace {
-using CpuComplexVectorF64 = Eigen::Matrix<std::complex<double>, Eigen::Dynamic, 1>;
-}
 
 
 void CpuMismatchOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
@@ -28,17 +23,16 @@ void CpuMismatchOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
         throw std::runtime_error("CpuMismatchOp::run: Ibus stage has not run");
     }
 
-    Eigen::Map<const CpuComplexVectorF64> V(buf.V.data(), buf.n_bus);
-    Eigen::Map<const CpuComplexVectorF64> Sbus(buf.Sbus.data(), buf.n_bus);
-    Eigen::Map<const CpuComplexVectorF64> Ibus(buf.Ibus.data(), buf.n_bus);
-
-    const CpuComplexVectorF64 mis =
-        V.array() * Ibus.array().conjugate() - Sbus.array();
+    // mis[i] = V[i] * conj(Ibus[i]) - Sbus[i]
+    auto mis_at = [&buf](int32_t i) -> std::complex<double> {
+        const std::size_t idx = static_cast<std::size_t>(i);
+        return buf.V[idx] * std::conj(buf.Ibus[idx]) - buf.Sbus[idx];
+    };
 
     int32_t k = 0;
-    for (int32_t i = 0; i < ctx.n_pv; ++i) buf.F[k++] = mis[ctx.pv[i]].real();
-    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[k++] = mis[ctx.pq[i]].real();
-    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[k++] = mis[ctx.pq[i]].imag();
+    for (int32_t i = 0; i < ctx.n_pv; ++i) buf.F[static_cast<std::size_t>(k++)] = mis_at(ctx.pv[i]).real();
+    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[static_cast<std::size_t>(k++)] = mis_at(ctx.pq[i]).real();
+    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[static_cast<std::size_t>(k++)] = mis_at(ctx.pq[i]).imag();
 }
 
 

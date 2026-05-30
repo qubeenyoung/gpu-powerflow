@@ -35,7 +35,6 @@ endif()
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
-find_package(Eigen3 REQUIRED)
 find_package(spdlog QUIET)
 
 if(CUPF_WITH_TORCH)
@@ -306,7 +305,6 @@ target_include_directories(cupf PRIVATE
 )
 
 target_link_libraries(cupf PUBLIC
-  Eigen3::Eigen
   ${LIB_KLU} ${LIB_BTF} ${LIB_AMD} ${LIB_COLAMD} ${LIB_SSCONFIG}
   $<$<BOOL:${CUPF_SUPERLU_ENABLED}>:${LIB_SUPERLU}>
   $<$<BOOL:${CUPF_LOGGING_ENABLED}>:spdlog::spdlog>

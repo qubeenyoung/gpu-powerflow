@@ -4,15 +4,16 @@
 #include "newton_solver/ops/ibus/compute_ibus.hpp"
 #include "newton_solver/storage/cpu/cpu_fp64_storage.hpp"
 
-#include <Eigen/Sparse>
-
 #include <algorithm>
+#include <cmath>
 #include <complex>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
+#include <vector>
 
 
 namespace {
-using CpuComplexVectorF64 = Eigen::Matrix<std::complex<double>, Eigen::Dynamic, 1>;
 static constexpr std::complex<double> kImaginaryUnit(0.0, 1.0);
 }
 
@@ -28,16 +29,17 @@ void CpuJacobianOpF64::run(CpuFp64Buffers& buf, IterationContext& ctx)
     double* J_values = buf.J.valuePtr();
     std::fill(J_values, J_values + buf.J.nonZeros(), 0.0);
 
-    Eigen::Map<const CpuComplexVectorF64> V(buf.V.data(), buf.n_bus);
-
     if (!buf.has_cached_Ibus) {
         compute_ibus(buf);
     }
 
-    const Eigen::Matrix<double, Eigen::Dynamic, 1> Vm_clamped =
-        V.cwiseAbs().cwiseMax(1e-8);
-    const CpuComplexVectorF64 Vnorm =
-        V.array() / Vm_clamped.cast<std::complex<double>>().array();
+    // Vm_clamped[i] = max(|V[i]|, 1e-8); Vnorm[i] = V[i] / Vm_clamped[i].
+    std::vector<std::complex<double>> Vnorm(static_cast<std::size_t>(buf.n_bus));
+    for (int32_t i = 0; i < buf.n_bus; ++i) {
+        const std::size_t idx = static_cast<std::size_t>(i);
+        const double vm = std::max(std::abs(buf.V[idx]), 1e-8);
+        Vnorm[idx] = buf.V[idx] / vm;
+    }
 
     // 오프 대각 기여
     int32_t t = 0;
@@ -55,7 +57,7 @@ void CpuJacobianOpF64::run(CpuFp64Buffers& buf, IterationContext& ctx)
 
             const std::complex<double> vm =
                 buf.V[static_cast<std::size_t>(y_i)] *
-                std::conj(y * Vnorm[y_j]);
+                std::conj(y * Vnorm[static_cast<std::size_t>(y_j)]);
 
             const int32_t p11 = buf.maps.mapJ11[static_cast<std::size_t>(t)];
             const int32_t p21 = buf.maps.mapJ21[static_cast<std::size_t>(t)];
@@ -77,7 +79,8 @@ void CpuJacobianOpF64::run(CpuFp64Buffers& buf, IterationContext& ctx)
              std::conj(buf.Ibus[static_cast<std::size_t>(bus)]));
 
         const std::complex<double> vm =
-            std::conj(buf.Ibus[static_cast<std::size_t>(bus)]) * Vnorm[bus];
+            std::conj(buf.Ibus[static_cast<std::size_t>(bus)]) *
+            Vnorm[static_cast<std::size_t>(bus)];
 
         const int32_t q11 = buf.maps.diagJ11[static_cast<std::size_t>(bus)];
         const int32_t q21 = buf.maps.diagJ21[static_cast<std::size_t>(bus)];

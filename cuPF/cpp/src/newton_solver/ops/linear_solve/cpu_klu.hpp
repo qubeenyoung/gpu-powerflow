@@ -1,7 +1,5 @@
 #pragma once
 
-#include <Eigen/Sparse>
-
 #include <cstdint>
 
 extern "C" {
@@ -11,8 +9,6 @@ extern "C" {
 struct CpuFp64Buffers;
 struct InitializeContext;
 struct IterationContext;
-
-using CpuJacobianMatrixF64 = Eigen::SparseMatrix<double, Eigen::ColMajor, int32_t>;
 
 
 // ---------------------------------------------------------------------------

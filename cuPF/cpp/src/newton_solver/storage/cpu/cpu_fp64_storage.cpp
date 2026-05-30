@@ -4,6 +4,7 @@
 
 #include "cpu_fp64_storage.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -68,7 +69,7 @@ void CpuFp64Buffers::prepare(const InitializeContext& ctx)
 
     if (has_static_jacobian) {
         {
-            using Triplet = Eigen::Triplet<double, int32_t>;
+            using Triplet = CpuTriplet<double>;
             std::vector<Triplet> trips;
             trips.reserve(static_cast<std::size_t>(ctx.J.nnz));
 
@@ -161,7 +162,7 @@ void CpuFp64Buffers::upload(const SolveContext& ctx)
     }
 
     {
-        using Triplet = Eigen::Triplet<std::complex<double>, int32_t>;
+        using Triplet = CpuTriplet<std::complex<double>>;
         std::vector<Triplet> trips;
         trips.reserve(static_cast<std::size_t>(ybus.nnz));
 

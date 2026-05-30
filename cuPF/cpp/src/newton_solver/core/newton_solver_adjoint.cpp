@@ -3,13 +3,11 @@
 #include "newton_solver/ops/ibus/compute_ibus.hpp"
 #include "newton_solver/ops/jacobian/fill_jacobian.hpp"
 
-#include <Eigen/KLUSupport>
-#include <Eigen/Sparse>
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 
@@ -221,15 +219,38 @@ double relative_residual_norm_csr(const std::vector<int32_t>& row_ptr,
     return static_cast<double>(std::sqrt(residual_sq) / denom);
 }
 
-double relative_residual_norm_eigen(const CpuJacobianMatrixF64& matrix,
-                                    const std::vector<double>& lambda,
-                                    const std::vector<double>& rhs)
+// Compute ||J^T * lambda - rhs||_2 / max(||rhs||_2, 1e-30) directly from the
+// CSC-stored Jacobian. For a CSC matrix, (J^T * lambda)[c] is the dot product
+// of column c of J with lambda restricted to that column's row support:
+//
+//   (J^T * lambda)[c] = sum_i J[i, c] * lambda[i]
+//                     = sum_{k in indptr[c]..indptr[c+1]}
+//                           values[k] * lambda[indices[k]]
+double relative_residual_norm_csc(const CpuJacobianMatrixF64& J,
+                                  const std::vector<double>& lambda,
+                                  const std::vector<double>& rhs)
 {
-    using CpuRealVectorF64 = Eigen::Matrix<double, Eigen::Dynamic, 1>;
-    Eigen::Map<const CpuRealVectorF64> lam(lambda.data(), matrix.cols());
-    Eigen::Map<const CpuRealVectorF64> g(rhs.data(), matrix.rows());
-    const CpuRealVectorF64 residual = matrix * lam - g;
-    return residual.norm() / std::max(g.norm(), 1.0e-30);
+    const int32_t dim = J.cols();
+    const int32_t* col_ptr = J.outerIndexPtr();
+    const int32_t* row_idx = J.innerIndexPtr();
+    const double*  vals    = J.valuePtr();
+
+    long double residual_sq = 0.0L;
+    long double rhs_sq      = 0.0L;
+    for (int32_t c = 0; c < dim; ++c) {
+        long double acc = 0.0L;
+        for (int32_t k = col_ptr[c]; k < col_ptr[c + 1]; ++k) {
+            acc += static_cast<long double>(vals[k]) *
+                   static_cast<long double>(lambda[static_cast<std::size_t>(row_idx[k])]);
+        }
+        const long double r = static_cast<long double>(rhs[static_cast<std::size_t>(c)]);
+        const long double d = acc - r;
+        residual_sq += d * d;
+        rhs_sq      += r * r;
+    }
+    const long double denom = std::sqrt(std::max(rhs_sq, static_cast<long double>(1.0e-60)));
+    const long double denom_floored = std::max(denom, static_cast<long double>(1.0e-30));
+    return static_cast<double>(std::sqrt(residual_sq) / denom_floored);
 }
 
 #ifdef CUPF_WITH_CUDA
@@ -343,9 +364,8 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
     result.adjoint_cache_matches_final_state = p.adjoint_cache.adjoint_cache_matches_final_state;
     result.reused_forward_factorization = p.adjoint_cache.reused_forward_factorization;
     if (options.check_residual) {
-        CpuJacobianMatrixF64 jt = p.buf.J.transpose();
-        jt.makeCompressed();
-        result.jt_residual_norm = relative_residual_norm_eigen(jt, result.lambda, grad_state);
+        result.jt_residual_norm =
+            relative_residual_norm_csc(p.buf.J, result.lambda, grad_state);
     }
     if (options.compute_load_gradients) {
         project_load_gradients(result.lambda, p.buf.n_bus, 1, pv, n_pv, pq, n_pq, result);

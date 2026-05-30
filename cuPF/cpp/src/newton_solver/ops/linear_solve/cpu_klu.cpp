@@ -8,15 +8,9 @@
 #include "newton_solver/storage/cpu/cpu_fp64_storage.hpp"
 #include "utils/dump.hpp"
 
-#include <Eigen/Sparse>
-
 #include <algorithm>
+#include <cstddef>
 #include <stdexcept>
-
-
-namespace {
-using CpuRealVectorF64 = Eigen::Matrix<double, Eigen::Dynamic, 1>;
-}
 
 
 CpuLinearSolveKLU::CpuLinearSolveKLU()
