@@ -1,0 +1,41 @@
+phase,kernel_base,kernel_full,count,sum_ms
+reordering,offsets_par_ker,"void offsets_par_ker<long, long, long, (int)128, (int)1>(T1, T1 *, T2 *, T3 *, int *, int)",78,108.989808
+reordering,offsets_par_ker,"void offsets_par_ker<long, int, int, (int)128, (int)1>(T1, T1 *, T2 *, T3 *, int *, int)",78,108.988523
+reordering,cudss::radix_sort_ker,"void cudss::radix_sort_ker<long, int, double, (int)1, (int)16, (int)4, (int)0>(T2, const T1 *, T2 *, T2 *, T3 *, T3 *, T2, T2)",76,1.85205
+reordering,cudss::radix_sort_ker,"void cudss::radix_sort_ker<long, int, double, (int)1, (int)20, (int)4, (int)0>(T2, const T1 *, T2 *, T2 *, T3 *, T3 *, T2, T2)",2,1.817554
+reordering,cudss::radix_sort_ker,"void cudss::radix_sort_ker<int, int, double, (int)1, (int)16, (int)4, (int)0>(T2, const T1 *, T2 *, T2 *, T3 *, T3 *, T2, T2)",76,1.806483
+reordering,cudss::radix_sort_ker,"void cudss::radix_sort_ker<int, int, double, (int)1, (int)20, (int)4, (int)0>(T2, const T1 *, T2 *, T2 *, T3 *, T3 *, T2, T2)",2,1.763025
+reordering,cudss::trans_columns_ker,"void cudss::trans_columns_ker<int, int, long, int, (int)128>(T4, const T1 *, const T2 *, T3 *, T4 *, T4, T4, int)",78,0.662579
+reordering,cudss::adjncy_ker,"void cudss::adjncy_ker<int, int, long, int, (int)128>(T4, const T1 *, const T2 *, T3 *, T4 *, T3 *, T4 *, T4, T4, int)",78,0.487818
+reordering,cudss::xadj_ker,"void cudss::xadj_ker<int, int, long, int, (int)128>(T4, const T1 *, const T2 *, const T3 *, const T4 *, T3 *, T4, T4, int)",78,0.44974
+reordering,cudss::trans_nnz_per_row_ker,"void cudss::trans_nnz_per_row_ker<int, int, long, int, (int)128>(T4, const T1 *, const T2 *, T3 *, T4, T4, int)",78,0.333287
+reordering,cudss::copy_csr_columns_ker,"void cudss::copy_csr_columns_ker<int, int, (int)128>(long, const T2 *, const T2 *, T1 *, int)",78,0.189894
+symbolic_factorization,offsets_par_ker,"void offsets_par_ker<long, long, int, (int)128, (int)2>(T1, T1 *, T2 *, T3 *, int *, int)",78,116.637636
+symbolic_factorization,offsets_par_ker,"void offsets_par_ker<int, int, int, (int)128, (int)2>(T1, T1 *, T2 *, T3 *, int *, int)",78,112.965147
+symbolic_factorization,offsets_par_ker,"void offsets_par_ker<long, long, long, (int)128, (int)2>(T1, T1 *, T2 *, T3 *, int *, int)",78,111.256456
+symbolic_factorization,offsets_par_ker,"void offsets_par_ker<long, int, int, (int)128, (int)1>(T1, T1 *, T2 *, T3 *, int *, int)",78,105.373386
+symbolic_factorization,cudss::define_superpanel_ker,"void cudss::define_superpanel_ker<long, int, (int)256>(T2, T2, T2, const T1 *, const T2 *, const T2 *, T2, T2 *, T1 *, T2 *, T1 *, T2, T2, T2, double, int, int, int, T2, T1, T2)",78,20.123587
+symbolic_factorization,cudss::csc_rows_ker,"void cudss::csc_rows_ker<long, int, (int)256>(T2, T2, const T2 *, const T2 *, const T1 *, const T1 *, const T2 *, T2 *, T2 *, T2 *, const T2 *, const T2 *, const T2 *, T2, T2, const T2 *, int, T2, const T2 *)",780,12.555126
+symbolic_factorization,cudss::dependency_map_ker,"void cudss::dependency_map_ker<int, long, (int)512, (int)0>(T1, const T2 *, const T1 *, const T1 *, const T1 *, T1 *, T1 *, const T1 *)",780,8.939889
+symbolic_factorization,cudss::map_ker,"void cudss::map_ker<long, int, int, (int)256, (int)0, (int)0>(T2, const T3 *, const T3 *, int, const T1 *, const T2 *, const T2 *, const T2 *, const T2 *, const T2 *, const T1 *, const T1 *, const T1 *, const T2 *, const T2 *, const T2 *, T3 *, T3 *, const T3 *, T2, T3 *, T3 *, T1 *, T1 *, T2, T2, int, int)",78,6.909082
+symbolic_factorization,cudss::nnz_per_col_ker,"void cudss::nnz_per_col_ker<long, int, (int)128, (int)0>(T2, const T1 *, const T2 *, const T2 *, const T2 *, T2 *, T2 *, T2 *, T2 *, T2, T2, T2, int, int, int)",78,6.870712
+symbolic_factorization,cudss::nnz_per_col_ker,"void cudss::nnz_per_col_ker<long, int, (int)128, (int)1>(T2, const T1 *, const T2 *, const T2 *, const T2 *, T2 *, T2 *, T2 *, T2 *, T2, T2, T2, int, int, int)",78,3.242586
+symbolic_factorization,cudss::radix_sort_ker,"void cudss::radix_sort_ker<long, int, int, (int)1, (int)16, (int)4, (int)1>(T2, const T1 *, T2 *, T2 *, T3 *, T3 *, T2, T2)",77,2.859125
+symbolic_factorization,cudss::fwd_bwd_order_step_2_ker,"void cudss::fwd_bwd_order_step_2_ker<long, int, (int)128>(T2, T2, T2 *, T2 *, const T1 *, const T2 *, T2 *, T2 *, const T1 *, const T2 *, T2, T2)",969,2.065783
+symbolic_factorization,cudss::fwd_bwd_order_step_1_ker,"void cudss::fwd_bwd_order_step_1_ker<long, int, (int)128>(T2, T2, T2 *, T2 *, T2 *, T2 *, T2 *, int, int)",930,1.485674
+symbolic_factorization,cudss::radix_sort_ker,"void cudss::radix_sort_ker<long, int, double, (int)1, (int)16, (int)4, (int)0>(T2, const T1 *, T2 *, T2 *, T3 *, T3 *, T2, T2)",76,1.366629
+symbolic_factorization,cudss::offsets_ker,"void cudss::offsets_ker<int, (int)1>(T1, T1 *)",78,1.332871
+symbolic_factorization,cudss::compute_hybrid_minimum_chunk_size_ker,"void cudss::compute_hybrid_minimum_chunk_size_ker<long, int, (int)128>(T2, T2, const T1 *, const T2 *, const T2 *, const T2 *, const T1 *, const T1 *, T2, T1 *, int, T2, const T2 *, int, int)",78,1.278017
+symbolic_factorization,cudss::radix_sort_ker,"void cudss::radix_sort_ker<long, int, double, (int)1, (int)20, (int)4, (int)0>(T2, const T1 *, T2 *, T2 *, T3 *, T3 *, T2, T2)",2,1.112318
+symbolic_factorization,cudss::map_offsets_ker,"void cudss::map_offsets_ker<long, int, int, (int)128, (int)0>(T2, const T3 *, const T3 *, int, const T1 *, const T2 *, const T2 *, const T2 *, const T2 *, const T2 *, const T1 *, const T1 *, const T2 *, const T2 *, const T2 *, T3 *, T3 *, T2, T2, T2, int, int)",78,0.812856
+symbolic_factorization,cudss::modify_update_ker,"void cudss::modify_update_ker<long, int, (int)128>(T2, T2, const T1 *, T2 *, const T2 *, const T2 *, const T1 *, const T1 *, const T1 *, const T2 *, T1 *, int, T2)",78,0.746872
+symbolic_factorization,cudss::updates_offsets_ker,"void cudss::updates_offsets_ker<long, int, (int)128>(T2, const T2 *, const T1 *, const T2 *, const T2 *, T1 *, T1 *, T2, T2)",78,0.558508
+symbolic_factorization,cudss::blocks_ker,"void cudss::blocks_ker<long, int, (int)128>(T2, const T2 *, const T1 *, const T2 *, const T2 *, const T1 *, T2 *, T2 *, T2, T2)",78,0.515856
+symbolic_factorization,cudss::radix_sort_ker,"void cudss::radix_sort_ker<long, int, int, (int)1, (int)20, (int)4, (int)1>(T2, const T1 *, T2 *, T2 *, T3 *, T3 *, T2, T2)",1,0.46478
+symbolic_factorization,cudss::supernode_map_ker,"void cudss::supernode_map_ker<int, (int)1>(T1, const T1 *, const T1 *, T1 *, T1, T1 *, T1, T1 *, T1 *, T1)",78,0.43662
+symbolic_factorization,cudss::count_dep_fwd_bwd_ker,"void cudss::count_dep_fwd_bwd_ker<long, int, (int)128>(T2, T2, T2 *, T2 *, const T1 *, const T2 *)",105,0.384365
+symbolic_factorization,cudss::updates_ker,"void cudss::updates_ker<long, int, (int)128>(T2, const T2 *, const T2 *, T1 *, const T2 *, const T2 *, T1 *, T2 *, T2 *, T2, T2)",78,0.323179
+symbolic_factorization,cudss::supernode_map_offsets_ker,"void cudss::supernode_map_offsets_ker<int, (int)1>(T1, const T1 *, const T1 *, T1 *, T1, T1 *, T1, T1 *, T1 *, T1)",78,0.315782
+symbolic_factorization,cudss::nnz_count_ker,"void cudss::nnz_count_ker<long, int, (int)128>(T2, const T2 *, const T2 *, T1 *, T1 *, T1 *)",78,0.160486
+symbolic_factorization,cudss::supernode_dependant_ker,"void cudss::supernode_dependant_ker<int, (int)128>(T1, T1 *, T1 *, T1 *, T1 *)",78,0.143074
+symbolic_factorization,cudss::set_default_ker,"void cudss::set_default_ker<int, (int)128>(T1, T1 *)",78,0.092452

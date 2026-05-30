@@ -1,0 +1,8 @@
+case,n,nnz,tier,reason
+case5,5,17,tiny,fixed overhead floor
+case118,181,1051,small,small sparse case with flat cuDSS timing
+case1197,2392,14344,medium,first non-trivial sparse case
+case6468rte,12643,87845,medium-large,analyze grows while factor/solve remain mostly flat
+case_ACTIVSg25k,47246,318672,large,large case manageable for ncu
+case_ACTIVSg70k,134104,900558,very-large,near top-end power-grid case
+case_SyntheticUSA,156255,1052085,largest,largest current Jacobian dump

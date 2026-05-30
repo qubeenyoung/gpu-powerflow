@@ -1,0 +1,15 @@
+phase,runtime_api,count,sum_ms
+reordering,cudaLaunchKernel_v7000,702,290.620072
+reordering,cudaMemcpyAsync_v3020,1564,149.115925
+reordering,cudaFree_v3020,78,112.190326
+reordering,cudaMalloc_v3020,546,35.327236
+reordering,cudaStreamSynchronize_v3020,624,1.952418
+reordering,cudaMemsetAsync_v3020,468,1.748238
+reordering,cudaDeviceSynchronize_v3020,78,0.356879
+symbolic_factorization,cudaMemcpyAsync_v3020,2260,489.032922
+symbolic_factorization,cudaLaunchKernel_v7000,5280,171.124652
+symbolic_factorization,cudaFree_v3020,234,5.741821
+symbolic_factorization,cudaMemsetAsync_v3020,1431,5.207161
+symbolic_factorization,cudaMalloc_v3020,234,3.035755
+symbolic_factorization,cudaStreamSynchronize_v3020,1554,1.214382
+symbolic_factorization,cudaDeviceSynchronize_v3020,78,0.146369
