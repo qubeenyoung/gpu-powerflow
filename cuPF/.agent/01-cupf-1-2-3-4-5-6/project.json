@@ -1,0 +1,21 @@
+{
+  "goal_id": "01-cupf-1-2-3-4-5-6",
+  "goal_type": "task",
+  "experiment_branch": "agent/01-cupf-1-2-3-4-5-6",
+  "backstops": {
+    "max_iterations": 1000,
+    "max_wallclock_seconds": 7200,
+    "max_budget_usd": null
+  },
+  "protected_paths": [
+    ".agent",
+    ".agent/**",
+    "tests",
+    "tests/**"
+  ],
+  "goal_prompt_file": "goal.md",
+  "experiment": {
+    "image": "cupf:latest",
+    "build_ctr": "/tmp/cupf_build"
+  }
+}
