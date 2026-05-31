@@ -90,19 +90,6 @@ elseif(ENABLE_LOG)
   message(STATUS "spdlog not found: disabling cuPF logging")
 endif()
 
-set(CUPF_SUPERLU_ENABLED OFF)
-find_path(SUPERLU_INCLUDE_DIR
-  NAMES slu_ddefs.h
-  PATHS /usr/include/superlu /usr/local/include/superlu)
-find_library(LIB_SUPERLU
-  NAMES superlu
-  PATHS /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib)
-if(SUPERLU_INCLUDE_DIR AND LIB_SUPERLU)
-  set(CUPF_SUPERLU_ENABLED ON)
-else()
-  message(STATUS "SuperLU not found: disabling CpuSuperLU kernel variant")
-endif()
-
 # SuiteSparse KLU (required for CPU backend)
 find_path(SUITESPARSE_INCLUDE_DIR
   NAMES klu.h btf.h amd.h colamd.h SuiteSparse_config.h suitesparse_config.h
@@ -310,12 +297,10 @@ endif()
 
 target_include_directories(cupf PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/cpp/src
-  $<$<BOOL:${CUPF_SUPERLU_ENABLED}>:${SUPERLU_INCLUDE_DIR}>
 )
 
 target_link_libraries(cupf PUBLIC
   ${LIB_KLU} ${LIB_BTF} ${LIB_AMD} ${LIB_COLAMD} ${LIB_SSCONFIG}
-  $<$<BOOL:${CUPF_SUPERLU_ENABLED}>:${LIB_SUPERLU}>
   $<$<BOOL:${CUPF_LOGGING_ENABLED}>:spdlog::spdlog>
 )
 
@@ -329,7 +314,6 @@ target_compile_definitions(cupf PUBLIC
   $<$<BOOL:${CUPF_CUDSS_ENABLE_MT}>:CUPF_CUDSS_ENABLE_MT>
   $<$<BOOL:${CUPF_CUDSS_SET_HOST_NTHREADS}>:CUPF_CUDSS_HOST_NTHREADS=${CUPF_CUDSS_HOST_NTHREADS_DEFINE}>
   $<$<BOOL:${CUPF_CUDSS_SET_ND_NLEVELS}>:CUPF_CUDSS_ND_NLEVELS=${CUPF_CUDSS_ND_NLEVELS_DEFINE}>
-  $<$<BOOL:${CUPF_SUPERLU_ENABLED}>:CUPF_WITH_SUPERLU>
   $<$<BOOL:${CUPF_LOGGING_ENABLED}>:CUPF_ENABLE_LOG>
   $<$<BOOL:${ENABLE_DUMP}>:CUPF_ENABLE_DUMP>
   $<$<BOOL:${ENABLE_TIMING}>:CUPF_ENABLE_TIMING>
