@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cuPF experiment metrics record (one iteration of the ledger)",
+  "type": "object",
+  "required": ["schema_version", "run_id", "iteration", "goal", "metrics", "success"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "description": "e.g. 20260531T030000Z-iter1"},
+    "iteration": {"type": "integer", "minimum": 0},
+    "timestamp_utc": {"type": "string"},
+    "goal": {"type": "string"},
+    "git": {
+      "type": "object",
+      "properties": {
+        "branch": {"type": "string"},
+        "commit": {"type": ["string", "null"]}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["cpu_eigen_ref_files", "configure_ok", "build_ok", "test_ok"],
+      "properties": {
+        "cpu_eigen_ref_files": {
+          "type": "integer", "minimum": 0,
+          "description": "PRIMARY objective: CPU-compiled files still including <Eigen/...>; target 0"
+        },
+        "cmake_eigen_refs": {
+          "type": "integer", "minimum": 0,
+          "description": "find_package(Eigen3)/Eigen3::Eigen references left in CMakeLists; target 0"
+        },
+        "configure_ok": {"type": "boolean"},
+        "build_ok": {"type": "boolean"},
+        "test_ok": {"type": "boolean"},
+        "tests_passed": {"type": "integer", "minimum": 0},
+        "tests_total": {"type": "integer", "minimum": 0},
+        "build_seconds": {"type": "integer", "minimum": 0}
+      }
+    },
+    "success": {
+      "type": "boolean",
+      "description": "stop condition: cpu_eigen_ref_files==0 && cmake_eigen_refs==0 && build_ok && test_ok"
+    },
+    "notes": {"type": "string"}
+  }
+}
