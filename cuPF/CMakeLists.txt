@@ -174,10 +174,15 @@ if(WITH_CUDA)
   endif()
   message(STATUS "cuDSS ND_NLEVELS: ${CUPF_CUDSS_ND_NLEVELS}")
 
+  # The Debian libcudss0-dev-cuda-12 package installs versioned subdirectories
+  # (/usr/include/libcudss/12, /usr/lib/x86_64-linux-gnu/libcudss/12), which
+  # differ from the flat /usr/include layout of the pip nvidia-cudss wheel, so
+  # search both.
   find_path(CUDSS_INCLUDE_DIR
     NAMES cuDSS.h cudss.h
     HINTS
       /usr/include
+      /usr/include/libcudss/12
       /usr/local/include
       /usr/local/cuda/include
       $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/cu12/include)
@@ -186,6 +191,7 @@ if(WITH_CUDA)
     HINTS
       /usr/lib
       /usr/lib/x86_64-linux-gnu
+      /usr/lib/x86_64-linux-gnu/libcudss/12
       /usr/local/lib
       $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/cu12/lib)
 
