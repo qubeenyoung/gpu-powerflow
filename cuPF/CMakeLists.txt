@@ -7,6 +7,7 @@ option(WITH_CUDA             "Build the CUDA backend"           OFF)
 option(BUILD_PYTHON_BINDINGS "Build the pybind11 Python module" OFF)
 option(CUPF_WITH_TORCH      "Build torch::Tensor zero-copy Python extension APIs" OFF)
 option(BUILD_BENCHMARKS      "Build benchmark executables"      OFF)
+option(BUILD_EVALUATORS      "Build cuPF evaluation executables" OFF)
 option(ENABLE_LOG            "Enable spdlog logging when available" ON)
 option(ENABLE_DUMP           "Enable debug dump utilities"      OFF)
 option(ENABLE_TIMING         "Enable ScopedTimer timing collection" OFF)
@@ -397,6 +398,20 @@ if(BUILD_BENCHMARKS)
       "Set CUPF_BENCHMARKS_DIR to the benchmarks directory.")
   endif()
   add_subdirectory("${CUPF_BENCHMARKS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/benchmarks")
+endif()
+
+# ---------------------------------------------------------------------------
+# Evaluators
+# ---------------------------------------------------------------------------
+if(BUILD_EVALUATORS)
+  add_executable(cupf_cpp_evaluate
+    evaluator/cpp/cupf_cpp_evaluate.cpp
+    tests/dump_case_loader.cpp
+  )
+  target_link_libraries(cupf_cpp_evaluate PRIVATE cupf)
+  target_include_directories(cupf_cpp_evaluate PRIVATE
+    ${PROJECT_SOURCE_DIR}/cpp/inc
+    ${PROJECT_SOURCE_DIR}/tests)
 endif()
 
 # ---------------------------------------------------------------------------
