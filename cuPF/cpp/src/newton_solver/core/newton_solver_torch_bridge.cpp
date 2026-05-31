@@ -25,11 +25,11 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end)
 }
 
 #ifdef CUPF_WITH_CUDA
-int32_t cuda_batch_size(const CudaFp64Buffers&) { return 1; }
-int32_t cuda_batch_size(const CudaFp32Buffers& b) { return b.batch_size; }
-int32_t cuda_batch_size(const CudaMixedBuffers& b) { return b.batch_size; }
+int32_t cuda_batch_size(const CudaFp64Storage&) { return 1; }
+int32_t cuda_batch_size(const CudaFp32Storage& b) { return b.batch_size; }
+int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
 
-void ensure_cuda_tensor_batch(CudaFp64Buffers& buf, int32_t batch_size)
+void ensure_cuda_tensor_batch(CudaFp64Storage& buf, int32_t batch_size)
 {
     if (batch_size != 1) {
         throw std::runtime_error(
@@ -53,7 +53,7 @@ void ensure_cuda_tensor_batch(CudaFp64Buffers& buf, int32_t batch_size)
     ensure_size(buf.d_Ibus_im, bus_count);
 }
 
-void ensure_cuda_tensor_batch(CudaFp32Buffers& buf, int32_t batch_size)
+void ensure_cuda_tensor_batch(CudaFp32Storage& buf, int32_t batch_size)
 {
     if (batch_size <= 0) {
         throw std::invalid_argument("torch extension path requires a positive batch size");
@@ -83,7 +83,7 @@ void ensure_cuda_tensor_batch(CudaFp32Buffers& buf, int32_t batch_size)
     ensure_size(buf.d_Ibus_im, bus_count);
 }
 
-void ensure_cuda_tensor_batch(CudaMixedBuffers& buf, int32_t batch_size)
+void ensure_cuda_tensor_batch(CudaMixedStorage& buf, int32_t batch_size)
 {
     if (batch_size <= 0) {
         throw std::invalid_argument("torch extension path requires a positive batch size");

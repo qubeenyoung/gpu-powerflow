@@ -11,7 +11,7 @@
 #include <stdexcept>
 
 
-void CpuMismatchOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
+void CpuMismatchOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     if (buf.n_bus <= 0 || buf.dimF <= 0) {
         throw std::runtime_error("CpuMismatchOp::run: buffers are not prepared");
@@ -36,7 +36,7 @@ void CpuMismatchOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
 }
 
 
-void CpuMismatchNormOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
+void CpuMismatchNormOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     if (buf.dimF <= 0 || buf.F.empty()) {
         throw std::runtime_error("CpuMismatchNormOp::run: buffers are not prepared");

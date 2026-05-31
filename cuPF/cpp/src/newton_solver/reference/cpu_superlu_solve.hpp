@@ -3,7 +3,7 @@
 #include "newton_solver/core/solver_contexts.hpp"
 
 
-struct CpuFp64Buffers;
+struct CpuFp64Storage;
 
 
 // ---------------------------------------------------------------------------
@@ -13,8 +13,8 @@ struct CpuFp64Buffers;
 // symbolic ordering + numeric factorization + triangular solve every call.
 // ---------------------------------------------------------------------------
 struct CpuLinearSolveSuperLU {
-    void initialize(CpuFp64Buffers& buf, const InitializeContext& ctx);
-    void prepare_rhs(CpuFp64Buffers& buf, IterationContext& ctx);
-    void factorize(CpuFp64Buffers& buf, IterationContext& ctx);
-    void solve(CpuFp64Buffers& buf, IterationContext& ctx);
+    void initialize(CpuFp64Storage& buf, const InitializeContext& ctx);
+    void prepare_rhs(CpuFp64Storage& buf, IterationContext& ctx);
+    void factorize(CpuFp64Storage& buf, IterationContext& ctx);
+    void solve(CpuFp64Storage& buf, IterationContext& ctx);
 };

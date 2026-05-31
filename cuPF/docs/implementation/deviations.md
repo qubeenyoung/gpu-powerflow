@@ -245,7 +245,7 @@
 - 계획:
   mixed profile의 `Ybus`도 FP64로 유지한다.
 - 실제 구현:
-  `CudaMixedBuffers::d_Ybus_re/im`은 FP64 buffer로 유지하고, mixed `Ibus` kernel은
+  `CudaMixedStorage::d_Ybus_re/im`은 FP64 buffer로 유지하고, mixed `Ibus` kernel은
   `Ybus64 * V64 -> Ibus64`를 계산한다. Jacobian fill은 `JScalar`와 `YbusScalar`를 분리해
   mixed에서 `Ybus64/V64/Ibus64`를 읽은 뒤 FP32 산술로 `J32`를 쓴다.
 - 차이:

@@ -29,7 +29,7 @@
 // CpuFp64Pipeline
 // ---------------------------------------------------------------------------
 struct CpuFp64Pipeline {
-    CpuFp64Buffers    buf;
+    CpuFp64Storage    buf;
     CpuLinearSolveKLU linear_solve;
     AdjointCache      adjoint_cache;
 
@@ -67,8 +67,8 @@ struct CpuFp64Pipeline {
 // CudaFp64Pipeline
 // ---------------------------------------------------------------------------
 struct CudaFp64Pipeline {
-    CudaFp64Buffers                                   buf;
-    CudaLinearSolveCuDSS<double, CudaFp64Buffers>     linear_solve;
+    CudaFp64Storage                                   buf;
+    CudaLinearSolveCuDSS<double, CudaFp64Storage>     linear_solve;
     AdjointCache                                      adjoint_cache;
 
     explicit CudaFp64Pipeline(CuDSSOptions opts = {}) : linear_solve(opts) {}
@@ -88,9 +88,9 @@ struct CudaFp64Pipeline {
         result.V = std::move(single.V);
     }
 
-    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp64Buffers>{}.run(buf, ctx); }
-    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaFp64Buffers>{}.run(buf, ctx); }
-    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaFp64Buffers>{}.run(buf, ctx); }
+    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp64Storage>{}.run(buf, ctx); }
+    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaFp64Storage>{}.run(buf, ctx); }
+    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaFp64Storage>{}.run(buf, ctx); }
     void jacobian(IterationContext& ctx)      { CudaJacobianOp<double>{}.run(buf, ctx); }
     void prepare_rhs(IterationContext& ctx)   { linear_solve.prepare_rhs(buf, ctx); }
     void factorize(IterationContext& ctx)     { linear_solve.factorize(buf, ctx); }
@@ -106,7 +106,7 @@ struct CudaFp64Pipeline {
 // CudaFp64CustomPipeline
 // ---------------------------------------------------------------------------
 struct CudaFp64CustomPipeline {
-    CudaFp64Buffers              buf;
+    CudaFp64Storage              buf;
     CudaLinearSolveCustomFp64    linear_solve;
     AdjointCache                 adjoint_cache;
 
@@ -125,9 +125,9 @@ struct CudaFp64CustomPipeline {
         result.V = std::move(single.V);
     }
 
-    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp64Buffers>{}.run(buf, ctx); }
-    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaFp64Buffers>{}.run(buf, ctx); }
-    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaFp64Buffers>{}.run(buf, ctx); }
+    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp64Storage>{}.run(buf, ctx); }
+    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaFp64Storage>{}.run(buf, ctx); }
+    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaFp64Storage>{}.run(buf, ctx); }
     void jacobian(IterationContext& ctx)      { CudaJacobianOp<double>{}.run(buf, ctx); }
     void prepare_rhs(IterationContext& ctx)   { linear_solve.prepare_rhs(buf, ctx); }
     void factorize(IterationContext& ctx)     { linear_solve.factorize(buf, ctx); }
@@ -143,8 +143,8 @@ struct CudaFp64CustomPipeline {
 // CudaFp32Pipeline
 // ---------------------------------------------------------------------------
 struct CudaFp32Pipeline {
-    CudaFp32Buffers                                   buf;
-    CudaLinearSolveCuDSS<float, CudaFp32Buffers>      linear_solve;
+    CudaFp32Storage                                   buf;
+    CudaLinearSolveCuDSS<float, CudaFp32Storage>      linear_solve;
     AdjointCache                                      adjoint_cache;
 
     explicit CudaFp32Pipeline(CuDSSOptions opts = {}) : linear_solve(opts) {}
@@ -162,9 +162,9 @@ struct CudaFp32Pipeline {
         buf.download_batch(result);
     }
 
-    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp32Buffers>{}.run(buf, ctx); }
-    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaFp32Buffers>{}.run(buf, ctx); }
-    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaFp32Buffers>{}.run(buf, ctx); }
+    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp32Storage>{}.run(buf, ctx); }
+    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaFp32Storage>{}.run(buf, ctx); }
+    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaFp32Storage>{}.run(buf, ctx); }
     void jacobian(IterationContext& ctx)      { CudaJacobianOp<float>{}.run(buf, ctx); }
     void prepare_rhs(IterationContext& ctx)   { linear_solve.prepare_rhs(buf, ctx); }
     void factorize(IterationContext& ctx)     { linear_solve.factorize(buf, ctx); }
@@ -179,8 +179,8 @@ struct CudaFp32Pipeline {
 // CudaMixedPipeline
 // ---------------------------------------------------------------------------
 struct CudaMixedPipeline {
-    CudaMixedBuffers                                   buf;
-    CudaLinearSolveCuDSS<float, CudaMixedBuffers>      linear_solve;
+    CudaMixedStorage                                   buf;
+    CudaLinearSolveCuDSS<float, CudaMixedStorage>      linear_solve;
     AdjointCache                                       adjoint_cache;
 
     explicit CudaMixedPipeline(CuDSSOptions opts = {}) : linear_solve(opts) {}
@@ -198,9 +198,9 @@ struct CudaMixedPipeline {
         buf.download_batch(result);
     }
 
-    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaMixedBuffers>{}.run(buf, ctx); }
-    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaMixedBuffers>{}.run(buf, ctx); }
-    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaMixedBuffers>{}.run(buf, ctx); }
+    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaMixedStorage>{}.run(buf, ctx); }
+    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaMixedStorage>{}.run(buf, ctx); }
+    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaMixedStorage>{}.run(buf, ctx); }
     void jacobian(IterationContext& ctx)      { CudaJacobianOp<float>{}.run(buf, ctx); }
     void prepare_rhs(IterationContext& ctx)   { linear_solve.prepare_rhs(buf, ctx); }
     void factorize(IterationContext& ctx)     { linear_solve.factorize(buf, ctx); }

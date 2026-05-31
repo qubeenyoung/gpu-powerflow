@@ -11,13 +11,13 @@
 
 
 // ---------------------------------------------------------------------------
-// CudaFp32Buffers: FP32 CUDA path device buffers.
+// CudaFp32Storage: FP32 CUDA path device buffers.
 //
 // Public inputs are still the existing FP64 API, but upload casts all numeric
 // device-side state to float. All GPU numeric buffers/operators for this path
 // stay FP32.
 // ---------------------------------------------------------------------------
-struct CudaFp32Buffers {
+struct CudaFp32Storage {
     void prepare(const InitializeContext& ctx);
     void upload(const SolveContext& ctx);
     void download(NRResult& result) const;
@@ -53,7 +53,7 @@ struct CudaFp32Buffers {
     DeviceBuffer<float>   d_Ybus_im;
     DeviceBuffer<int32_t> d_Ybus_indptr;
     DeviceBuffer<int32_t> d_Ybus_indices;
-    DeviceBuffer<int32_t> d_Y_row;
+    DeviceBuffer<int32_t> d_Ybus_row;
 
     DeviceBuffer<float>   d_J_values;
     DeviceBuffer<int32_t> d_J_row_ptr;

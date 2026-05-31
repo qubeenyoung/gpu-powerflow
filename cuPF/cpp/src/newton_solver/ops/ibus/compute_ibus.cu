@@ -70,7 +70,7 @@ __global__ void compute_ibus_kernel(
 }  // namespace
 
 
-void launch_compute_ibus(CudaFp64Buffers& buf)
+void launch_compute_ibus(CudaFp64Storage& buf)
 {
     if (buf.n_bus <= 0 || buf.d_Ybus_re.empty()) {
         throw std::runtime_error("launch_compute_ibus: buffers are not prepared");
@@ -97,7 +97,7 @@ void launch_compute_ibus(CudaFp64Buffers& buf)
 }
 
 
-void launch_compute_ibus(CudaFp32Buffers& buf)
+void launch_compute_ibus(CudaFp32Storage& buf)
 {
     if (buf.n_bus <= 0 || buf.nnz_ybus <= 0 || buf.batch_size <= 0) {
         throw std::runtime_error("launch_compute_ibus: buffers are not prepared");
@@ -127,7 +127,7 @@ void launch_compute_ibus(CudaFp32Buffers& buf)
 }
 
 
-void launch_compute_ibus(CudaMixedBuffers& buf)
+void launch_compute_ibus(CudaMixedStorage& buf)
 {
     if (buf.n_bus <= 0 || buf.nnz_ybus <= 0 || buf.batch_size <= 0) {
         throw std::runtime_error("launch_compute_ibus: buffers are not prepared");
@@ -158,21 +158,21 @@ void launch_compute_ibus(CudaMixedBuffers& buf)
 
 
 template <>
-void CudaIbusOp<CudaFp64Buffers>::run(CudaFp64Buffers& buf, IterationContext& ctx)
+void CudaIbusOp<CudaFp64Storage>::run(CudaFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
     launch_compute_ibus(buf);
 }
 
 template <>
-void CudaIbusOp<CudaFp32Buffers>::run(CudaFp32Buffers& buf, IterationContext& ctx)
+void CudaIbusOp<CudaFp32Storage>::run(CudaFp32Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
     launch_compute_ibus(buf);
 }
 
 template <>
-void CudaIbusOp<CudaMixedBuffers>::run(CudaMixedBuffers& buf, IterationContext& ctx)
+void CudaIbusOp<CudaMixedStorage>::run(CudaMixedStorage& buf, IterationContext& ctx)
 {
     (void)ctx;
     launch_compute_ibus(buf);

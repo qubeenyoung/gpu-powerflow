@@ -68,7 +68,7 @@ __global__ void compute_mismatch_from_ibus_kernel(
 }  // namespace
 
 
-void launch_compute_mismatch_from_ibus(CudaFp64Buffers& storage)
+void launch_compute_mismatch_from_ibus(CudaFp64Storage& storage)
 {
     if (storage.n_bus <= 0 || storage.dimF <= 0) {
         throw std::runtime_error("launch_compute_mismatch_from_ibus: storage is not prepared");
@@ -98,7 +98,7 @@ void launch_compute_mismatch_from_ibus(CudaFp64Buffers& storage)
 }
 
 
-void launch_compute_mismatch_from_ibus(CudaFp32Buffers& storage)
+void launch_compute_mismatch_from_ibus(CudaFp32Storage& storage)
 {
     if (storage.n_bus <= 0 || storage.dimF <= 0 || storage.batch_size <= 0) {
         throw std::runtime_error("launch_compute_mismatch_from_ibus: storage is not prepared");
@@ -128,7 +128,7 @@ void launch_compute_mismatch_from_ibus(CudaFp32Buffers& storage)
 }
 
 
-void launch_compute_mismatch_from_ibus(CudaMixedBuffers& storage)
+void launch_compute_mismatch_from_ibus(CudaMixedStorage& storage)
 {
     if (storage.n_bus <= 0 || storage.dimF <= 0 || storage.batch_size <= 0) {
         throw std::runtime_error("launch_compute_mismatch_from_ibus: storage is not prepared");

@@ -88,7 +88,7 @@ void upload_ybus_components(DeviceBuffer<DeviceScalar>& dst_re,
 }  // namespace
 
 
-void CudaMixedBuffers::prepare(const InitializeContext& ctx)
+void CudaMixedStorage::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr,  "InitializeContext.ybus.indptr",  ctx.ybus.rows + 1);
     require_pointer(ctx.ybus.indices, "InitializeContext.ybus.indices", ctx.ybus.nnz);
@@ -113,7 +113,7 @@ void CudaMixedBuffers::prepare(const InitializeContext& ctx)
     d_Ybus_indices.assign(ctx.ybus.indices, static_cast<std::size_t>(nnz_ybus));
 
     const std::vector<int32_t> h_y_row = build_ybus_row_index(ctx.ybus);
-    d_Y_row.assign(h_y_row.data(), h_y_row.size());
+    d_Ybus_row.assign(h_y_row.data(), h_y_row.size());
 
     d_J_values.resize(nnz_J);
     d_J_row_ptr.assign(ctx.J.row_ptr.data(), static_cast<std::size_t>(ctx.J.dim + 1));
@@ -159,15 +159,15 @@ void CudaMixedBuffers::prepare(const InitializeContext& ctx)
 }
 
 
-void CudaMixedBuffers::upload(const SolveContext& ctx)
+void CudaMixedStorage::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
-        throw std::invalid_argument("CudaMixedBuffers::upload: solve context is incomplete");
+        throw std::invalid_argument("CudaMixedStorage::upload: solve context is incomplete");
     }
 
     const YbusView& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus || ybus.nnz != nnz_ybus) {
-        throw std::runtime_error("CudaMixedBuffers::upload: Ybus dimensions do not match initialize()");
+        throw std::runtime_error("CudaMixedStorage::upload: Ybus dimensions do not match initialize()");
     }
 
     require_pointer(ybus.data, "SolveContext.ybus->data", ybus.nnz);
@@ -175,10 +175,10 @@ void CudaMixedBuffers::upload(const SolveContext& ctx)
     require_pointer(ctx.V0,    "SolveContext.V0",         n_bus);
 
     if (ctx.batch_size <= 0) {
-        throw std::invalid_argument("CudaMixedBuffers::upload: batch_size must be positive");
+        throw std::invalid_argument("CudaMixedStorage::upload: batch_size must be positive");
     }
     if (ctx.sbus_stride < n_bus || ctx.V0_stride < n_bus) {
-        throw std::invalid_argument("CudaMixedBuffers::upload: batch strides must be at least n_bus");
+        throw std::invalid_argument("CudaMixedStorage::upload: batch strides must be at least n_bus");
     }
 
     batch_size = ctx.batch_size;
@@ -239,10 +239,10 @@ void CudaMixedBuffers::upload(const SolveContext& ctx)
 }
 
 
-void CudaMixedBuffers::download(NRResult& result) const
+void CudaMixedStorage::download(NRResult& result) const
 {
     if (batch_size != 1) {
-        throw std::runtime_error("CudaMixedBuffers::download: use download_batch for batch_size > 1");
+        throw std::runtime_error("CudaMixedStorage::download: use download_batch for batch_size > 1");
     }
 
     std::vector<double> h_Va(static_cast<std::size_t>(n_bus));
@@ -261,7 +261,7 @@ void CudaMixedBuffers::download(NRResult& result) const
 }
 
 
-void CudaMixedBuffers::download_batch(NRBatchResult& result) const
+void CudaMixedStorage::download_batch(NRBatchResult& result) const
 {
     const std::size_t total = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
     std::vector<double> h_Va(total);

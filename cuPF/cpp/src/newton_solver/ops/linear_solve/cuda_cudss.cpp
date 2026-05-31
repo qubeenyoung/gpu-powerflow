@@ -3,8 +3,8 @@
 //
 // cuDSS sparse direct linear solver. T selects precision:
 //   - double: RHS = buf.d_F directly
-//   - float + CudaFp32Buffers: RHS = buf.d_F directly
-//   - float + CudaMixedBuffers: RHS is a cast copy of FP64 buf.d_F
+//   - float + CudaFp32Storage: RHS = buf.d_F directly
+//   - float + CudaMixedStorage: RHS is a cast copy of FP64 buf.d_F
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
@@ -107,16 +107,16 @@ void set_cudss_stream(cudssHandle_t handle)
 }
 #endif
 
-int32_t buf_batch_size(const CudaFp64Buffers&)         { return 1; }
-int32_t buf_batch_size(const CudaFp32Buffers& b)       { return b.batch_size; }
-int32_t buf_batch_size(const CudaMixedBuffers& b)       { return b.batch_size; }
+int32_t buf_batch_size(const CudaFp64Storage&)         { return 1; }
+int32_t buf_batch_size(const CudaFp32Storage& b)       { return b.batch_size; }
+int32_t buf_batch_size(const CudaMixedStorage& b)       { return b.batch_size; }
 
-int32_t buf_nnz_j(const CudaFp64Buffers& b)
+int32_t buf_nnz_j(const CudaFp64Storage& b)
 {
     return static_cast<int32_t>(b.d_J_values.size());
 }
-int32_t buf_nnz_j(const CudaFp32Buffers& b)            { return b.nnz_J; }
-int32_t buf_nnz_j(const CudaMixedBuffers& b)            { return b.nnz_J; }
+int32_t buf_nnz_j(const CudaFp32Storage& b)            { return b.nnz_J; }
+int32_t buf_nnz_j(const CudaMixedStorage& b)            { return b.nnz_J; }
 
 }  // namespace
 
@@ -203,7 +203,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_rhs(Buffers& buf, IterationContex
 #ifndef CUPF_ENABLE_CUDSS
     throw std::runtime_error("CudaLinearSolveCuDSS::prepare_rhs requires a cuDSS-enabled build");
 #else
-    if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedBuffers>) {
+    if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedStorage>) {
         ensure_descriptors(buf);
         const int32_t rhs_count = buf_batch_size(buf) * buf.dimF;
         launch_prepare_rhs(buf.d_F.data(), state_->rhs.data(), rhs_count);
@@ -467,7 +467,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_descriptors(Buffers& buf)
 
     cupf_cudss_detail::configure_solver(state_->config, cudss_options_, batch_size);
 
-    if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedBuffers>) {
+    if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedStorage>) {
         state_->rhs.resize(static_cast<std::size_t>(batch_size) *
                            static_cast<std::size_t>(dimF));
     }
@@ -571,7 +571,7 @@ T* CudaLinearSolveCuDSS<T, Buffers>::rhs_data(Buffers& buf)
 {
     if constexpr (std::is_same_v<T, double>) {
         return buf.d_F.data();
-    } else if constexpr (std::is_same_v<Buffers, CudaMixedBuffers>) {
+    } else if constexpr (std::is_same_v<Buffers, CudaMixedStorage>) {
         return state_->rhs.data();
     } else {
         return buf.d_F.data();
@@ -579,8 +579,8 @@ T* CudaLinearSolveCuDSS<T, Buffers>::rhs_data(Buffers& buf)
 }
 
 
-template struct CudaLinearSolveCuDSS<double, CudaFp64Buffers>;
-template struct CudaLinearSolveCuDSS<float,  CudaFp32Buffers>;
-template struct CudaLinearSolveCuDSS<float,  CudaMixedBuffers>;
+template struct CudaLinearSolveCuDSS<double, CudaFp64Storage>;
+template struct CudaLinearSolveCuDSS<float,  CudaFp32Storage>;
+template struct CudaLinearSolveCuDSS<float,  CudaMixedStorage>;
 
 #endif  // CUPF_WITH_CUDA

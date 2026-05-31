@@ -6,7 +6,7 @@
 #include <stdexcept>
 
 
-void CpuVoltageUpdateOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
+void CpuVoltageUpdateOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     if (buf.n_bus <= 0 || buf.dimF <= 0) {
         throw std::runtime_error("CpuVoltageUpdateOp::run: buffers are not prepared");

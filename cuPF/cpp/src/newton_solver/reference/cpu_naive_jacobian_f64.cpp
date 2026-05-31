@@ -49,7 +49,7 @@ constexpr std::complex<double> kImaginaryUnit(0.0, 1.0);
 }  // namespace
 
 
-void CpuNaiveJacobianOpF64::run(CpuFp64Buffers& storage_, IterationContext& ctx)
+void CpuNaiveJacobianOpF64::run(CpuFp64Storage& storage_, IterationContext& ctx)
 {
     if (storage_.n_bus <= 0 || storage_.dimF <= 0) {
         throw std::runtime_error("CpuNaiveJacobianOpF64::run: storage is not prepared");

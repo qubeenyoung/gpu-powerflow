@@ -55,7 +55,7 @@ __global__ void reduce_mismatch_norm_kernel(
 }  // namespace
 
 
-void launch_reduce_mismatch_norm(CudaFp64Buffers& storage)
+void launch_reduce_mismatch_norm(CudaFp64Storage& storage)
 {
     if (storage.dimF <= 0) {
         throw std::runtime_error("launch_reduce_mismatch_norm: storage is not prepared");
@@ -74,7 +74,7 @@ void launch_reduce_mismatch_norm(CudaFp64Buffers& storage)
 }
 
 
-void launch_reduce_mismatch_norm(CudaFp32Buffers& storage)
+void launch_reduce_mismatch_norm(CudaFp32Storage& storage)
 {
     if (storage.dimF <= 0 || storage.batch_size <= 0) {
         throw std::runtime_error("launch_reduce_mismatch_norm: storage is not prepared");
@@ -93,7 +93,7 @@ void launch_reduce_mismatch_norm(CudaFp32Buffers& storage)
 }
 
 
-void launch_reduce_mismatch_norm(CudaMixedBuffers& storage)
+void launch_reduce_mismatch_norm(CudaMixedStorage& storage)
 {
     if (storage.dimF <= 0 || storage.batch_size <= 0) {
         throw std::runtime_error("launch_reduce_mismatch_norm: storage is not prepared");

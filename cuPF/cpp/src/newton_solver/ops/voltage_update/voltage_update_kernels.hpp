@@ -80,7 +80,7 @@ __global__ void reconstruct_voltage_kernel(
 }
 
 template <typename StateScalar, typename DxScalar>
-void launch_voltage_update_state(
+void launch_apply_voltage_update(
     int32_t batch_size,
     int32_t n_bus,
     int32_t dimF,
@@ -94,7 +94,7 @@ void launch_voltage_update_state(
 {
     if (batch_size <= 0 || n_bus <= 0 || dimF <= 0 || n_pv < 0 || n_pq < 0 ||
         dimF != n_pv + 2 * n_pq) {
-        throw std::runtime_error("launch_voltage_update_state: invalid dimensions");
+        throw std::runtime_error("launch_apply_voltage_update: invalid dimensions");
     }
 
     const int32_t total_dx = batch_size * dimF;

@@ -216,17 +216,17 @@ void dump_cuda_jacobian_if_enabled(const char* name,
 }  // namespace
 
 
-void CudaJacobianOp<double>::run(CudaFp64Buffers& buf, IterationContext& ctx)
+void CudaJacobianOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
 {
     launch_fill_jacobian_gpu<double, double, double, double>(
-        static_cast<int32_t>(buf.d_Y_row.size()),
+        static_cast<int32_t>(buf.d_Ybus_row.size()),
         static_cast<int32_t>(buf.d_J_values.size()),
         buf.n_bus,
         1,
         false,
         false,
         buf.d_Ybus_re, buf.d_Ybus_im,
-        buf.d_Y_row, buf.d_Ybus_indices, buf.d_Ybus_indptr,
+        buf.d_Ybus_row, buf.d_Ybus_indices, buf.d_Ybus_indptr,
         buf.d_V_re, buf.d_V_im, buf.d_Vm,
         nullptr, nullptr,
         buf.d_mapJ11, buf.d_mapJ21, buf.d_mapJ12, buf.d_mapJ22,
@@ -242,14 +242,14 @@ void CudaJacobianOp<double>::run(CudaFp64Buffers& buf, IterationContext& ctx)
 }
 
 
-void CudaJacobianOp<float>::run(CudaMixedBuffers& buf, IterationContext& ctx)
+void CudaJacobianOp<float>::run(CudaMixedStorage& buf, IterationContext& ctx)
 {
     launch_fill_jacobian_gpu<float, double, double, double>(
         buf.nnz_ybus, buf.nnz_J, buf.n_bus, buf.batch_size,
         buf.ybus_values_batched,
         true,
         buf.d_Ybus_re, buf.d_Ybus_im,
-        buf.d_Y_row, buf.d_Ybus_indices, buf.d_Ybus_indptr,
+        buf.d_Ybus_row, buf.d_Ybus_indices, buf.d_Ybus_indptr,
         buf.d_V_re, buf.d_V_im, buf.d_Vm,
         &buf.d_Ibus_re, &buf.d_Ibus_im,
         buf.d_mapJ11, buf.d_mapJ21, buf.d_mapJ12, buf.d_mapJ22,
@@ -265,14 +265,14 @@ void CudaJacobianOp<float>::run(CudaMixedBuffers& buf, IterationContext& ctx)
 }
 
 
-void CudaJacobianOp<float>::run(CudaFp32Buffers& buf, IterationContext& ctx)
+void CudaJacobianOp<float>::run(CudaFp32Storage& buf, IterationContext& ctx)
 {
     launch_fill_jacobian_gpu<float, float, float, float>(
         buf.nnz_ybus, buf.nnz_J, buf.n_bus, buf.batch_size,
         buf.ybus_values_batched,
         true,
         buf.d_Ybus_re, buf.d_Ybus_im,
-        buf.d_Y_row, buf.d_Ybus_indices, buf.d_Ybus_indptr,
+        buf.d_Ybus_row, buf.d_Ybus_indices, buf.d_Ybus_indptr,
         buf.d_V_re, buf.d_V_im, buf.d_Vm,
         &buf.d_Ibus_re, &buf.d_Ibus_im,
         buf.d_mapJ11, buf.d_mapJ21, buf.d_mapJ12, buf.d_mapJ22,

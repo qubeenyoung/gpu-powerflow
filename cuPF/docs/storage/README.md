@@ -94,7 +94,7 @@ SolveScalar    = double
 | `d_Ybus_re/im` | `DeviceBuffer<double>` | [nnz_Y] | Ybus 실수·허수부 |
 | `d_Ybus_indptr` | `DeviceBuffer<int32_t>` | [n_bus+1] | Ybus CSR 행 포인터 |
 | `d_Ybus_indices` | `DeviceBuffer<int32_t>` | [nnz_Y] | Ybus CSR 열 인덱스 |
-| `d_Y_row` | `DeviceBuffer<int32_t>` | [nnz_Y] | Ybus CSR 행 번호 (edge kernel용) |
+| `d_Ybus_row` | `DeviceBuffer<int32_t>` | [nnz_Y] | Ybus CSR 행 번호 (edge kernel용) |
 | `d_J_values` | `DeviceBuffer<double>` | [nnz_J] | Jacobian 값 |
 | `d_J_row_ptr/col_idx` | `DeviceBuffer<int32_t>` | — | Jacobian CSR 구조 |
 | `d_F` | `DeviceBuffer<double>` | [dimF] | 미스매치 벡터 |

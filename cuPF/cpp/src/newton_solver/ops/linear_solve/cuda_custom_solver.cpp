@@ -28,7 +28,7 @@ void check_status(cls::Status status, const char* where)
                              cls::status_string(status));
 }
 
-cls::CsrMatrixView make_matrix_view(CudaFp64Buffers& buf)
+cls::CsrMatrixView make_matrix_view(CudaFp64Storage& buf)
 {
     cls::CsrMatrixView matrix;
     matrix.nrows = buf.dimF;
@@ -81,7 +81,7 @@ CudaLinearSolveCustomFp64::CudaLinearSolveCustomFp64(CudaLinearSolveCustomFp64&&
 {}
 
 
-void CudaLinearSolveCustomFp64::initialize(CudaFp64Buffers& buf, const InitializeContext& ctx)
+void CudaLinearSolveCustomFp64::initialize(CudaFp64Storage& buf, const InitializeContext& ctx)
 {
     if (buf.dimF <= 0 || buf.d_J_row_ptr.empty() || buf.d_J_col_idx.empty() ||
         buf.d_J_values.empty() || buf.d_F.empty() || buf.d_dx.empty()) {
@@ -106,7 +106,7 @@ void CudaLinearSolveCustomFp64::initialize(CudaFp64Buffers& buf, const Initializ
 }
 
 
-void CudaLinearSolveCustomFp64::prepare_rhs(CudaFp64Buffers& buf, IterationContext& ctx)
+void CudaLinearSolveCustomFp64::prepare_rhs(CudaFp64Storage& buf, IterationContext& ctx)
 {
     (void)buf;
     (void)ctx;
@@ -116,7 +116,7 @@ void CudaLinearSolveCustomFp64::prepare_rhs(CudaFp64Buffers& buf, IterationConte
 }
 
 
-void CudaLinearSolveCustomFp64::factorize(CudaFp64Buffers& buf, IterationContext& ctx)
+void CudaLinearSolveCustomFp64::factorize(CudaFp64Storage& buf, IterationContext& ctx)
 {
     (void)buf;
     (void)ctx;
@@ -130,7 +130,7 @@ void CudaLinearSolveCustomFp64::factorize(CudaFp64Buffers& buf, IterationContext
 }
 
 
-void CudaLinearSolveCustomFp64::solve(CudaFp64Buffers& buf, IterationContext& ctx)
+void CudaLinearSolveCustomFp64::solve(CudaFp64Storage& buf, IterationContext& ctx)
 {
     (void)buf;
     (void)ctx;
@@ -146,7 +146,7 @@ void CudaLinearSolveCustomFp64::solve(CudaFp64Buffers& buf, IterationContext& ct
 
 
 void CudaLinearSolveCustomFp64::prepare_adjoint_explicit_transpose_cache(
-    CudaFp64Buffers& buf, IterationContext& ctx, double& factorization_time_ms)
+    CudaFp64Storage& buf, IterationContext& ctx, double& factorization_time_ms)
 {
     (void)buf;
     (void)ctx;

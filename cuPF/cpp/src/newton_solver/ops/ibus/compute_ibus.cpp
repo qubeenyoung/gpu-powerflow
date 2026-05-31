@@ -9,7 +9,7 @@
 #include <stdexcept>
 
 
-void compute_ibus(CpuFp64Buffers& buf)
+void compute_ibus(CpuFp64Storage& buf)
 {
     if (buf.n_bus <= 0) {
         throw std::runtime_error("compute_ibus: buffers are not prepared");
@@ -36,7 +36,7 @@ void compute_ibus(CpuFp64Buffers& buf)
 }
 
 
-void CpuIbusOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
+void CpuIbusOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
     compute_ibus(buf);

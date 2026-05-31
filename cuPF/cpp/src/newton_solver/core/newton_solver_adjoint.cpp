@@ -25,16 +25,16 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end)
 
 
 #ifdef CUPF_WITH_CUDA
-int32_t cuda_batch_size(const CudaFp64Buffers&) { return 1; }
-int32_t cuda_batch_size(const CudaFp32Buffers& b) { return b.batch_size; }
-int32_t cuda_batch_size(const CudaMixedBuffers& b) { return b.batch_size; }
+int32_t cuda_batch_size(const CudaFp64Storage&) { return 1; }
+int32_t cuda_batch_size(const CudaFp32Storage& b) { return b.batch_size; }
+int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
 
-int32_t cuda_nnz_j(const CudaFp64Buffers& b)
+int32_t cuda_nnz_j(const CudaFp64Storage& b)
 {
     return static_cast<int32_t>(b.d_J_values.size());
 }
-int32_t cuda_nnz_j(const CudaFp32Buffers& b) { return b.nnz_J; }
-int32_t cuda_nnz_j(const CudaMixedBuffers& b) { return b.nnz_J; }
+int32_t cuda_nnz_j(const CudaFp32Storage& b) { return b.nnz_J; }
+int32_t cuda_nnz_j(const CudaMixedStorage& b) { return b.nnz_J; }
 #endif  // CUPF_WITH_CUDA
 
 }  // namespace

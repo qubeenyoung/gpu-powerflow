@@ -27,13 +27,13 @@
 #include <vector>
 
 
-void CpuLinearSolveSuperLU::initialize(CpuFp64Buffers&, const InitializeContext&) {}
+void CpuLinearSolveSuperLU::initialize(CpuFp64Storage&, const InitializeContext&) {}
 
-void CpuLinearSolveSuperLU::prepare_rhs(CpuFp64Buffers&, IterationContext&) {}
+void CpuLinearSolveSuperLU::prepare_rhs(CpuFp64Storage&, IterationContext&) {}
 
-void CpuLinearSolveSuperLU::factorize(CpuFp64Buffers&, IterationContext&) {}
+void CpuLinearSolveSuperLU::factorize(CpuFp64Storage&, IterationContext&) {}
 
-void CpuLinearSolveSuperLU::solve(CpuFp64Buffers& storage_, IterationContext& ctx)
+void CpuLinearSolveSuperLU::solve(CpuFp64Storage& storage_, IterationContext& ctx)
 {
     (void)ctx;
 

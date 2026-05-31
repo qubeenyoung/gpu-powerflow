@@ -67,7 +67,7 @@ void CpuLinearSolveKLU::release()
 }
 
 
-void CpuLinearSolveKLU::initialize(CpuFp64Buffers& buf, const InitializeContext& ctx)
+void CpuLinearSolveKLU::initialize(CpuFp64Storage& buf, const InitializeContext& ctx)
 {
     (void)ctx;
 
@@ -95,14 +95,14 @@ void CpuLinearSolveKLU::initialize(CpuFp64Buffers& buf, const InitializeContext&
 }
 
 
-void CpuLinearSolveKLU::prepare_rhs(CpuFp64Buffers& buf, IterationContext& ctx)
+void CpuLinearSolveKLU::prepare_rhs(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)buf;
     (void)ctx;
 }
 
 
-void CpuLinearSolveKLU::factorize(CpuFp64Buffers& buf, IterationContext& ctx)
+void CpuLinearSolveKLU::factorize(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
 
@@ -135,7 +135,7 @@ void CpuLinearSolveKLU::factorize(CpuFp64Buffers& buf, IterationContext& ctx)
 }
 
 
-void CpuLinearSolveKLU::solve(CpuFp64Buffers& buf, IterationContext& ctx)
+void CpuLinearSolveKLU::solve(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
 

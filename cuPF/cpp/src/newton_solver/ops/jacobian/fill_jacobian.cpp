@@ -18,7 +18,7 @@ static constexpr std::complex<double> kImaginaryUnit(0.0, 1.0);
 }
 
 
-void CpuJacobianOpF64::run(CpuFp64Buffers& buf, IterationContext& ctx)
+void CpuJacobianOpF64::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
 

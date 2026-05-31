@@ -8,9 +8,9 @@
 
 
 // ---------------------------------------------------------------------------
-// CudaFp64Buffers: end-to-end FP64 CUDA 경로의 device 버퍼.
+// CudaFp64Storage: end-to-end FP64 CUDA 경로의 device 버퍼.
 // ---------------------------------------------------------------------------
-struct CudaFp64Buffers {
+struct CudaFp64Storage {
     void prepare(const InitializeContext& ctx);
     void upload(const SolveContext& ctx);
     void download(NRResult& result) const;
@@ -19,7 +19,7 @@ struct CudaFp64Buffers {
     DeviceBuffer<double>  d_Ybus_im;
     DeviceBuffer<int32_t> d_Ybus_indptr;
     DeviceBuffer<int32_t> d_Ybus_indices;
-    DeviceBuffer<int32_t> d_Y_row;
+    DeviceBuffer<int32_t> d_Ybus_row;
 
     DeviceBuffer<double>  d_J_values;
     DeviceBuffer<int32_t> d_J_row_ptr;

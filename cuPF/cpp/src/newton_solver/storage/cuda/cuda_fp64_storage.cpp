@@ -48,7 +48,7 @@ void upload_complex_components(DeviceBuffer<double>& dst_re,
 }  // namespace
 
 
-void CudaFp64Buffers::prepare(const InitializeContext& ctx)
+void CudaFp64Storage::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr,  "InitializeContext.ybus.indptr",  ctx.ybus.rows + 1);
     require_pointer(ctx.ybus.indices, "InitializeContext.ybus.indices", ctx.ybus.nnz);
@@ -70,7 +70,7 @@ void CudaFp64Buffers::prepare(const InitializeContext& ctx)
     d_Ybus_indices.assign(ctx.ybus.indices, static_cast<std::size_t>(nnz_ybus));
 
     const std::vector<int32_t> h_y_row = build_ybus_row_index(ctx.ybus);
-    d_Y_row.assign(h_y_row.data(), h_y_row.size());
+    d_Ybus_row.assign(h_y_row.data(), h_y_row.size());
 
     d_J_values.resize(nnz_J);
     d_J_row_ptr.assign(ctx.J.row_ptr.data(), static_cast<std::size_t>(ctx.J.dim + 1));
@@ -116,16 +116,16 @@ void CudaFp64Buffers::prepare(const InitializeContext& ctx)
 }
 
 
-void CudaFp64Buffers::upload(const SolveContext& ctx)
+void CudaFp64Storage::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
-        throw std::invalid_argument("CudaFp64Buffers::upload: solve context is incomplete");
+        throw std::invalid_argument("CudaFp64Storage::upload: solve context is incomplete");
     }
 
     const YbusView& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus ||
         ybus.nnz != static_cast<int32_t>(d_Ybus_re.size())) {
-        throw std::runtime_error("CudaFp64Buffers::upload: Ybus dimensions do not match initialize()");
+        throw std::runtime_error("CudaFp64Storage::upload: Ybus dimensions do not match initialize()");
     }
 
     require_pointer(ybus.data,  "SolveContext.ybus->data", ybus.nnz);
@@ -153,7 +153,7 @@ void CudaFp64Buffers::upload(const SolveContext& ctx)
 }
 
 
-void CudaFp64Buffers::download(NRResult& result) const
+void CudaFp64Storage::download(NRResult& result) const
 {
     std::vector<double> h_re(static_cast<std::size_t>(n_bus));
     std::vector<double> h_im(static_cast<std::size_t>(n_bus));

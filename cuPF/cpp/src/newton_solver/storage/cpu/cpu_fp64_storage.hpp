@@ -153,11 +153,11 @@ using CpuJacobianMatrixF64 = CpuCscMatrix<double>;
 
 
 // ---------------------------------------------------------------------------
-// CpuFp64Buffers: CPU FP64 경로의 host-side 버퍼.
+// CpuFp64Storage: CPU FP64 경로의 host-side 버퍼.
 //
 // 메모리와 레이아웃만 소유한다. KLU solver 상태는 CpuLinearSolveKLU가 갖는다.
 // ---------------------------------------------------------------------------
-struct CpuFp64Buffers {
+struct CpuFp64Storage {
     void prepare(const InitializeContext& ctx);
     void upload(const SolveContext& ctx);
     void download(NRResult& result) const;

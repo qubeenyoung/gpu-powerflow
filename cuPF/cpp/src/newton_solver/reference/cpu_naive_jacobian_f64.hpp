@@ -3,7 +3,7 @@
 #include "newton_solver/core/solver_contexts.hpp"
 
 
-struct CpuFp64Buffers;
+struct CpuFp64Storage;
 
 
 // ---------------------------------------------------------------------------
@@ -15,5 +15,5 @@ struct CpuFp64Buffers;
 //   3. rebuild J from triplets every iteration
 // ---------------------------------------------------------------------------
 struct CpuNaiveJacobianOpF64 {
-    void run(CpuFp64Buffers& buf, IterationContext& ctx);
+    void run(CpuFp64Storage& buf, IterationContext& ctx);
 };
