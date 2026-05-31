@@ -100,7 +100,7 @@ CudaJacobianOp::run()
 - 파일 책임이 명확한가
 - 한 파일에 여러 "메인 kernel"이 뒤섞여 있지 않은가
 - batch-aware path와 single-case wrapper 관계가 코드만 읽어도 드러나는가
-- `solver stage configuration`가 여전히 profile 조립만 담당하는가
+- `NewtonSolver` 생성자의 pipeline 조립이 여전히 profile 선택만 담당하는가
 
 ### 주석
 
@@ -113,7 +113,7 @@ CudaJacobianOp::run()
 ### 구조
 
 - `cuda_batch` 별도 구현 경로가 생기지 않았는가
-- `CudaBatch*`, `BatchNewtonSolver stage ownership`, `Batchsolver stage configuration`가 새로 추가되지 않았는가
+- `CudaBatch*` storage/op/pipeline이나 별도 batch 전용 `SolverPipeline` variant가 새로 추가되지 않았는가
 - `B=1`이 특수 분기 없이 같은 CUDA path를 타는가
 - cuDSS는 uniform batch descriptor를 쓰고 있는가
 
@@ -128,4 +128,4 @@ CudaJacobianOp::run()
 
 - `docs/gpu_batch_improvement_plan.md`와 구현 세부가 어긋나지 않는가
 - `docs/overview.md`, `docs/ops/README.md`, `docs/storage/README.md`, `docs/variants/README.md`의 설명이 현재 구현과 맞는가
-- `cpp/src/newton_solver/ops/cuda_batch/TODO.md`가 더 이상 별도 batch 경로를 유도하지 않는가
+- `ops/` 아래에 `cuda_batch/` 같은 별도 batch 경로 디렉터리가 남아 있지 않은가 (현재 없음)
