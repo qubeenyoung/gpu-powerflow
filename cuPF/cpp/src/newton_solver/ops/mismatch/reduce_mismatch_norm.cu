@@ -1,7 +1,16 @@
 // ---------------------------------------------------------------------------
 // reduce_mismatch_norm.cu
 //
-// Reduces the L-infinity norm of mismatch residual F per batch on device.
+// Convergence measure for the NR loop: the L-infinity norm max|F| of the
+// mismatch residual, computed per batch case on device into normF[case]. The
+// host side (cuda_mismatch.cu) then takes the worst case as the batch norm and
+// compares it to the tolerance.
+//
+// Two-level reduction with no global scratch: each block grid-strides over its
+// case's residual into a per-thread max, reduces that to one value in shared
+// memory, then atomicMax-es the block partial into normF[case]. Multiple blocks
+// per case (gridDim.x) are used only when batch is small, so atomicMax
+// contention stays low.
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
@@ -43,19 +52,23 @@ __global__ void reduce_mismatch_norm_kernel(
     int32_t dimF,
     Scalar* __restrict__ normF)
 {
+    // Dynamic shared memory holds one Scalar per thread (sized by the launcher).
     extern __shared__ unsigned char shared[];
     Scalar* sdata = reinterpret_cast<Scalar*>(shared);
 
-    const int32_t batch = blockIdx.y;
+    const int32_t batch = blockIdx.y;                 // gridDim.y == batch_size
     const int32_t lane = threadIdx.x;
-    const int32_t base = batch * dimF;
-    const int32_t stride = gridDim.x * blockDim.x;
+    const int32_t base = batch * dimF;                // this case's residual slice
+    const int32_t stride = gridDim.x * blockDim.x;    // total threads over this case
 
+    // Step 1: grid-stride this thread's partial max over the case's residual.
     Scalar local_max = Scalar(0);
     for (int32_t i = blockIdx.x * blockDim.x + lane; i < dimF; i += stride) {
         local_max = fmax(local_max, fabs(F[base + i]));
     }
 
+    // Step 2: tree-reduce the block's partials in shared memory (lane 0 ends up
+    // with this block's max).
     sdata[lane] = local_max;
     __syncthreads();
 
@@ -66,6 +79,8 @@ __global__ void reduce_mismatch_norm_kernel(
         __syncthreads();
     }
 
+    // Step 3: fold this block's max into the case result (atomicMax across the
+    // blocks that share this case; a no-op-cheap single store when 1 block/case).
     if (lane == 0) {
         atomic_max_nonneg(&normF[batch], sdata[0]);
     }
