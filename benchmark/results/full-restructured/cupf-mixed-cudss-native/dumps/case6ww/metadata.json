@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case6ww",
+  "n_bus": 6,
+  "n_pq": 3,
+  "n_pv": 2,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 3.3306690738754696e-15,
+  "reference_iterations": 4,
+  "source_path": "/datasets/matpower/raw/case6ww.m",
+  "ybus_nnz": 28
+}

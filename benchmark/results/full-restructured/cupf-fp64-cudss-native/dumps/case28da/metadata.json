@@ -1,0 +1,13 @@
+{
+  "base_mva": 1.0,
+  "case_name": "case28da",
+  "n_bus": 28,
+  "n_pq": 27,
+  "n_pv": 0,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 1.4621637234313312e-13,
+  "reference_iterations": 4,
+  "source_path": "/datasets/matpower/raw/case28da.m",
+  "ybus_nnz": 82
+}

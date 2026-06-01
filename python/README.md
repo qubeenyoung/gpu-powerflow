@@ -1,61 +1,69 @@
 # Python Utilities
 
-This directory mirrors and reorganizes the useful Python-side workflows from
-`/workspace/v1/python`.
+Python-side tooling is split by responsibility:
 
-## Converters
+- `python/tests/` is the single benchmark package. It contains MATPOWER case
+  loading, the pypower baseline, MATLAB/MATPOWER runner, cuPF pybind/native
+  runners, orchestration, and aggregation.
+- `python/prepare/` contains dataset and dump preparation tools only.
+- `cuPF/python/` stays user-facing package code; benchmark evaluators do not
+  live there.
 
-- `converters/convert_m_to_mat.py`
-  Converts MATPOWER `.m` files into `.mat` files. Defaults to the PGLib-OPF
-  dataset under `/workspace/datasets/pglib-opf`, and accepts `--input-root` and
-  `--output-root` for other datasets.
-- `converters/convert_mat_to_nr_data.py`
-  Converts workspace `.mat` cases into the legacy `nr_dataset` layout:
-  `Ybus.npz`, `Sbus.npy`, `V0.npy`, `pv.npy`, `pq.npy`.
-- `converters/convert_mat_to_cupf_input.py`
-  Converts workspace `.mat` cases into the dump format consumed directly by
-  `v2/tests/cpp/dump_case_loader.cpp`.
+## `python/tests/`
 
-## PYPOWER
+- `matpower_data.py` - MATPOWER case load, Ybus/Sbus/V0/ref/pv/pq creation,
+  reference solve, residual helpers, and cuPF dump writers.
+- `run_pypower.py` - pandapower.pypower/SciPy NR baseline.
+- `run_matpower.py` - MATLAB MATPOWER `runpf` baseline variants.
+- `run_cupf_pybind.py` - cuPF `_cupf` pybind `NewtonSolver` variants.
+- `run_cupf_native.py` - native `cupf_cpp_evaluate` variants.
+- `run_benchmark.py` - representative matrix orchestration.
+- `aggregate_results.py` - `runs.csv` to `summary.csv` / `summary.md`.
 
-- `pypower/runpf.py`
-  Workspace-local `runpf` wrapper that uses the local Newton implementation.
-- `pypower/newtonpf.py`
-  Local Newton-Raphson implementation with structured timing hooks.
-- `pypower/benchmark.py`
-  Benchmarks the target cases and stores results under `/workspace/exp/pypower_benchmark`.
-  Use `--mode end2end` for clean timing and `--mode operators` for PYPOWER
-  timing-hook breakdowns. Defaults are `--warmup 1 --repeats 10`.
+```bash
+python3 -m python.tests.run_benchmark --cases case9 --warmup 0 --repeats 1
+python3 -m python.tests.run_pypower --cases case9 case14
+python3 -m python.tests.aggregate_results benchmark/results/<run-name>
+```
 
-## Path Policy
+## `python/prepare/`
 
-These scripts assume a closed workspace layout.
+- `prepare.py` - parse MATPOWER cases, solve the reference PF, and write cuPF
+  dump directories.
+- `convert_linear_system.py` - build Newton Jacobian linear systems for the
+  custom linear solver.
+- `convert_m_to_mat.py` - convert MATPOWER `.m` files into `.mat` files.
 
-- PGLib-OPF MATPOWER `.mat` input: `/workspace/datasets/pglib-opf/pf_dataset`
-- PGLib-OPF legacy `nr_dataset` output: `/workspace/datasets/pglib-opf/nr_dataset`
-- PGLib-OPF cuPF dump output: `/workspace/datasets/pglib-opf/cuPF_datasets`
-- PYPOWER benchmark output: `/workspace/exp/pypower_benchmark`
+```bash
+python3 -m python.prepare.prepare --dataset-root /datasets/matpower --cases case9 case14
+python3 -m python.prepare.convert_linear_system --dataset-root /datasets/matpower --cases case9
+python3 -m python.prepare.convert_m_to_mat \
+  --input-root /datasets/matpower --output-root /datasets/matpower_mat
+```
 
-Input is handled as case names such as `118_ieee` or `pglib_opf_case118_ieee`.
-Converter commands also accept `--input-root`/`--output-root` for other datasets.
+## Default Benchmark Matrix
 
-## Execution
+The default full run uses the 78 cases under `/datasets/matpower`, warmup 1,
+and repeats 5. Repeats 10 is supported with `--repeats 10`.
 
-Modules in `converters/` and `pypower/` use relative imports only.
-Run them as package modules, for example:
+| Variant | Entry | Backend | Compute | Linear solver |
+|---|---|---|---|---|
+| `pypower-pandapower` | pypower | cpu | fp64 | SciPy `spsolve` |
+| `matpower-default` | MATLAB | cpu | fp64 | MATPOWER default |
+| `matpower-lu5` | MATLAB | cpu | fp64 | `LU5` |
+| `cupf-cpu-klu-pybind` | pybind | cpu | fp64 | KLU |
+| `cupf-cpu-klu-native` | native C++ | cpu | fp64 | KLU |
+| `cupf-fp64-cudss-pybind` | pybind | cuda | fp64 | cuDSS |
+| `cupf-fp64-cudss-native` | native C++ | cuda | fp64 | cuDSS |
+| `cupf-mixed-cudss-pybind` | pybind | cuda | mixed | cuDSS |
+| `cupf-mixed-cudss-native` | native C++ | cuda | mixed | cuDSS |
+| `cupf-fp64-custom-pybind` | pybind | cuda | fp64 | custom |
+| `cupf-fp64-custom-native` | native C++ | cuda | fp64 | custom |
 
-- `python -m python.converters.convert_mat_to_nr_data --cases 118_ieee`
-- `python -m python.converters.convert_mat_to_cupf_input --cases 118_ieee`
-- `python -m python.pypower.runpf 118_ieee --timing`
-- `python -m python.pypower.benchmark --mode end2end --cases 118_ieee`
-- `python -m python.pypower.benchmark --mode operators --cases 118_ieee`
+```bash
+bash benchmark/scripts/run_benchmark.bash --build all --run-name full --warmup 1 --repeats 5
+```
 
-## Default Benchmark Cases
-
-- `118_ieee`
-- `793_goc`
-- `1354_pegase`
-- `2746wop_k`
-- `4601_goc`
-- `8387_pegase`
-- `9241_pegase`
+Each variant writes `runs.csv` and `run.json` under
+`benchmark/results/<run-name>/<variant>/`. Native C++ variants also copy
+`timing.csv` when the evaluator provides it.

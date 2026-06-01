@@ -96,14 +96,15 @@ find_path(SUITESPARSE_INCLUDE_DIR
   PATHS /usr/include /usr/include/suitesparse
         /usr/local/include /usr/local/include/suitesparse)
 find_library(LIB_KLU      NAMES klu      PATHS /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib)
+find_library(LIB_UMFPACK  NAMES umfpack  PATHS /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib)
 find_library(LIB_BTF      NAMES btf      PATHS /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib)
 find_library(LIB_AMD      NAMES amd      PATHS /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib)
 find_library(LIB_COLAMD   NAMES colamd   PATHS /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib)
 find_library(LIB_SSCONFIG NAMES suitesparseconfig SuiteSparse_config
              PATHS /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib)
 
-if(NOT LIB_KLU OR NOT LIB_BTF OR NOT LIB_AMD OR NOT LIB_COLAMD OR NOT LIB_SSCONFIG)
-  message(FATAL_ERROR "cuPF requires SuiteSparse KLU (klu, btf, amd, colamd, suitesparseconfig).")
+if(NOT LIB_KLU OR NOT LIB_UMFPACK OR NOT LIB_BTF OR NOT LIB_AMD OR NOT LIB_COLAMD OR NOT LIB_SSCONFIG)
+  message(FATAL_ERROR "cuPF requires SuiteSparse KLU/UMFPACK (klu, umfpack, btf, amd, colamd, suitesparseconfig).")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -239,6 +240,7 @@ set(CUPF_CORE_SOURCES
   cpp/src/newton_solver/ops/mismatch/cpu_mismatch.cpp
   cpp/src/newton_solver/ops/jacobian/fill_jacobian.cpp
   cpp/src/newton_solver/ops/linear_solve/cpu_klu.cpp
+  cpp/src/newton_solver/ops/linear_solve/cpu_umfpack.cpp
   cpp/src/newton_solver/ops/voltage_update/cpu_voltage_update.cpp
 )
 
@@ -301,7 +303,7 @@ target_include_directories(cupf PRIVATE
 )
 
 target_link_libraries(cupf PUBLIC
-  ${LIB_KLU} ${LIB_BTF} ${LIB_AMD} ${LIB_COLAMD} ${LIB_SSCONFIG}
+  ${LIB_KLU} ${LIB_UMFPACK} ${LIB_BTF} ${LIB_AMD} ${LIB_COLAMD} ${LIB_SSCONFIG}
   $<$<BOOL:${CUPF_LOGGING_ENABLED}>:spdlog::spdlog>
 )
 
@@ -394,19 +396,10 @@ if(BUILD_BENCHMARKS)
 endif()
 
 # ---------------------------------------------------------------------------
-# Evaluators
+# Tests and Evaluators
 # ---------------------------------------------------------------------------
+# perf/: batch scaling micro-benchmark (analysis only, not shipped)
 if(BUILD_EVALUATORS)
-  add_executable(cupf_cpp_evaluate
-    evaluator/cpp/cupf_cpp_evaluate.cpp
-    tests/dump_case_loader.cpp
-  )
-  target_link_libraries(cupf_cpp_evaluate PRIVATE cupf)
-  target_include_directories(cupf_cpp_evaluate PRIVATE
-    ${PROJECT_SOURCE_DIR}/cpp/inc
-    ${PROJECT_SOURCE_DIR}/tests)
-
-  # perf/: batch scaling micro-benchmark (analysis only, not shipped)
   add_executable(cupf_batch_bench
     perf/batch_bench.cpp
     tests/dump_case_loader.cpp
@@ -417,9 +410,9 @@ if(BUILD_EVALUATORS)
     ${PROJECT_SOURCE_DIR}/tests)
 endif()
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-if(BUILD_TESTING)
+# The C++ evaluator (cupf_cpp_evaluate) lives under tests/ next to the shared
+# dump_case_loader it depends on, so tests/ is added whenever either testing or
+# evaluators are requested.
+if(BUILD_TESTING OR BUILD_EVALUATORS)
   add_subdirectory(tests)
 endif()

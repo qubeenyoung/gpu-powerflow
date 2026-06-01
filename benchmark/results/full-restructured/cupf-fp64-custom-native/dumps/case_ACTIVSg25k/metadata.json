@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case_ACTIVSg25k",
+  "n_bus": 25000,
+  "n_pq": 21765,
+  "n_pv": 3234,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 9.107710111170908e-11,
+  "reference_iterations": 4,
+  "source_path": "/datasets/matpower/raw/case_ACTIVSg25k.m",
+  "ybus_nnz": 85220
+}

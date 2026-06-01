@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case6468rte",
+  "n_bus": 6468,
+  "n_pq": 5826,
+  "n_pv": 641,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 7.732084648716285e-12,
+  "reference_iterations": 3,
+  "source_path": "/datasets/matpower/raw/case6468rte.m",
+  "ybus_nnz": 22598
+}

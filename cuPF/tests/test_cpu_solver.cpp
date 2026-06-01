@@ -164,6 +164,36 @@ TEST(CpuSolverSmoke, EdgeBasedCase30Converges)
     (void)run_solver(options);
 }
 
+TEST(CpuSolverSmoke, PandapowerJacobianWithKluCase30Converges)
+{
+    if (!std::filesystem::exists(kCase30IeeePath)) {
+        GTEST_SKIP() << "dump case not available at " << kCase30IeeePath;
+    }
+
+    NewtonOptions options;
+    options.backend = BackendKind::CPU;
+    options.compute = ComputePolicy::FP64;
+    options.cpu_jacobian = CpuJacobianKind::Pandapower;
+    options.cpu_linear_solver = CpuLinearSolverKind::KLU;
+
+    (void)run_solver(options);
+}
+
+TEST(CpuSolverSmoke, PandapowerJacobianWithUmfpackCase30Converges)
+{
+    if (!std::filesystem::exists(kCase30IeeePath)) {
+        GTEST_SKIP() << "dump case not available at " << kCase30IeeePath;
+    }
+
+    NewtonOptions options;
+    options.backend = BackendKind::CPU;
+    options.compute = ComputePolicy::FP64;
+    options.cpu_jacobian = CpuJacobianKind::Pandapower;
+    options.cpu_linear_solver = CpuLinearSolverKind::UMFPACK;
+
+    (void)run_solver(options);
+}
+
 #ifdef CUPF_WITH_CUDA
 TEST(CudaSolverDeterministic, Fp64TwoBusConvergesWithoutExternalDump)
 {
@@ -354,6 +384,40 @@ TEST(CudaSolverSmoke, Fp64Case30Converges)
     NewtonOptions options;
     options.backend = BackendKind::CUDA;
     options.compute = ComputePolicy::FP64;
+
+    (void)run_solver(options);
+}
+
+TEST(CudaSolverSmoke, Fp64Case30EdgeAtomicConverges)
+{
+    if (!std::filesystem::exists(kCase30IeeePath)) {
+        GTEST_SKIP() << "dump case not available at " << kCase30IeeePath;
+    }
+    if (!cuda_device_available()) {
+        GTEST_SKIP() << "CUDA device not available";
+    }
+
+    NewtonOptions options;
+    options.backend = BackendKind::CUDA;
+    options.compute = ComputePolicy::FP64;
+    options.cuda_jacobian = CudaJacobianKind::EdgeAtomic;
+
+    (void)run_solver(options);
+}
+
+TEST(CudaSolverSmoke, Fp64Case30VertexWarpConverges)
+{
+    if (!std::filesystem::exists(kCase30IeeePath)) {
+        GTEST_SKIP() << "dump case not available at " << kCase30IeeePath;
+    }
+    if (!cuda_device_available()) {
+        GTEST_SKIP() << "CUDA device not available";
+    }
+
+    NewtonOptions options;
+    options.backend = BackendKind::CUDA;
+    options.compute = ComputePolicy::FP64;
+    options.cuda_jacobian = CudaJacobianKind::VertexWarp;
 
     (void)run_solver(options);
 }

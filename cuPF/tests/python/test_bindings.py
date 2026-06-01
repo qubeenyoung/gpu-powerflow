@@ -37,9 +37,18 @@ def main() -> None:
     options = cupf.NewtonOptions()
     assert options.backend == cupf.BackendKind.CPU
     assert options.compute == cupf.ComputePolicy.FP64
+    assert options.cpu_jacobian == cupf.CpuJacobianKind.Native
+    assert options.cpu_linear_solver == cupf.CpuLinearSolverKind.KLU
+    assert options.cuda_jacobian == cupf.CudaJacobianKind.Edge
     options.compute = cupf.ComputePolicy.FP32
     assert options.compute == cupf.ComputePolicy.FP32
     options.compute = cupf.ComputePolicy.FP64
+    options.cpu_jacobian = cupf.CpuJacobianKind.Pandapower
+    options.cpu_linear_solver = cupf.CpuLinearSolverKind.UMFPACK
+    assert options.cpu_jacobian == cupf.CpuJacobianKind.Pandapower
+    assert options.cpu_linear_solver == cupf.CpuLinearSolverKind.UMFPACK
+    options.cpu_jacobian = cupf.CpuJacobianKind.Native
+    options.cpu_linear_solver = cupf.CpuLinearSolverKind.KLU
 
     data = two_bus_case()
     solver = cupf.NewtonSolver(options)

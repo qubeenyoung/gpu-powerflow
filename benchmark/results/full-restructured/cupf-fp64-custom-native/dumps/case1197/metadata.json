@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case1197",
+  "n_bus": 1197,
+  "n_pq": 1196,
+  "n_pv": 0,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 4.6455033944603136e-12,
+  "reference_iterations": 3,
+  "source_path": "/datasets/matpower/raw/case1197.m",
+  "ybus_nnz": 3589
+}

@@ -83,8 +83,8 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
     const auto total_start = Clock::now();
 
     // Record provenance/diagnostic flags for this (CPU) backend.
-    result.backend = "cpu_klu";
-    result.transpose_solve_backend = "cpu_klu_tsolve_cached_factorization";
+    result.backend = p.linear_solve.backend_name();
+    result.transpose_solve_backend = p.linear_solve.transpose_backend_name();
     result.used_adjoint_cache = p.adjoint_cache.has_adjoint_cache;
     result.adjoint_cache_matches_final_state = p.adjoint_cache.adjoint_cache_matches_final_state;
     result.reused_forward_factorization = p.adjoint_cache.reused_forward_factorization;
@@ -131,8 +131,8 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
             .pv = pv, .n_pv = n_pv,
             .pq = pq, .n_pq = n_pq,
         };
-        CpuIbusOp{}.run(p.buf, ctx);
-        CpuJacobianOpF64{}.run(p.buf, ctx);
+        p.ibus(ctx);
+        p.jacobian(ctx);
         const auto factor_start = Clock::now();
         p.linear_solve.factorize(p.buf, ctx);
         result.factorization_time_ms = elapsed_ms(factor_start, Clock::now());
@@ -144,8 +144,8 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
         p.adjoint_cache.refactorized_for_adjoint_cache = true;
         p.adjoint_cache.reused_forward_factorization = false;
         p.adjoint_cache.used_explicit_transpose = false;
-        p.adjoint_cache.backend_name = "cpu_klu";
-        p.adjoint_cache.transpose_solve_backend_name = "cpu_klu_tsolve_cached_factorization";
+        p.adjoint_cache.backend_name = p.linear_solve.backend_name();
+        p.adjoint_cache.transpose_solve_backend_name = p.linear_solve.transpose_backend_name();
         p.adjoint_cache.batch_size = 1;
         p.adjoint_cache.dimF = p.buf.dimF;
     } else {

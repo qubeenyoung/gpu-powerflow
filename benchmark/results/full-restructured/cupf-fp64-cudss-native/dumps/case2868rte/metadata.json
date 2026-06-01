@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case2868rte",
+  "n_bus": 2868,
+  "n_pq": 2425,
+  "n_pv": 442,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 1.10760277564284e-11,
+  "reference_iterations": 5,
+  "source_path": "/datasets/matpower/raw/case2868rte.m",
+  "ybus_nnz": 9810
+}

@@ -76,7 +76,7 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
     // CPU backend: single FP64 pipeline, no further variants.
     if (options.backend == BackendKind::CPU) {
         pipeline_ = std::make_unique<SolverPipeline>(
-            SolverPipeline{CpuFp64Pipeline{}});
+            SolverPipeline{CpuFp64Pipeline{options.cpu_jacobian, options.cpu_linear_solver}});
         return;
     }
 
@@ -93,7 +93,7 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
 #ifdef CUPF_ENABLE_CUSTOM_SOLVER
             if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
                 pipeline_ = std::make_unique<SolverPipeline>(
-                    SolverPipeline{CudaFp64CustomPipeline{}});
+                    SolverPipeline{CudaFp64CustomPipeline{options.cuda_jacobian}});
                 return;
             }
 #else
@@ -104,18 +104,18 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
             }
 #endif
             pipeline_ = std::make_unique<SolverPipeline>(
-                SolverPipeline{CudaFp64Pipeline{options.cudss}});
+                SolverPipeline{CudaFp64Pipeline{options.cudss, options.cuda_jacobian}});
             return;
         }
         // FP32 / Mixed: cuDSS-backed batch-capable pipelines.
         if (options.compute == ComputePolicy::FP32) {
             pipeline_ = std::make_unique<SolverPipeline>(
-                SolverPipeline{CudaFp32Pipeline{options.cudss}});
+                SolverPipeline{CudaFp32Pipeline{options.cudss, options.cuda_jacobian}});
             return;
         }
         if (options.compute == ComputePolicy::Mixed) {
             pipeline_ = std::make_unique<SolverPipeline>(
-                SolverPipeline{CudaMixedPipeline{options.cudss}});
+                SolverPipeline{CudaMixedPipeline{options.cudss, options.cuda_jacobian}});
             return;
         }
     }
@@ -391,9 +391,9 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
             p.adjoint_cache.jt_values_transposed_on_device = false;
             p.adjoint_cache.jt_factorized_during_forward_cache = true;
             p.adjoint_cache.host_roundtrip_for_jt_transpose = false;
-            p.adjoint_cache.backend_name = "cpu_klu";
+            p.adjoint_cache.backend_name = p.linear_solve.backend_name();
             p.adjoint_cache.transpose_solve_backend_name =
-                "cpu_klu_tsolve_cached_factorization";
+                p.linear_solve.transpose_backend_name();
         }
 #ifdef CUPF_WITH_CUDA
         // CUDA/cuDSS path: cuDSS has no transpose solve, so cache an explicit

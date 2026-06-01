@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case_SyntheticUSA",
+  "n_bus": 82000,
+  "n_pq": 72706,
+  "n_pv": 9291,
+  "n_ref": 3,
+  "reference_converged": true,
+  "reference_final_mismatch": 7.248469447416e-11,
+  "reference_iterations": 6,
+  "source_path": "/datasets/matpower/raw/case_SyntheticUSA.m",
+  "ybus_nnz": 278406
+}

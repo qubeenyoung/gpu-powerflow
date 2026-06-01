@@ -161,6 +161,25 @@ PYBIND11_MODULE(_cupf, m)
         .value("Custom", CudaLinearSolverKind::Custom)
         .export_values();
 
+    py::enum_<CpuJacobianKind>(m, "CpuJacobianKind",
+        "CPU Jacobian fill algorithm.")
+        .value("Native", CpuJacobianKind::Native)
+        .value("Pandapower", CpuJacobianKind::Pandapower)
+        .export_values();
+
+    py::enum_<CpuLinearSolverKind>(m, "CpuLinearSolverKind",
+        "CPU sparse linear solver backend.")
+        .value("KLU", CpuLinearSolverKind::KLU)
+        .value("UMFPACK", CpuLinearSolverKind::UMFPACK)
+        .export_values();
+
+    py::enum_<CudaJacobianKind>(m, "CudaJacobianKind",
+        "CUDA Jacobian fill algorithm.")
+        .value("Edge", CudaJacobianKind::Edge)
+        .value("EdgeAtomic", CudaJacobianKind::EdgeAtomic)
+        .value("VertexWarp", CudaJacobianKind::VertexWarp)
+        .export_values();
+
     py::enum_<AdjointCacheMode>(m, "AdjointCacheMode",
         "forward 종료 시 adjoint cache 준비 방식.")
         .value("None", AdjointCacheMode::None)
@@ -211,6 +230,12 @@ PYBIND11_MODULE(_cupf, m)
             "연산 백엔드 (BackendKind.CPU 또는 BackendKind.CUDA)")
         .def_readwrite("compute", &NewtonOptions::compute,
             "내부 계산 정밀도 정책 (ComputePolicy.FP64, ComputePolicy.FP32 또는 ComputePolicy.Mixed)")
+        .def_readwrite("cpu_jacobian", &NewtonOptions::cpu_jacobian,
+            "CPU Jacobian fill algorithm (CpuJacobianKind.Native 또는 Pandapower)")
+        .def_readwrite("cpu_linear_solver", &NewtonOptions::cpu_linear_solver,
+            "CPU sparse linear solver backend (CpuLinearSolverKind.KLU 또는 UMFPACK)")
+        .def_readwrite("cuda_jacobian", &NewtonOptions::cuda_jacobian,
+            "CUDA Jacobian fill algorithm (CudaJacobianKind.Edge, EdgeAtomic, VertexWarp)")
         .def_readwrite("cuda_linear_solver", &NewtonOptions::cuda_linear_solver,
             "CUDA FP64 linear solver backend (CudaLinearSolverKind.CuDSS 또는 Custom)")
         .def_readwrite("cudss", &NewtonOptions::cudss,

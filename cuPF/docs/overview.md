@@ -26,15 +26,16 @@ cuPF/
 │       │   └── voltage_update/    # Va/Vm 갱신
 │       └── storage/               # 버퍼·핸들 관리 (cpu/, cuda/)
 ├── bindings/                      # Python 바인딩 (pybind11, torch extension)
-├── evaluator/                     # C++ 정확도 평가 실행기
 ├── python/cupf/                   # Python 패키지 (torch autograd 래퍼 포함)
-├── tests/                         # 단위·통합 테스트 (C++ + python)
+├── tests/                         # 단위·통합 테스트 + native evaluator
+│   ├── cpp/cupf_cpp_evaluate.cpp  # C++ benchmark/evaluation executable (BUILD_EVALUATORS)
+│   └── python/                    # pybind/torch unit and smoke tests only
 └── docs/                          # 설계 문서 (이 파일 포함)
 ```
 
-> 참고: 성능 측정(benchmark) 소스는 이 저장소 트리에 포함되지 않는다.
-> `BUILD_BENCHMARKS=ON`일 때 `CUPF_BENCHMARKS_DIR`(기본값은 워크스페이스 루트의
-> `benchmarks/`)에서 외부 소스를 가져와 빌드한다. 기본값은 `OFF`다.
+> 참고: 사용자-facing benchmark runner/evaluator는 워크스페이스 루트의
+> `python/tests/`에 둔다. `cuPF/python/`에는 패키지 코드만, `cuPF/tests/python/`에는
+> cuPF 자체 unit/smoke 테스트만 둔다.
 
 ---
 

@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case2383wp",
+  "n_bus": 2383,
+  "n_pq": 2056,
+  "n_pv": 326,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 5.781931538103532e-12,
+  "reference_iterations": 6,
+  "source_path": "/datasets/matpower/raw/case2383wp.m",
+  "ybus_nnz": 8155
+}

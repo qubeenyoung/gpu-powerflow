@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case4gs",
+  "n_bus": 4,
+  "n_pq": 2,
+  "n_pv": 1,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 8.215650382226158e-15,
+  "reference_iterations": 4,
+  "source_path": "/datasets/matpower/raw/case4gs.m",
+  "ybus_nnz": 12
+}

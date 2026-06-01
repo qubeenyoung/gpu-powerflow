@@ -87,6 +87,24 @@ enum class CudaLinearSolverKind {
     Custom,
 };
 
+enum class CpuJacobianKind {
+    Native,
+    Pandapower,
+};
+
+
+enum class CpuLinearSolverKind {
+    KLU,
+    UMFPACK,
+};
+
+
+enum class CudaJacobianKind {
+    Edge,
+    EdgeAtomic,
+    VertexWarp,
+};
+
 
 // ---------------------------------------------------------------------------
 // CuDSSAlgorithm / CuDSSOptions: CUDA direct solver 런타임 설정.
@@ -120,6 +138,9 @@ struct CuDSSOptions {
 struct NewtonOptions {
     BackendKind          backend = BackendKind::CPU;
     ComputePolicy        compute = ComputePolicy::FP64;
+    CpuJacobianKind      cpu_jacobian = CpuJacobianKind::Native;
+    CpuLinearSolverKind  cpu_linear_solver = CpuLinearSolverKind::KLU;
+    CudaJacobianKind     cuda_jacobian = CudaJacobianKind::Edge;
     CudaLinearSolverKind cuda_linear_solver = CudaLinearSolverKind::CuDSS;
     CuDSSOptions         cudss = {};
 };

@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case2746wop",
+  "n_bus": 2746,
+  "n_pq": 2372,
+  "n_pv": 373,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 8.505471948808004e-12,
+  "reference_iterations": 5,
+  "source_path": "/datasets/matpower/raw/case2746wop.m",
+  "ybus_nnz": 9344
+}

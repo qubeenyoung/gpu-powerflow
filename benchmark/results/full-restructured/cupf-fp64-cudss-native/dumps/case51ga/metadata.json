@@ -1,0 +1,13 @@
+{
+  "base_mva": 1.0,
+  "case_name": "case51ga",
+  "n_bus": 51,
+  "n_pq": 50,
+  "n_pv": 0,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 1.4035647644128346e-13,
+  "reference_iterations": 4,
+  "source_path": "/datasets/matpower/raw/case51ga.m",
+  "ybus_nnz": 151
+}

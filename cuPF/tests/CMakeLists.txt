@@ -1,4 +1,23 @@
 # ---------------------------------------------------------------------------
+# C++ evaluator executable (shares dump_case_loader with the gtest target)
+# ---------------------------------------------------------------------------
+if(BUILD_EVALUATORS)
+  add_executable(cupf_cpp_evaluate
+    cpp/cupf_cpp_evaluate.cpp
+    dump_case_loader.cpp
+  )
+  target_link_libraries(cupf_cpp_evaluate PRIVATE cupf)
+  target_include_directories(cupf_cpp_evaluate PRIVATE
+    ${PROJECT_SOURCE_DIR}/cpp/inc
+    ${CMAKE_CURRENT_SOURCE_DIR})   # so #include "dump_case_loader.hpp" resolves
+endif()
+
+# Evaluator-only configure (BUILD_EVALUATORS=ON, BUILD_TESTING=OFF): stop here.
+if(NOT BUILD_TESTING)
+  return()
+endif()
+
+# ---------------------------------------------------------------------------
 # Dependency-free smoke test
 # ---------------------------------------------------------------------------
 add_executable(cupf_minimal_tests

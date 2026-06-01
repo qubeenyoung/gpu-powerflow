@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case57",
+  "n_bus": 57,
+  "n_pq": 50,
+  "n_pv": 6,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 3.4482140490932435e-12,
+  "reference_iterations": 3,
+  "source_path": "/datasets/matpower/raw/case57.m",
+  "ybus_nnz": 213
+}

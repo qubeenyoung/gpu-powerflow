@@ -1,5 +1,6 @@
 build/
 benchmarks/results/
+tests/results/
 __pycache__/
 *.pyc
 *.ncu-rep
