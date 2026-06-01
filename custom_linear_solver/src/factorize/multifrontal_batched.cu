@@ -189,7 +189,7 @@ __global__ void mf_factor_extend_mixed_b(int lbegin, int lend, const int* __rest
     }
 }
 
-constexpr int MF_REG_NC = 16;
+constexpr int MF_REG_NC = 32;
 
 // ---- batched MIXED factor with FP16 TENSOR-CORE (WMMA) trailing update --------------
 // Same FP64-master / FP32-working design as mf_factor_extend_mixed_b, but the dense
@@ -265,45 +265,60 @@ __global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __r
             }
             __syncthreads();
         }
-        // Phase 3: FP16 tensor-core trailing  C -= L * U. WMMA fragment loads/stores need an
-        // aligned leading dimension, so the front stride fsz (arbitrary) cannot be used directly;
-        // L/U are staged FP16 in shared (ld 16 / 256) and each warp's output tile is stored to an
-        // aligned scratch, then subtracted into the FP32 front. Overhead cut vs the first version:
-        // each warp owns a ROW of output tiles (fixed ti) and loads its A fragment ONCE, reusing
-        // it across all tj (ntj A-loads instead of ntj^2). nc<=16 zero-pads the K=16 contraction.
-        __shared__ __half Lh[256 * 16];   // Lh[i*16 + k] = L[i][k], padded
-        __shared__ __half Uh[16 * 256];   // Uh[k*256 + j] = U[k][j], padded
-        __shared__ float Csc[4 * 256];    // per-warp 16x16 store scratch (aligned ld=16)
-        const int UCP = ((uc + 15) / 16) * 16;
-        for (int e = t; e < UCP * 16; e += nt) {
-            const int i = e >> 4, k = e & 15;
-            Lh[e] = (i < uc && k < nc) ? __float2half(W[(long)(nc + i) * fsz + k]) : __float2half(0.0f);
-        }
-        for (int e = t; e < 16 * UCP; e += nt) {
-            const int k = e / UCP, j = e % UCP;
-            Uh[k * 256 + j] = (k < nc && j < uc) ? __float2half(W[(long)k * fsz + (nc + j)])
-                                                 : __float2half(0.0f);
-        }
-        __syncthreads();
-        const int ntj = UCP / 16;
-        const int warp = t >> 5, nwarp = nt >> 5, lane = t & 31;
-        for (int ti = warp; ti < ntj; ti += nwarp) {
-            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> af;
-            wmma::load_matrix_sync(af, &Lh[ti * 256], 16);  // A row-tile loaded ONCE, reused over tj
-            for (int tj = 0; tj < ntj; ++tj) {
-                wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> bf;
-                wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;
-                wmma::fill_fragment(cf, 0.0f);
-                wmma::load_matrix_sync(bf, &Uh[tj * 16], 256);
-                wmma::mma_sync(cf, af, bf, cf);
-                wmma::store_matrix_sync(&Csc[warp * 256], cf, 16, wmma::mem_row_major);
-                __syncwarp();
-                for (int e = lane; e < 256; e += 32) {
-                    const int r = e >> 4, c = e & 15;
-                    const int ii = ti * 16 + r, jj = tj * 16 + c;
-                    if (ii < uc && jj < uc) W[(long)(nc + ii) * fsz + (nc + jj)] -= Csc[warp * 256 + e];
+        // Phase 3: FP16 tensor-core trailing  C -= L * U with MULTI-K-STEP. nc (= K) up to 32 is
+        // zero-padded to KP = ceil(nc/16)*16 and the WMMA contraction streams KP/16 16-deep
+        // k-tiles, so the per-output-tile store+subtract overhead is amortized over KP/16 mma_sync
+        // (deep K = the point of growing nc by blocked amalgamation). L/U are staged FP16 in shared
+        // (aligned ld). Each warp owns a tile-row (fixed ti), reusing its A fragments across tj.
+        // Fronts too big for the shared staging (nc>32 or uc>256) fall back to FP32.
+        if (nc > 32 || uc > 256) {
+            for (int e = t; e < uc * uc; e += nt) {
+                const int ii = nc + e / uc, jj = nc + e % uc;
+                float acc = 0.0f;
+                for (int k = 0; k < nc; ++k) acc += W[(long)ii * fsz + k] * W[(long)k * fsz + jj];
+                W[(long)ii * fsz + jj] -= acc;
+            }
+        } else {
+            __shared__ __half Lh[256 * 32];   // Lh[i*KP + k] = L[i][k]
+            __shared__ __half Uh[32 * 256];   // Uh[k*256 + j] = U[k][j]
+            __shared__ float Csc[4 * 256];    // per-warp 16x16 store scratch
+            const int UCP = ((uc + 15) / 16) * 16;
+            const int KP = ((nc + 15) / 16) * 16;
+            for (int e = t; e < UCP * KP; e += nt) {
+                const int i = e / KP, k = e % KP;
+                Lh[e] = (i < uc && k < nc) ? __float2half(W[(long)(nc + i) * fsz + k])
+                                           : __float2half(0.0f);
+            }
+            for (int e = t; e < KP * UCP; e += nt) {
+                const int k = e / UCP, j = e % UCP;
+                Uh[k * 256 + j] = (k < nc && j < uc) ? __float2half(W[(long)k * fsz + (nc + j)])
+                                                     : __float2half(0.0f);
+            }
+            __syncthreads();
+            const int ntj = UCP / 16, nks = KP / 16;
+            const int warp = t >> 5, nwarp = nt >> 5, lane = t & 31;
+            for (int ti = warp; ti < ntj; ti += nwarp) {
+                wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> af[2];
+                for (int kc = 0; kc < nks; ++kc)
+                    wmma::load_matrix_sync(af[kc], &Lh[(ti * 16) * KP + kc * 16], KP);
+                for (int tj = 0; tj < ntj; ++tj) {
+                    wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;
+                    wmma::fill_fragment(cf, 0.0f);
+                    for (int kc = 0; kc < nks; ++kc) {
+                        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> bf;
+                        wmma::load_matrix_sync(bf, &Uh[(kc * 16) * 256 + tj * 16], 256);
+                        wmma::mma_sync(cf, af[kc], bf, cf);
+                    }
+                    wmma::store_matrix_sync(&Csc[warp * 256], cf, 16, wmma::mem_row_major);
+                    __syncwarp();
+                    for (int e = lane; e < 256; e += 32) {
+                        const int r = e >> 4, c = e & 15;
+                        const int ii = ti * 16 + r, jj = tj * 16 + c;
+                        if (ii < uc && jj < uc)
+                            W[(long)(nc + ii) * fsz + (nc + jj)] -= Csc[warp * 256 + e];
+                    }
+                    __syncwarp();
                 }
-                __syncwarp();
             }
         }
     }

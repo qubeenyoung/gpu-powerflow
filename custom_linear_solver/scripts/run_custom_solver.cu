@@ -43,6 +43,7 @@ struct Options {
     int repeat = 1;
     int ir = 0;  // iterative-refinement steps after the solve (low-precision-solve correction)
     int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
+    bool batch_only = false;  // skip the single-system factor/solve (e.g. nc>16 amalgamation)
 };
 
 template <typename T>
@@ -146,6 +147,8 @@ Options parse_args(int argc, char** argv)
         } else if (arg == "--batch") {
             if (++i >= argc) throw std::runtime_error("--batch requires a count");
             options.batch = std::stoi(argv[i]);
+        } else if (arg == "--batch-only") {
+            options.batch_only = true;
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -289,8 +292,9 @@ int main(int argc, char** argv)
         factor_ms.reserve(static_cast<std::size_t>(options.repeat));
         solve_ms.reserve(static_cast<std::size_t>(options.repeat));
         const bool kernel_time = std::getenv("CLS_KERNEL_TIME") != nullptr;
+        if (options.batch_only) { factor_ms.push_back(0); solve_ms.push_back(0); }
 
-        for (int r = 0; r < options.repeat; ++r) {
+        for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
             double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
             require_success(solver.factorize(kernel_time ? &kms : nullptr), "factorize");
@@ -299,7 +303,7 @@ int main(int argc, char** argv)
             if (kernel_time) factor_kms.push_back(kms);
         }
 
-        for (int r = 0; r < options.repeat; ++r) {
+        for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
             double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
             require_success(solver.solve(kernel_time ? &kms : nullptr), "solve");
@@ -312,7 +316,7 @@ int main(int argc, char** argv)
         // Iterative refinement (optional): correct the (possibly low-precision) solve in FP64.
         // r = rhs - A x  (FP64 spmv); dx = solve(r) (reuses the existing factor); x += dx.
         double ir_ms = 0.0;
-        if (options.ir > 0) {
+        if (options.ir > 0 && !options.batch_only) {
             const int n = matrix.rows;
             const int T = 256, nb = (n + T - 1) / T;
             DeviceBuffer<double> d_r, d_dx;
