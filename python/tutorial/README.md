@@ -16,8 +16,8 @@ ignored by git.
    Opens one Newton step on `case9`: mismatch, Jacobian blocks, sparse solve,
    and voltage update.
 3. `03_matpower_pandapower_baseline.ipynb`
-   Runs pandapower's PYPOWER-derived path and MATLAB/MATPOWER on `case6468rte`,
-   with MATLAB environment checks.
+   Runs pandapower's PYPOWER-derived path and MATLAB/MATPOWER default on
+   `case6468rte`, with MATLAB environment checks.
 4. `04_cupf_cpu_acceleration.ipynb`
    Separates UMFPACK, KLU, and fixed-pattern Jacobian effects in the cuPF CPU
    path.

@@ -240,7 +240,9 @@ def benchmark_result_table(run_dir: str | Path) -> pd.DataFrame:
             "worst_residual": math.nan,
             "linear_solver": "",
             "jacobian": "",
-            "entrypoint": "skipped: " + skips["reason"].astype(str),
+            "entrypoint": "",
+            "status": "skipped",
+            "note": skips["reason"].astype(str),
         }
     )
     if summary.empty:
@@ -294,9 +296,38 @@ def summarize_runs(runs: pd.DataFrame) -> pd.DataFrame:
                 "linear_solver": str(ok["linear_solver"].iloc[0]) if len(ok) and "linear_solver" in ok else "",
                 "jacobian": str(ok["jacobian"].iloc[0]) if len(ok) and "jacobian" in ok else "",
                 "entrypoint": str(ok["entrypoint"].iloc[0]) if len(ok) and "entrypoint" in ok else "",
+                "status": "ok" if len(ok) else "failed",
+                "note": "" if len(ok) or "error_message" not in group else str(group["error_message"].dropna().iloc[0]),
             }
         )
     return pd.DataFrame(rows).sort_values("solve_ms", na_position="last")
+
+
+def successful_variants(summary: pd.DataFrame) -> pd.DataFrame:
+    """Keep only measured rows with a finite solve time."""
+
+    if summary.empty or "solve_ms" not in summary:
+        return pd.DataFrame()
+    data = summary.copy()
+    data["solve_ms"] = pd.to_numeric(data["solve_ms"], errors="coerce")
+    if "successful_rows" in data:
+        data = data[pd.to_numeric(data["successful_rows"], errors="coerce").fillna(0) > 0]
+    return data[np.isfinite(data["solve_ms"])].copy()
+
+
+def solve_comparison_table(summary: pd.DataFrame, baseline_variant: str | None = None) -> pd.DataFrame:
+    """Create ratios that make result interpretation explicit in notebooks."""
+
+    data = successful_variants(summary)
+    if data.empty:
+        return data
+    out = data[["variant", "initialize_ms", "solve_ms", "linear_solver", "jacobian"]].copy()
+    out[["linear_solver", "jacobian"]] = out[["linear_solver", "jacobian"]].fillna("")
+    out = out.sort_values("solve_ms").reset_index(drop=True)
+    if baseline_variant and baseline_variant in set(out["variant"]):
+        baseline = float(out.loc[out["variant"] == baseline_variant, "solve_ms"].iloc[0])
+        out["solve_ratio_to_baseline"] = out["solve_ms"] / baseline if baseline > 0 else math.nan
+    return out
 
 
 def plot_run_solve_bars(summary: pd.DataFrame, ax: Any | None = None, title: str = "Live solve time") -> Any:
@@ -355,12 +386,6 @@ def solver_path_table() -> pd.DataFrame:
                 "Jacobian": "MATPOWER makeJac/dSbus_dV NR Jacobian",
                 "Linear solver": "MATLAB default sparse solve",
                 "Benchmark ID": "matpower-default",
-            },
-            {
-                "Path": "MATPOWER LU5",
-                "Jacobian": "MATPOWER makeJac/dSbus_dV NR Jacobian",
-                "Linear solver": "MATPOWER pf.nr.lin_solver='LU5'",
-                "Benchmark ID": "matpower-lu5",
             },
             {
                 "Path": "cuPF CPU comparable path",
