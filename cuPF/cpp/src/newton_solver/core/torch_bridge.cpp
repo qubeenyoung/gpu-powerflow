@@ -1,3 +1,13 @@
+// ---------------------------------------------------------------------------
+// torch_bridge.cpp
+//
+// Zero-copy bridge between PyTorch tensors and the NewtonSolver. The forward
+// and backward entry points take raw CUDA device pointers (from torch tensors)
+// and run the solve / adjoint solve directly on them, so no host copies or
+// extra device allocations are needed. The cupf::torch_api free functions are
+// the C++ surface the Python extension binds to.
+// ---------------------------------------------------------------------------
+
 #include "newton_solver/core/newton_solver.hpp"
 #include "newton_solver/core/newton_solver_cuda_bridge.hpp"
 #include "newton_solver/core/pipeline.hpp"
@@ -15,6 +25,9 @@
 #endif
 
 
+// ===========================================================================
+// Translation-unit-local helpers
+// ===========================================================================
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -25,10 +38,15 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end)
 }
 
 #ifdef CUPF_WITH_CUDA
+// Batch size per storage layout (FP64 is single-case).
 int32_t cuda_batch_size(const CudaFp64Storage&) { return 1; }
 int32_t cuda_batch_size(const CudaFp32Storage& b) { return b.batch_size; }
 int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
 
+// Resize every device buffer to match the current case/batch dimensions.
+// FP64 is limited to batch_size==1; FP32/Mixed scale each buffer by batch_size.
+// (All size_t casts widen positive int32 dimensions before multiplying, which
+//  both matches the buffer API and guards the products against int overflow.)
 void ensure_cuda_tensor_batch(CudaFp64Storage& buf, int32_t batch_size)
 {
     if (batch_size != 1) {
@@ -113,6 +131,9 @@ void ensure_cuda_tensor_batch(CudaMixedStorage& buf, int32_t batch_size)
     ensure_size(buf.d_Ibus_im, bus_count);
 }
 
+// --- Compile-time pipeline classification (drives dtype/pointer selection) ---
+
+// True for any FP64 CUDA pipeline (cuDSS or, when built, the custom solver).
 template <typename PipelineT>
 struct IsCudaFp64Pipeline : std::bool_constant<
     std::is_same_v<PipelineT, CudaFp64Pipeline>
@@ -124,6 +145,7 @@ struct IsCudaFp64Pipeline : std::bool_constant<
 template <typename PipelineT>
 constexpr bool is_cuda_fp64_pipeline_v = IsCudaFp64Pipeline<PipelineT>::value;
 
+// Expected torch dtype string for a pipeline (used to validate caller tensors).
 template <typename PipelineT>
 const char* cuda_pipeline_dtype_name()
 {
@@ -134,6 +156,7 @@ const char* cuda_pipeline_dtype_name()
     }
 }
 
+// Human-readable backend tag for a pipeline (diagnostics / result metadata).
 template <typename PipelineT>
 const char* cuda_pipeline_backend_name()
 {
@@ -150,6 +173,8 @@ const char* cuda_pipeline_backend_name()
     }
 }
 
+// Populate the result flags shared by both torch entry points (zero-copy,
+// cache reuse, J^T provenance, shape/backend tags) from the pipeline state.
 template <typename PipelineT>
 void fill_common_cuda_adjoint_metadata(PipelineT& p, AdjointResult& result)
 {
@@ -184,6 +209,13 @@ void fill_common_cuda_adjoint_metadata(PipelineT& p, AdjointResult& result)
 }  // namespace
 
 
+// ===========================================================================
+// NewtonSolver torch entry points (operate directly on torch device pointers)
+// ===========================================================================
+
+// Backward pass: given upstream gradients dL/dVa, dL/dVm on the device, reuse
+// the cached J^T factorization to produce load gradients in place. Requires an
+// exact cached adjoint factorization from a prior forward solve.
 void NewtonSolver::solve_torch_backward(
     const void* grad_va_device_ptr,
     const void* grad_vm_device_ptr,
@@ -243,12 +275,16 @@ void NewtonSolver::solve_torch_backward(
             }
 
             const auto total_start = Clock::now();
+            // The torch tensors arrive as untyped device pointers; reinterpret
+            // them as the pipeline's scalar type (ValueT = float or double).
             const ValueT* grad_va = reinterpret_cast<const ValueT*>(grad_va_device_ptr);
             const ValueT* grad_vm = reinterpret_cast<const ValueT*>(grad_vm_device_ptr);
             ValueT* grad_p = reinterpret_cast<ValueT*>(grad_load_p_device_ptr);
             ValueT* grad_q = reinterpret_cast<ValueT*>(grad_load_q_device_ptr);
             const int32_t n_pv = p.buf.n_pvpq - p.buf.n_pq;
 
+            // Gather dL/dx into the adjoint RHS -> solve J^T -> project the
+            // solution back onto the P/Q load gradients.
             launch_gather_adjoint_rhs<ValueT>(
                 grad_va, grad_vm, p.linear_solve.adjoint_rhs_data(),
                 p.buf.d_pv.data(), n_pv,
@@ -277,6 +313,9 @@ void NewtonSolver::solve_torch_backward(
 }
 
 
+// Forward pass: assemble PF inputs from base power + load tensors, run the NR
+// loop on the device, and write converged Va/Vm back into the output tensors.
+// Optionally caches an adjoint factorization for a following backward pass.
 void NewtonSolver::solve_torch_forward(
     const void* sbus_base_re_device_ptr,
     const void* sbus_base_im_device_ptr,
@@ -340,6 +379,7 @@ void NewtonSolver::solve_torch_forward(
                 throw std::runtime_error("cupf::torch_api::solve_forward(): requested batch size is not supported by this CUDA pipeline");
             }
 
+            // Size buffers for this batch and clear stale state.
             p.adjoint_cache = AdjointCache{};
             ensure_cuda_tensor_batch(p.buf, batch_size);
             p.buf.d_F.memsetZero();
@@ -349,6 +389,9 @@ void NewtonSolver::solve_torch_forward(
             p.buf.d_Ibus_re.memsetZero();
             p.buf.d_Ibus_im.memsetZero();
 
+            // Build Sbus / V from the input tensors. Each branch reinterprets
+            // the untyped device pointers as the input precision the pipeline
+            // expects (FP64, FP32, or FP64-in/FP32-compute for Mixed).
             if constexpr (is_cuda_fp64_pipeline_v<PipelineT>) {
                 const double* base_re = static_cast<const double*>(sbus_base_re_device_ptr);
                 const double* base_im = static_cast<const double*>(sbus_base_im_device_ptr);
@@ -402,6 +445,8 @@ void NewtonSolver::solve_torch_forward(
                 prepare_adjoint_cache(iter_ctx, solve_options, iter_ctx.normF);
             }
 
+            // Write converged Va/Vm into the caller's output tensors, casting
+            // the output pointers to the tensor precision per pipeline.
             const int32_t total_bus = batch_size * p.buf.n_bus;
             if constexpr (is_cuda_fp64_pipeline_v<PipelineT>) {
                 launch_copy_voltage_outputs<double, double>(
@@ -439,6 +484,11 @@ void NewtonSolver::solve_torch_forward(
 }
 
 
+// ===========================================================================
+// Public C++ API (bound by the Python torch extension)
+//
+// Thin forwarders that adapt free-function calls to the NewtonSolver methods.
+// ===========================================================================
 namespace cupf::torch_api {
 
 void solve_backward(

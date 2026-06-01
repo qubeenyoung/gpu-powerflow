@@ -2,51 +2,16 @@
 
 #ifdef CUPF_WITH_CUDA
 
-#include "newton_solver/core/newton_solver_types.hpp"
-#include "newton_solver/core/solver_contexts.hpp"
-#include "utils/cuda_utils.hpp"
+#include "newton_solver/storage/cuda/cuda_batched_storage.hpp"
 
 
 // ---------------------------------------------------------------------------
-// CudaFp64Storage: end-to-end FP64 CUDA 경로의 device 버퍼.
+// CudaFp64Storage: full-FP64 CUDA 경로의 device 버퍼.
+//
+// 상태와 Jacobian/solve 모두 FP64 (정밀도 최우선, 정밀도 변환 없음). 모든 동작은
+// CudaBatchedStorage<double, double>가 제공한다(레이아웃/생애주기는 거기 문서 참조).
+// batch_size > 1도 FP32/Mixed와 동일한 cuDSS uniform-batch 경로로 지원한다.
 // ---------------------------------------------------------------------------
-struct CudaFp64Storage {
-    void prepare(const InitializeContext& ctx);
-    void upload(const SolveContext& ctx);
-    void download(NRResult& result) const;
-
-    DeviceBuffer<double>  d_Ybus_re;
-    DeviceBuffer<double>  d_Ybus_im;
-    DeviceBuffer<int32_t> d_Ybus_indptr;
-    DeviceBuffer<int32_t> d_Ybus_indices;
-    DeviceBuffer<int32_t> d_Ybus_row;
-
-    DeviceBuffer<double>  d_J_values;
-    DeviceBuffer<int32_t> d_J_row_ptr;
-    DeviceBuffer<int32_t> d_J_col_idx;
-
-    DeviceBuffer<double>  d_F;
-    DeviceBuffer<double>  d_normF;
-    DeviceBuffer<double>  d_dx;
-
-    DeviceBuffer<double>  d_Va;
-    DeviceBuffer<double>  d_Vm;
-    DeviceBuffer<double>  d_V_re;
-    DeviceBuffer<double>  d_V_im;
-
-    DeviceBuffer<double>  d_Sbus_re;
-    DeviceBuffer<double>  d_Sbus_im;
-    DeviceBuffer<double>  d_Ibus_re;
-    DeviceBuffer<double>  d_Ibus_im;
-
-    DeviceBuffer<int32_t> d_mapJ11, d_mapJ12, d_mapJ21, d_mapJ22;
-    DeviceBuffer<int32_t> d_diagJ11, d_diagJ12, d_diagJ21, d_diagJ22;
-    DeviceBuffer<int32_t> d_pvpq, d_pv, d_pq;
-
-    int32_t n_bus  = 0;
-    int32_t n_pvpq = 0;
-    int32_t n_pq   = 0;
-    int32_t dimF   = 0;
-};
+struct CudaFp64Storage : CudaBatchedStorage<double, double> {};
 
 #endif  // CUPF_WITH_CUDA

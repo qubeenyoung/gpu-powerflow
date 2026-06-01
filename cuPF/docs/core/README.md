@@ -14,7 +14,8 @@
 | `cpp/src/newton_solver/core/pipeline.hpp` | 프로파일별 pipeline struct와 `SolverPipeline` variant 정의 |
 | `cpp/src/newton_solver/core/solver_contexts.hpp` | InitializeContext, SolveContext, IterationContext, AdjointCache |
 | `cpp/src/newton_solver/ops/jacobian/jacobian_analysis.hpp/.cpp` | Ybus 희소 구조 분석 → Jacobian 패턴/산포 맵 생성 |
-| `cpp/src/newton_solver/core/newton_solver_adjoint*.{hpp,cpp}` | adjoint(역전파) 경로 및 수치 헬퍼 |
+| `cpp/src/newton_solver/core/newton_solver_adjoint.{hpp,cpp}` | adjoint(역전파) 경로: pipeline별 solve_adjoint 오케스트레이션 |
+| `cpp/src/newton_solver/core/adjoint_math.{hpp,cpp}` | adjoint 순수 수치 헬퍼 (grad 패킹/투영/잔차) — 이전 `newton_solver_adjoint_math` |
 | `cpp/src/newton_solver/core/csr_transpose.{hpp,cpp}` | CSR→CSC(전치) 희소 패턴 유틸 (adjoint·cuDSS 공유) |
 
 > stage 조립은 별도 `solver_stages.cpp`가 아니라 `newton_solver.cpp`의 생성자에서

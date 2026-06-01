@@ -1,3 +1,16 @@
+// ---------------------------------------------------------------------------
+// cpu_umfpack.cpp — CPU FP64 linear solver (SuiteSparse UMFPACK)
+//
+// Alternative to the KLU backend (cpu_klu.cpp) with the same
+// initialize -> factorize -> solve interface. UMFPACK is also a CSC direct LU
+// solver and natively supports the transpose solve (UMFPACK_At), so the CPU
+// adjoint path reuses the SAME factorization with no explicit J^T (like KLU).
+//
+// UMFPACK keeps two opaque handles (symbolic_, numeric_) and two plain value
+// arrays (control_ = input options, info_ = output stats). symbolic depends only
+// on the sparsity (computed once); numeric is redone each iteration as J changes.
+// ---------------------------------------------------------------------------
+
 #include "cpu_umfpack.hpp"
 
 #include "newton_solver/core/solver_contexts.hpp"
@@ -10,6 +23,7 @@
 #include <string>
 
 
+// Load UMFPACK's default control settings into control_.
 CpuLinearSolveUMFPACK::CpuLinearSolveUMFPACK()
 {
     umfpack_di_defaults(control_);
@@ -22,6 +36,8 @@ CpuLinearSolveUMFPACK::~CpuLinearSolveUMFPACK()
 }
 
 
+// Move: transfer the opaque handles + cached matrix pointers and null the
+// source; control_/info_ are fixed-size value arrays, so they are copied.
 CpuLinearSolveUMFPACK::CpuLinearSolveUMFPACK(CpuLinearSolveUMFPACK&& other) noexcept
     : symbolic_(other.symbolic_)
     , numeric_(other.numeric_)
@@ -68,6 +84,7 @@ CpuLinearSolveUMFPACK& CpuLinearSolveUMFPACK::operator=(CpuLinearSolveUMFPACK&& 
 }
 
 
+// Free both UMFPACK handles and forget the cached matrix arrays.
 void CpuLinearSolveUMFPACK::release()
 {
     if (numeric_) {
@@ -86,6 +103,8 @@ void CpuLinearSolveUMFPACK::release()
 }
 
 
+// UMFPACK returns negative codes for errors (positive = warnings); turn a
+// genuine error into an exception tagged with the call site.
 void CpuLinearSolveUMFPACK::check_status(int status, const char* where) const
 {
     if (status < 0) {
@@ -94,6 +113,9 @@ void CpuLinearSolveUMFPACK::check_status(int status, const char* where) const
 }
 
 
+// One-time symbolic analysis (ordering + symbolic factorization) from the
+// Jacobian sparsity only, reused across iterations. const_cast: UMFPACK's C API
+// takes non-const pointers but only reads the pattern/values here.
 void CpuLinearSolveUMFPACK::initialize(CpuFp64Storage& buf, const InitializeContext& ctx)
 {
     (void)ctx;
@@ -127,6 +149,7 @@ void CpuLinearSolveUMFPACK::initialize(CpuFp64Storage& buf, const InitializeCont
 }
 
 
+// No-op for UMFPACK: solve() reads buf.F directly, nothing to stage here.
 void CpuLinearSolveUMFPACK::prepare_rhs(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)buf;
@@ -134,6 +157,10 @@ void CpuLinearSolveUMFPACK::prepare_rhs(CpuFp64Storage& buf, IterationContext& c
 }
 
 
+// Numeric LU for the current Jacobian values, reusing the symbolic analysis.
+// Re-run every iteration as J changes. The matrix arrays (ap_/ai_/ax_) are
+// cached so solve_transpose() can hand them back to UMFPACK_At later (the
+// numeric object alone is not enough — the transpose solve re-reads the matrix).
 void CpuLinearSolveUMFPACK::factorize(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
@@ -174,6 +201,9 @@ void CpuLinearSolveUMFPACK::factorize(CpuFp64Storage& buf, IterationContext& ctx
 }
 
 
+// Forward solve J dx = F via UMFPACK_A. umfpack_di_solve writes the solution
+// into its X argument (buf.dx) and reads B from buf.F — no in-place copy needed
+// (unlike KLU).
 void CpuLinearSolveUMFPACK::solve(CpuFp64Storage& buf, IterationContext& ctx)
 {
     if (!numeric_) {
@@ -195,6 +225,10 @@ void CpuLinearSolveUMFPACK::solve(CpuFp64Storage& buf, IterationContext& ctx)
 }
 
 
+// Transpose solve J^T x = rhs via UMFPACK_At, reusing the SAME cached numeric
+// factorization as the forward solve (native transpose — no explicit J^T, like
+// KLU). Needs the matrix arrays again, taken from the factorize()-time cache.
+// Only a single RHS (nrhs == 1) is currently supported.
 void CpuLinearSolveUMFPACK::solve_transpose(const double* rhs,
                                             double* solution,
                                             int32_t dim,

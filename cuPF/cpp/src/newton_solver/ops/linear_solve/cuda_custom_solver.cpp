@@ -1,3 +1,12 @@
+// ---------------------------------------------------------------------------
+// cuda_custom_solver.cpp
+//
+// Adapter that drives the external custom_linear_solver library (FP64, single
+// case) behind the same analyze -> factorize -> solve interface the pipelines
+// expect. The adjoint / transpose-solve methods are intentionally unsupported
+// here and throw. Compiled only when CUPF_ENABLE_CUSTOM_SOLVER is set.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_custom_solver.hpp"
@@ -18,6 +27,7 @@ namespace {
 
 namespace cls = custom_linear_solver;
 
+// Translate a library status into an exception (no-op on success).
 void check_status(cls::Status status, const char* where)
 {
     if (status == cls::Status::Success) {
@@ -28,12 +38,13 @@ void check_status(cls::Status status, const char* where)
                              cls::status_string(status));
 }
 
+// Wrap the device-resident CSR Jacobian as the library's matrix view (no copy).
 cls::CsrMatrixView make_matrix_view(CudaFp64Storage& buf)
 {
     cls::CsrMatrixView matrix;
     matrix.nrows = buf.dimF;
     matrix.ncols = buf.dimF;
-    matrix.nnz = static_cast<int64_t>(buf.d_J_values.size());
+    matrix.nnz = static_cast<int64_t>(buf.d_J_values.size());  // library wants int64 nnz
     matrix.index_type = cls::IndexType::Int32;
     matrix.location = cls::DataLocation::Device;
     matrix.row_offsets = buf.d_J_row_ptr.data();
@@ -42,6 +53,7 @@ cls::CsrMatrixView make_matrix_view(CudaFp64Storage& buf)
     return matrix;
 }
 
+// Wrap a device pointer as the library's dense vector view (no copy).
 cls::DenseVectorView make_vector_view(int32_t size, double* values)
 {
     cls::DenseVectorView vector;
@@ -51,6 +63,7 @@ cls::DenseVectorView make_vector_view(int32_t size, double* values)
     return vector;
 }
 
+// Shared throw for the unimplemented adjoint surface ([[noreturn]]).
 [[noreturn]] void throw_adjoint_unsupported()
 {
     throw std::runtime_error(
@@ -60,6 +73,7 @@ cls::DenseVectorView make_vector_view(int32_t size, double* values)
 }  // namespace
 
 
+// Owns the library solver handle plus the pipeline-progress flags.
 struct CudaLinearSolveCustomFp64::State {
     cls::Solver solver;
     bool analyzed = false;
@@ -92,6 +106,7 @@ void CudaLinearSolveCustomFp64::initialize(CudaFp64Storage& buf, const Initializ
         throw std::runtime_error("CudaLinearSolveCustomFp64::initialize: Jacobian pattern mismatch");
     }
 
+    // Bind J / F / dx views into the solver, then run symbolic analysis once.
     auto state = std::make_unique<State>();
     check_status(state->solver.set_data(make_matrix_view(buf)), "set_data");
     check_status(state->solver.set_rhs(make_vector_view(buf.dimF, buf.d_F.data())), "set_rhs");
@@ -144,6 +159,8 @@ void CudaLinearSolveCustomFp64::solve(CudaFp64Storage& buf, IterationContext& ct
     sync_cuda_for_timing();
 }
 
+
+// --- Adjoint / transpose-solve surface: not implemented for this backend ---
 
 void CudaLinearSolveCustomFp64::prepare_adjoint_explicit_transpose_cache(
     CudaFp64Storage& buf, IterationContext& ctx, double& factorization_time_ms)

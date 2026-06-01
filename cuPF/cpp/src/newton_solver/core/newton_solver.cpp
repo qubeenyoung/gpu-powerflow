@@ -27,6 +27,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// RAII helper that opens an NVTX range and a wall-clock timer for one stage,
+// both keyed by the same label (see docs/RULE.md for label conventions).
 struct StageScope {
     explicit StageScope(const char* label)
         : range(label)
@@ -37,6 +39,8 @@ struct StageScope {
     newton_solver::utils::ScopedTimer     timer;
 };
 
+// Reject malformed batch inputs: positive batch_size and a stride wide enough
+// to address every bus in a case.
 void validate_batch_args(int32_t batch_size, int64_t stride, int32_t n_bus, const char* name)
 {
     if (batch_size <= 0) {
@@ -54,6 +58,7 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end)
 }
 
 #ifdef CUPF_WITH_CUDA
+// Batch size per CUDA storage layout (FP64 is single-case).
 int32_t cuda_batch_size(const CudaFp64Storage&) { return 1; }
 int32_t cuda_batch_size(const CudaFp32Storage& b) { return b.batch_size; }
 int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
@@ -68,6 +73,7 @@ int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
 NewtonSolver::NewtonSolver(const NewtonOptions& options)
     : options_(options)
 {
+    // CPU backend: single FP64 pipeline, no further variants.
     if (options.backend == BackendKind::CPU) {
         pipeline_ = std::make_unique<SolverPipeline>(
             SolverPipeline{CpuFp64Pipeline{options.cpu_jacobian, options.cpu_linear_solver}});
@@ -75,12 +81,14 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
     }
 
 #ifdef CUPF_WITH_CUDA
+    // CUDA backend: pick the pipeline variant from compute policy + solver kind.
     if (options.backend == BackendKind::CUDA) {
         if (options.cuda_linear_solver == CudaLinearSolverKind::Custom &&
             options.compute != ComputePolicy::FP64) {
             throw std::invalid_argument(
                 "NewtonSolver: custom CUDA linear solver는 FP64 단일 케이스만 지원합니다.");
         }
+        // FP64: either the custom direct solver (if built) or cuDSS.
         if (options.compute == ComputePolicy::FP64) {
 #ifdef CUPF_ENABLE_CUSTOM_SOLVER
             if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
@@ -99,6 +107,7 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
                 SolverPipeline{CudaFp64Pipeline{options.cudss, options.cuda_jacobian}});
             return;
         }
+        // FP32 / Mixed: cuDSS-backed batch-capable pipelines.
         if (options.compute == ComputePolicy::FP32) {
             pipeline_ = std::make_unique<SolverPipeline>(
                 SolverPipeline{CudaFp32Pipeline{options.cudss, options.cuda_jacobian}});
@@ -225,6 +234,7 @@ void NewtonSolver::solve_batch(
     result.n_bus = ybus.rows;
     result.batch_size = batch_size;
 
+    // Upload inputs to the backend and reset any stale adjoint cache.
     {
         StageScope stage("NR.solve.upload");
         std::visit([&](auto& p) { p.adjoint_cache = AdjointCache{}; }, pipeline_->v);
@@ -248,31 +258,40 @@ void NewtonSolver::solve_batch(
         .pq     = pq, .n_pq = n_pq,
     };
 
+    // Run the Newton-Raphson loop to convergence (or max_iter).
     const int32_t iterations = run_iteration_stages(iter_ctx);
 
+    // Optionally cache a factorization for a later adjoint/backward solve.
     if (solve_options.prepare_adjoint_cache) {
         StageScope stage("NR.solve.prepare_adjoint_cache");
         prepare_adjoint_cache(iter_ctx, solve_options, iter_ctx.normF);
     }
 
+    // Copy converged voltages (and per-case stats) back to the result.
     {
         StageScope stage("NR.solve.download");
         std::visit([&](auto& p) { p.download_batch(result); }, pipeline_->v);
     }
 
+    // Finalize per-case result vectors. batch_size is a positive int32; it is
+    // widened to size_t for every vector size/index (signed->unsigned, no loss).
     result.n_bus = ybus.rows;
     result.batch_size = batch_size;
     result.iterations.assign(static_cast<std::size_t>(batch_size), iterations);
 
+    // Backends that did not fill per-case mismatches fall back to the shared norm.
     if (result.final_mismatch.size() != static_cast<std::size_t>(batch_size)) {
         result.final_mismatch.assign(static_cast<std::size_t>(batch_size), iter_ctx.normF);
     }
+
+    // Convergence flag per case: 1 if final mismatch is within tolerance.
     result.converged.resize(static_cast<std::size_t>(batch_size));
     for (int32_t b = 0; b < batch_size; ++b) {
         const double norm =
             result.final_mismatch.empty()
                 ? iter_ctx.normF
                 : result.final_mismatch[static_cast<std::size_t>(b)];
+        // converged is a uint8 flag buffer; store the bool result as 0/1.
         result.converged[static_cast<std::size_t>(b)] =
             static_cast<uint8_t>(norm <= config.tolerance ? 1 : 0);
     }
@@ -318,6 +337,10 @@ void NewtonSolver::solve_adjoint(const double*        grad_va,
 }
 
 
+// Cache a factorization at the converged state so a later solve_adjoint() can
+// reuse it. Refreshes ibus/Jacobian, then records backend-specific cache
+// metadata (CPU/KLU supports a true transpose solve; cuDSS must cache an
+// explicit J^T factorization instead).
 void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
                                          const SolveOptions& solve_options,
                                          double final_mismatch_norm)
@@ -333,9 +356,12 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
 
     std::visit([&](auto& p) {
         const auto start = Clock::now();
+
+        // Recompute current injection and Jacobian at the final voltage state.
         p.ibus(ctx);
         p.jacobian(ctx);
 
+        // Common cache metadata.
         p.adjoint_cache = AdjointCache{};
         p.adjoint_cache.has_adjoint_cache = true;
         p.adjoint_cache.adjoint_cache_matches_final_state = true;
@@ -355,6 +381,7 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
         p.adjoint_cache.reused_forward_factorization = false;
         p.adjoint_cache.refactorized_for_adjoint_cache = true;
 
+        // CPU/KLU path: the cached factorization can solve J^T directly.
         if constexpr (std::is_same_v<std::decay_t<decltype(p)>, CpuFp64Pipeline>) {
             p.linear_solve.factorize(p.buf, ctx);
             p.adjoint_cache.factorization_supports_transpose_solve = true;
@@ -369,6 +396,8 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
                 p.linear_solve.transpose_backend_name();
         }
 #ifdef CUPF_WITH_CUDA
+        // CUDA/cuDSS path: cuDSS has no transpose solve, so cache an explicit
+        // J^T factorization built on the device.
         else {
             if (!solve_options.allow_explicit_transpose_fallback) {
                 throw std::runtime_error(
@@ -386,6 +415,7 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
             p.adjoint_cache.jt_values_transposed_on_device = true;
             p.adjoint_cache.jt_factorized_during_forward_cache = true;
             p.adjoint_cache.host_roundtrip_for_jt_transpose = false;
+            // Tag the cache with the concrete backend name for diagnostics.
             if constexpr (std::is_same_v<std::decay_t<decltype(p)>, CudaFp64Pipeline>) {
                 p.adjoint_cache.backend_name = "cuda_cudss_fp64";
 #ifdef CUPF_ENABLE_CUSTOM_SOLVER
@@ -402,6 +432,7 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
         }
 #endif
 
+        // Fall back to a wall-clock measurement if the backend did not report one.
         if (p.adjoint_cache.factorization_time_ms == 0.0) {
             p.adjoint_cache.factorization_time_ms = elapsed_ms(start, Clock::now());
         }

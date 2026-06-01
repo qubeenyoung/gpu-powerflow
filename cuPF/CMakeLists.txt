@@ -229,8 +229,8 @@ set(CUPF_CORE_SOURCES
   cpp/src/newton_solver/ops/jacobian/jacobian_analysis.cpp
   cpp/src/newton_solver/core/newton_solver.cpp
   cpp/src/newton_solver/core/newton_solver_adjoint.cpp
-  cpp/src/newton_solver/core/newton_solver_adjoint_math.cpp
-  cpp/src/newton_solver/core/newton_solver_torch_bridge.cpp
+  cpp/src/newton_solver/core/adjoint_math.cpp
+  cpp/src/newton_solver/core/torch_bridge.cpp
 
   # Storage — CPU
   cpp/src/newton_solver/storage/cpu/cpu_fp64_storage.cpp
@@ -249,10 +249,9 @@ set(CUPF_CORE_SOURCES
 # ---------------------------------------------------------------------------
 if(WITH_CUDA)
   set(CUPF_CUDA_SOURCES
-    # Storage — CUDA
-    cpp/src/newton_solver/storage/cuda/cuda_mixed_storage.cpp
-    cpp/src/newton_solver/storage/cuda/cuda_fp32_storage.cpp
-    cpp/src/newton_solver/storage/cuda/cuda_fp64_storage.cpp
+    # Storage — CUDA (one templated impl for FP32/FP64/Mixed profiles)
+    cpp/src/newton_solver/storage/cuda/cuda_batched_storage.cpp
+    cpp/src/newton_solver/storage/cuda/storage_convert.cu
 
     # Ops — CUDA Ibus
     cpp/src/newton_solver/ops/ibus/compute_ibus.cu
@@ -266,7 +265,8 @@ if(WITH_CUDA)
     cpp/src/newton_solver/ops/jacobian/fill_jacobian_gpu.cu
 
     # Ops — CUDA linear solve
-    cpp/src/newton_solver/ops/linear_solve/prepare_rhs.cu
+    cpp/src/newton_solver/ops/linear_solve/linear_solve_kernels.cu
+    cpp/src/newton_solver/ops/linear_solve/torch_bridge_kernels.cu
     cpp/src/newton_solver/ops/linear_solve/cuda_cudss.cpp
 
     # Ops — CUDA voltage update
@@ -397,6 +397,18 @@ endif()
 # ---------------------------------------------------------------------------
 # Tests and Evaluators
 # ---------------------------------------------------------------------------
+# perf/: batch scaling micro-benchmark (analysis only, not shipped)
+if(BUILD_EVALUATORS)
+  add_executable(cupf_batch_bench
+    perf/batch_bench.cpp
+    tests/dump_case_loader.cpp
+  )
+  target_link_libraries(cupf_batch_bench PRIVATE cupf)
+  target_include_directories(cupf_batch_bench PRIVATE
+    ${PROJECT_SOURCE_DIR}/cpp/inc
+    ${PROJECT_SOURCE_DIR}/tests)
+endif()
+
 # The C++ evaluator (cupf_cpp_evaluate) lives under tests/ next to the shared
 # dump_case_loader it depends on, so tests/ is added whenever either testing or
 # evaluators are requested.

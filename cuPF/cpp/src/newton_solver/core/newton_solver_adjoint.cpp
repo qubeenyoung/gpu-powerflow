@@ -1,5 +1,15 @@
+// ---------------------------------------------------------------------------
+// newton_solver_adjoint.cpp
+//
+// Backward (adjoint) solve for the implicit power flow: given dL/dVa, dL/dVm at
+// the converged state, solve J^T lambda = dL/dx and project lambda onto the
+// load gradients. One solve_adjoint_pipeline() overload per pipeline variant;
+// the CUDA variants share solve_adjoint_cuda_pipeline(). Each path can reuse a
+// cached final-state factorization or, if allowed, refactorize on the spot.
+// ---------------------------------------------------------------------------
+
 #include "newton_solver/core/newton_solver_adjoint.hpp"
-#include "newton_solver/core/newton_solver_adjoint_math.hpp"
+#include "newton_solver/core/adjoint_math.hpp"
 #include "newton_solver/core/csr_transpose.hpp"
 #include "newton_solver/core/solver_contexts.hpp"
 #include "newton_solver/ops/ibus/compute_ibus.hpp"
@@ -14,6 +24,9 @@
 #include <vector>
 
 
+// ===========================================================================
+// Translation-unit-local helpers
+// ===========================================================================
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -25,12 +38,15 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end)
 
 
 #ifdef CUPF_WITH_CUDA
+// Batch size per CUDA storage layout (FP64 is single-case).
 int32_t cuda_batch_size(const CudaFp64Storage&) { return 1; }
 int32_t cuda_batch_size(const CudaFp32Storage& b) { return b.batch_size; }
 int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
 
+// Non-zero count of J per CUDA storage layout.
 int32_t cuda_nnz_j(const CudaFp64Storage& b)
 {
+    // FP64 tracks nnz via the value buffer length; narrow size_t -> int32.
     return static_cast<int32_t>(b.d_J_values.size());
 }
 int32_t cuda_nnz_j(const CudaFp32Storage& b) { return b.nnz_J; }
@@ -40,6 +56,12 @@ int32_t cuda_nnz_j(const CudaMixedStorage& b) { return b.nnz_J; }
 }  // namespace
 
 
+// ===========================================================================
+// CPU / KLU adjoint solve
+//
+// KLU can solve J^T directly from the cached LU, so no explicit transpose is
+// needed. CUDA paths follow below and differ mainly in the transpose handling.
+// ===========================================================================
 void solve_adjoint_pipeline(CpuFp64Pipeline& p,
                             const double* grad_va,
                             int64_t grad_va_stride,
@@ -59,6 +81,8 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
                           grad_vm, grad_vm_stride,
                           batch_size, pv, n_pv, pq, n_pq);
     const auto total_start = Clock::now();
+
+    // Record provenance/diagnostic flags for this (CPU) backend.
     result.backend = p.linear_solve.backend_name();
     result.transpose_solve_backend = p.linear_solve.transpose_backend_name();
     result.used_adjoint_cache = p.adjoint_cache.has_adjoint_cache;
@@ -82,10 +106,13 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
     result.batch_size = 1;
     result.dimF = p.buf.dimF;
 
+    // Pack the upstream gradients into the dense dL/dx RHS ordering.
     const std::vector<double> grad_state =
         build_grad_state(grad_va, grad_va_stride, grad_vm, grad_vm_stride,
                          batch_size, pv, n_pv, pq, n_pq);
 
+    // Reuse the cached final-state factorization when it is exact; otherwise
+    // refactorize here if the caller allows it.
     const bool cache_ok =
         p.adjoint_cache.has_adjoint_cache &&
         p.adjoint_cache.adjoint_cache_matches_final_state &&
@@ -97,6 +124,7 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
             throw std::runtime_error(
                 "NewtonSolver::solve_adjoint(): missing exact final-state adjoint cache");
         }
+        // Rebuild ibus + Jacobian at the final state and refactorize.
         NRConfig cfg;
         IterationContext ctx{
             .config = cfg,
@@ -125,8 +153,9 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
         result.reused_final_state_factorization = true;
     }
 
+    // Solve J^T lambda = dL/dx using the cached factorization (dimF entries).
     auto solve_start = Clock::now();
-    result.lambda.assign(static_cast<std::size_t>(p.buf.dimF), 0.0);
+    result.lambda.assign(static_cast<std::size_t>(p.buf.dimF), 0.0);  // dimF>0 -> size_t
     p.linear_solve.solve_transpose(grad_state.data(), result.lambda.data(), p.buf.dimF, 1);
     result.solve_time_ms = elapsed_ms(solve_start, Clock::now());
     result.transpose_solve_time_ms = result.solve_time_ms;
@@ -134,6 +163,8 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
     result.used_adjoint_cache = cache_ok;
     result.adjoint_cache_matches_final_state = p.adjoint_cache.adjoint_cache_matches_final_state;
     result.reused_forward_factorization = p.adjoint_cache.reused_forward_factorization;
+
+    // Optional accuracy check, then project lambda onto P/Q load gradients.
     if (options.check_residual) {
         result.jt_residual_norm =
             relative_residual_norm_csc(p.buf.J, result.lambda, grad_state);
@@ -146,6 +177,14 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
 }
 
 
+// ===========================================================================
+// CUDA / cuDSS adjoint solve
+//
+// cuDSS has no native transpose solve, so these paths rely on an explicit J^T
+// factorization (cached during the forward pass, or rebuilt here on fallback).
+// The shared template below is instantiated for FP64 / FP32 / Mixed via the
+// thin overloads that follow.
+// ===========================================================================
 #ifdef CUPF_WITH_CUDA
 template <typename PipelineT, typename ValueT>
 void solve_adjoint_cuda_pipeline(PipelineT& p,
@@ -168,6 +207,8 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
                           grad_vm, grad_vm_stride,
                           batch_size, pv, n_pv, pq, n_pq);
     const auto total_start = Clock::now();
+
+    // Record provenance/diagnostic flags for this (CUDA) backend.
     result.backend = backend_name;
     result.transpose_solve_backend = "cuda_cudss_cached_explicit_transpose_factorization";
     result.used_adjoint_cache = p.adjoint_cache.has_adjoint_cache;
@@ -191,10 +232,13 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
     result.batch_size = batch_size;
     result.dimF = p.buf.dimF;
 
+    // Pack the upstream gradients into the dense dL/dx RHS ordering.
     const std::vector<double> grad_state =
         build_grad_state(grad_va, grad_va_stride, grad_vm, grad_vm_stride,
                          batch_size, pv, n_pv, pq, n_pq);
 
+    // Reuse the cached explicit-transpose factorization when exact; otherwise
+    // rebuild it here (requires both refactorize and transpose-fallback opt-in).
     const bool cache_ok =
         p.adjoint_cache.has_adjoint_cache &&
         p.adjoint_cache.adjoint_cache_matches_final_state &&
@@ -207,6 +251,7 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
             throw std::runtime_error(
                 "NewtonSolver::solve_adjoint(): missing exact CUDA adjoint cache; cuDSS transpose solve is unsupported, and explicit transpose fallback is not enabled");
         }
+        // Rebuild ibus + Jacobian, then build & factorize an explicit J^T.
         NRConfig cfg;
         IterationContext ctx{
             .config = cfg,
@@ -236,6 +281,8 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
         result.reused_final_state_factorization = true;
     }
 
+    // Solve J^T lambda = dL/dx for the whole batch (size_t widening guards the
+    // batch_size * dimF allocation against int overflow).
     result.lambda.assign(static_cast<std::size_t>(batch_size) *
                          static_cast<std::size_t>(p.buf.dimF), 0.0);
     p.linear_solve.solve_adjoint_explicit_transpose_host(
@@ -245,9 +292,12 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
         result.solve_time_ms);
     result.transpose_solve_time_ms = result.solve_time_ms;
 
+    // Optional accuracy check: pull J back to host, transpose it, and measure
+    // the relative residual of the adjoint solution against dL/dx.
     if (options.check_residual) {
         const int32_t dim = p.buf.dimF;
         const int32_t nnz = cuda_nnz_j(p.buf);
+        // Host CSR mirrors of J (size_t casts size the host vectors).
         std::vector<int32_t> row_ptr(static_cast<std::size_t>(dim + 1));
         std::vector<int32_t> col_idx(static_cast<std::size_t>(nnz));
         std::vector<ValueT> values(static_cast<std::size_t>(batch_size) *
@@ -264,12 +314,15 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
     } else {
         result.jt_residual_norm = 0.0;
     }
+    // Project lambda onto the P/Q load gradients for the caller.
     if (options.compute_load_gradients) {
         project_load_gradients(result.lambda, p.buf.n_bus, batch_size, pv, n_pv, pq, n_pq, result);
     }
     result.total_time_ms = elapsed_ms(total_start, Clock::now());
     result.success = true;
 }
+
+// --- Per-variant dispatch: bind each CUDA pipeline to the shared template ---
 
 void solve_adjoint_pipeline(CudaFp64Pipeline& p,
                             const double* grad_va,
@@ -291,6 +344,7 @@ void solve_adjoint_pipeline(CudaFp64Pipeline& p,
 }
 
 #ifdef CUPF_ENABLE_CUSTOM_SOLVER
+// The custom FP64 direct solver has no adjoint implementation yet.
 void solve_adjoint_pipeline(CudaFp64CustomPipeline&,
                             const double*,
                             int64_t,

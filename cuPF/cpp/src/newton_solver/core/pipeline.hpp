@@ -26,8 +26,21 @@
 #endif
 
 
+// ===========================================================================
+// Solver pipelines
+//
+// Each pipeline is a "profile" that bundles a storage layout, a linear solver,
+// and an adjoint cache, and exposes the same fixed set of Newton-Raphson stage
+// methods (ibus -> mismatch -> mismatch_norm -> jacobian -> prepare_rhs ->
+// factorize -> solve -> voltage_update) plus initialize/upload/download_batch.
+// NewtonSolver holds them in the SolverPipeline variant and drives whichever
+// is active via std::visit, so the variants are structurally interchangeable
+// and differ only in precision / storage / linear-solver backend.
+// batch_supported marks the profiles that accept batch_size > 1.
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
-// CpuFp64Pipeline
+// CpuFp64Pipeline — reference profile (CPU FP64, KLU direct solver)
 // ---------------------------------------------------------------------------
 struct CpuLinearSolveAny {
     std::variant<CpuLinearSolveKLU, CpuLinearSolveUMFPACK> v;
@@ -94,6 +107,8 @@ struct CpuFp64Pipeline {
         result.V = std::move(single.V);
     }
 
+    // One NR iteration stage each; the CUDA profiles below mirror this set
+    // with CUDA ops and the matching precision.
     void ibus(IterationContext& ctx)          { CpuIbusOp{}.run(buf, ctx); }
     void mismatch(IterationContext& ctx)      { CpuMismatchOp{}.run(buf, ctx); }
     void mismatch_norm(IterationContext& ctx) { CpuMismatchNormOp{}.run(buf, ctx); }
@@ -140,9 +155,7 @@ struct CudaFp64Pipeline {
     }
 
     void download_batch(NRBatchResult& result) const {
-        NRResult single;
-        buf.download(single);
-        result.V = std::move(single.V);
+        buf.download_batch(result);
     }
 
     void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp64Storage>{}.run(buf, ctx); }
@@ -154,7 +167,7 @@ struct CudaFp64Pipeline {
     void solve(IterationContext& ctx)         { linear_solve.solve(buf, ctx); }
     void voltage_update(IterationContext& ctx){ CudaVoltageUpdateOp<double>{}.run(buf, ctx); }
 
-    static constexpr bool batch_supported = false;
+    static constexpr bool batch_supported = true;
 };
 
 

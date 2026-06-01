@@ -1,7 +1,16 @@
 // ---------------------------------------------------------------------------
-// prepare_rhs.cu
+// torch_bridge_kernels.cu
 //
-// CUDA RHS preparation kernel for solver value buffers.
+// CUDA I/O kernels for the torch zero-copy bridge (their typed launch_*
+// wrappers are declared in cuda_linear_solve_kernels.hpp). These translate
+// between the solver's batched device buffers and the caller's tensors:
+//   - gather_adjoint_rhs      : pack per-bus dL/dVa, dL/dVm into the dimF RHS
+//   - project_load_gradients  : scatter the adjoint solution onto load grads
+//   - set_pf_inputs_from_load : build Sbus / V from base power + load tensors
+//   - copy_voltage_outputs    : write Va/Vm out at the caller's precision
+//
+// Only torch_bridge.cpp calls these (the cuDSS solve kernels live in
+// linear_solve_kernels.cu).
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
@@ -16,37 +25,9 @@
 
 namespace {
 
-__global__ void prepare_rhs_kernel(
-    const double* __restrict__ src,
-    float* __restrict__ dst,
-    int32_t count)
-{
-    const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= count) {
-        return;
-    }
-
-    dst[tid] = static_cast<float>(src[tid]);
-}
-
-template <typename T>
-__global__ void transpose_csr_values_kernel(
-    const T* __restrict__ src,
-    T* __restrict__ dst,
-    const int32_t* __restrict__ src_to_transpose_pos,
-    int32_t nnz,
-    int32_t total)
-{
-    const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= total) {
-        return;
-    }
-    const int32_t batch = tid / nnz;
-    const int32_t k = tid - batch * nnz;
-    const int32_t dst_pos = src_to_transpose_pos[k];
-    dst[batch * nnz + dst_pos] = src[tid];
-}
-
+// Pack the dense per-bus gradients into the dimF adjoint RHS (one thread per
+// RHS entry). Row layout: [dVa@pv | dVa@pq | dVm@pq] — the device counterpart
+// of build_grad_state() in adjoint_math.cpp.
 template <typename T>
 __global__ void gather_adjoint_rhs_kernel(
     const T* __restrict__ grad_va,
@@ -75,48 +56,62 @@ __global__ void gather_adjoint_rhs_kernel(
     }
 }
 
+// Scatter the adjoint solution lambda onto per-bus load gradients. Replaces an
+// earlier one-thread-per-bus version that linearly scanned the whole pv and pq
+// lists (O(n_bus * (n_pv+n_pq))). Here the launcher first zeroes both outputs,
+// then these scatter kernels write only the pv/pq buses they own, giving O(1)
+// per thread. pv and pq are disjoint bus sets, so the two scatters never write
+// the same grad_load_p slot. Device counterpart of project_load_gradients() in
+// adjoint_math.cpp: load gradient = -lambda at the bus's state row(s).
+
+// One thread per (case, pv entry): pv buses contribute only to grad_load_p.
 template <typename T>
-__global__ void project_load_gradients_kernel(
+__global__ void project_load_grad_pv_kernel(
+    const T* __restrict__ lambda,
+    T* __restrict__ grad_load_p,
+    const int32_t* __restrict__ pv,
+    int32_t n_pv,
+    int32_t n_bus,
+    int32_t dimF,
+    int32_t total_pv)
+{
+    const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= total_pv) return;
+    const int32_t b = tid / n_pv;          // batch case
+    const int32_t i = tid - b * n_pv;      // pv index within the case
+    // state row of a pv bus is i (the [dVa@pv] segment leads the residual).
+    grad_load_p[b * n_bus + pv[i]] = -lambda[b * dimF + i];
+}
+
+// One thread per (case, pq entry): pq buses contribute to both grad_load_p
+// (active, from the dVa@pq segment) and grad_load_q (reactive, dVm@pq segment).
+template <typename T>
+__global__ void project_load_grad_pq_kernel(
     const T* __restrict__ lambda,
     T* __restrict__ grad_load_p,
     T* __restrict__ grad_load_q,
-    const int32_t* __restrict__ pv,
-    int32_t n_pv,
     const int32_t* __restrict__ pq,
+    int32_t n_pv,
     int32_t n_pq,
     int32_t n_bus,
     int32_t dimF,
-    int32_t total_bus)
+    int32_t total_pq)
 {
     const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= total_bus) return;
-    grad_load_p[tid] = T(0);
-    grad_load_q[tid] = T(0);
-    const int32_t batch_size = total_bus / n_bus;
-    (void)batch_size;
-
+    if (tid >= total_pq) return;
+    const int32_t b = tid / n_pq;          // batch case
+    const int32_t i = tid - b * n_pq;      // pq index within the case
     const int32_t n_pvpq = n_pv + n_pq;
-    const int32_t total_rows = total_bus / n_bus * dimF;
-    const int32_t row_tid = tid;
-    (void)total_rows;
-
-    const int32_t b = tid / n_bus;
-    const int32_t base_bus = b * n_bus;
-    const int32_t base_state = b * dimF;
-    for (int32_t i = 0; i < n_pv; ++i) {
-        if (tid == base_bus + pv[i]) {
-            grad_load_p[tid] = -lambda[base_state + i];
-        }
-    }
-    for (int32_t i = 0; i < n_pq; ++i) {
-        if (tid == base_bus + pq[i]) {
-            grad_load_p[tid] = -lambda[base_state + n_pv + i];
-            grad_load_q[tid] = -lambda[base_state + n_pvpq + i];
-        }
-    }
-    (void)row_tid;
+    const int32_t bus_idx = b * n_bus + pq[i];
+    const int32_t state_base = b * dimF;
+    grad_load_p[bus_idx] = -lambda[state_base + n_pv + i];      // dVa@pq segment
+    grad_load_q[bus_idx] = -lambda[state_base + n_pvpq + i];    // dVm@pq segment
 }
 
+// Build the solver's Sbus and initial voltage from base power, load, and flat-
+// start angle/magnitude (one thread per bus). Inputs (InputT) may differ in
+// precision from storage (StorageT); static_cast bridges the two. Sbus = base
+// injection - load; V = mag * (cos(angle) + i sin(angle)).
 template <typename InputT, typename StorageT>
 __global__ void set_pf_inputs_from_load_kernel(
     const InputT* __restrict__ sbus_base_re,
@@ -141,6 +136,7 @@ __global__ void set_pf_inputs_from_load_kernel(
     const StorageT q = static_cast<StorageT>(sbus_base_im[bus]) - static_cast<StorageT>(load_q[tid]);
     const StorageT angle = static_cast<StorageT>(v0_va[bus]);
     const StorageT mag = static_cast<StorageT>(v0_vm[bus]);
+    // Use the precision-matched sincos intrinsic for the polar -> rect step.
     StorageT s = StorageT(0);
     StorageT c = StorageT(0);
     if constexpr (std::is_same_v<StorageT, double>) {
@@ -156,6 +152,7 @@ __global__ void set_pf_inputs_from_load_kernel(
     v_im[tid] = mag * s;
 }
 
+// Copy converged Va/Vm to the output tensors, casting storage -> output type.
 template <typename StorageT, typename OutputT>
 __global__ void copy_voltage_outputs_kernel(
     const StorageT* __restrict__ va,
@@ -166,66 +163,18 @@ __global__ void copy_voltage_outputs_kernel(
 {
     const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= total_bus) return;
-    va_out[tid] = static_cast<OutputT>(va[tid]);
+    va_out[tid] = static_cast<OutputT>(va[tid]);  // storage precision -> output precision
     vm_out[tid] = static_cast<OutputT>(vm[tid]);
 }
 
 }  // namespace
 
 
-void launch_prepare_rhs(const double* src, float* dst, int32_t count)
-{
-    if (src == nullptr || dst == nullptr || count < 0) {
-        throw std::runtime_error("launch_prepare_rhs: invalid arguments");
-    }
-    if (count == 0) {
-        return;
-    }
-
-    constexpr int32_t block = 256;
-    const int32_t grid = (count + block - 1) / block;
-    prepare_rhs_kernel<<<grid, block, 0, cupf_current_cuda_stream()>>>(src, dst, count);
-    CUDA_CHECK(cudaGetLastError());
-    sync_cuda_for_timing();
-}
-
-template <typename T>
-void launch_transpose_csr_values_impl(const T* src,
-                                      T* dst,
-                                      const int32_t* src_to_transpose_pos,
-                                      int32_t nnz,
-                                      int32_t batch_size)
-{
-    if (src == nullptr || dst == nullptr || src_to_transpose_pos == nullptr ||
-        nnz <= 0 || batch_size <= 0) {
-        throw std::runtime_error("launch_transpose_csr_values: invalid arguments");
-    }
-    constexpr int32_t block = 256;
-    const int32_t total = nnz * batch_size;
-    const int32_t grid = (total + block - 1) / block;
-    transpose_csr_values_kernel<T><<<grid, block, 0, cupf_current_cuda_stream()>>>(
-        src, dst, src_to_transpose_pos, nnz, total);
-    CUDA_CHECK(cudaGetLastError());
-    sync_cuda_for_timing();
-}
-
-void launch_transpose_csr_values(const double* src,
-                                 double* dst,
-                                 const int32_t* src_to_transpose_pos,
-                                 int32_t nnz,
-                                 int32_t batch_size)
-{
-    launch_transpose_csr_values_impl(src, dst, src_to_transpose_pos, nnz, batch_size);
-}
-
-void launch_transpose_csr_values(const float* src,
-                                 float* dst,
-                                 const int32_t* src_to_transpose_pos,
-                                 int32_t nnz,
-                                 int32_t batch_size)
-{
-    launch_transpose_csr_values_impl(src, dst, src_to_transpose_pos, nnz, batch_size);
-}
+// ===========================================================================
+// Host launch wrappers (validate args, size the grid, launch on the cuPF
+// stream, then check for errors). Templated launchers are explicitly
+// instantiated at the bottom for the type combinations the bridge uses.
+// ===========================================================================
 
 template <typename T>
 void launch_gather_adjoint_rhs(const T* grad_va,
@@ -269,11 +218,28 @@ void launch_project_load_gradients(const T* lambda,
     }
     const int32_t dimF = n_pv + 2 * n_pq;
     constexpr int32_t block = 256;
-    const int32_t total = batch_size * n_bus;
-    const int32_t grid = (total + block - 1) / block;
-    project_load_gradients_kernel<T><<<grid, block, 0, cupf_current_cuda_stream()>>>(
-        lambda, grad_load_p, grad_load_q, pv, n_pv, pq, n_pq, n_bus, dimF, total);
-    CUDA_CHECK(cudaGetLastError());
+    const cudaStream_t stream = cupf_current_cuda_stream();
+
+    // Zero both outputs (every non-pv/pq bus gradient is 0), then scatter only
+    // the pv and pq buses. 0 bytes == 0.0 for IEEE float and double.
+    const std::size_t total_bus = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
+    CUDA_CHECK(cudaMemsetAsync(grad_load_p, 0, total_bus * sizeof(T), stream));
+    CUDA_CHECK(cudaMemsetAsync(grad_load_q, 0, total_bus * sizeof(T), stream));
+
+    if (n_pv > 0) {
+        const int32_t total_pv = batch_size * n_pv;
+        const int32_t grid = (total_pv + block - 1) / block;
+        project_load_grad_pv_kernel<T><<<grid, block, 0, stream>>>(
+            lambda, grad_load_p, pv, n_pv, n_bus, dimF, total_pv);
+        CUDA_CHECK(cudaGetLastError());
+    }
+    if (n_pq > 0) {
+        const int32_t total_pq = batch_size * n_pq;
+        const int32_t grid = (total_pq + block - 1) / block;
+        project_load_grad_pq_kernel<T><<<grid, block, 0, stream>>>(
+            lambda, grad_load_p, grad_load_q, pq, n_pv, n_pq, n_bus, dimF, total_pq);
+        CUDA_CHECK(cudaGetLastError());
+    }
     sync_cuda_for_timing();
 }
 

@@ -1,10 +1,22 @@
-#include "newton_solver/core/newton_solver_adjoint_math.hpp"
+// ---------------------------------------------------------------------------
+// adjoint_math.cpp
+//
+// Backend-agnostic numeric helpers for the power-flow backward (adjoint) pass:
+// input validation, packing the upstream voltage gradients into the dL/dx RHS,
+// projecting the adjoint solution lambda onto load gradients, and a residual
+// check. No CUDA / solver state here — pure host math, unit-test friendly.
+// ---------------------------------------------------------------------------
+
+#include "newton_solver/core/adjoint_math.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
 
+// Validate caller-supplied adjoint arguments against the prepared solver state.
+// Guards: positive/ matching batch size, non-null grads/index arrays, strides
+// wide enough for n_bus, and dimF == n_pv + 2*n_pq (the PF unknown count).
 void validate_adjoint_args(int32_t n_bus,
                            int32_t dimF,
                            int32_t stored_batch_size,
@@ -44,6 +56,9 @@ void validate_adjoint_args(int32_t n_bus,
     }
 }
 
+// Pack the dense per-bus voltage-angle/magnitude gradients into the compact
+// dL/dx RHS layout the solver uses: [ dVa over pv, dVa over pq, dVm over pq ]
+// per batch case. Strides allow each case to be a row of a larger tensor.
 std::vector<double> build_grad_state(const double* grad_va,
                                      int64_t grad_va_stride,
                                      const double* grad_vm,
@@ -56,15 +71,18 @@ std::vector<double> build_grad_state(const double* grad_va,
 {
     const int32_t n_pvpq = n_pv + n_pq;
     const int32_t dimF = n_pvpq + n_pq;
+    // size_t widening keeps the batch_size * dimF allocation overflow-safe.
     std::vector<double> grad_state(static_cast<std::size_t>(batch_size) *
                                    static_cast<std::size_t>(dimF), 0.0);
     for (int32_t b = 0; b < batch_size; ++b) {
+        // Offset into this case's source/destination rows.
         const double* va =
             grad_va + static_cast<std::size_t>(b) * static_cast<std::size_t>(grad_va_stride);
         const double* vm =
             grad_vm + static_cast<std::size_t>(b) * static_cast<std::size_t>(grad_vm_stride);
         double* dst = grad_state.data() +
             static_cast<std::size_t>(b) * static_cast<std::size_t>(dimF);
+        // dVa at pv and pq buses, then dVm at pq buses (the dimF ordering).
         for (int32_t i = 0; i < n_pv; ++i) {
             dst[i] = va[pv[i]];
         }
@@ -76,6 +94,9 @@ std::vector<double> build_grad_state(const double* grad_va,
     return grad_state;
 }
 
+// Scatter the adjoint solution lambda back onto per-bus load gradients. By the
+// adjoint identity the load gradient is -lambda at the corresponding bus;
+// non-pv/pq buses stay zero. Mirrors the build_grad_state() ordering.
 void project_load_gradients(const std::vector<double>& lambda,
                             int32_t n_bus,
                             int32_t batch_size,
@@ -109,6 +130,10 @@ void project_load_gradients(const std::vector<double>& lambda,
     }
 }
 
+// Relative residual ||J^T lambda - rhs|| / ||rhs|| for the CSC-stored CPU
+// Jacobian. Iterating columns of J yields rows of J^T, so this evaluates the
+// adjoint product directly. Accumulation is done in long double to keep the
+// accuracy check meaningful even when the residual is many orders below rhs.
 double relative_residual_norm_csc(const CpuJacobianMatrixF64& J,
                                   const std::vector<double>& lambda,
                                   const std::vector<double>& rhs)
@@ -121,6 +146,7 @@ double relative_residual_norm_csc(const CpuJacobianMatrixF64& J,
     long double residual_sq = 0.0L;
     long double rhs_sq      = 0.0L;
     for (int32_t c = 0; c < dim; ++c) {
+        // (J^T lambda)[c] = sum over the nonzeros in column c of J.
         long double acc = 0.0L;
         for (int32_t k = col_ptr[c]; k < col_ptr[c + 1]; ++k) {
             acc += static_cast<long double>(vals[k]) *
@@ -131,6 +157,7 @@ double relative_residual_norm_csc(const CpuJacobianMatrixF64& J,
         residual_sq += d * d;
         rhs_sq      += r * r;
     }
+    // Floor the denominator so a near-zero rhs cannot blow up the ratio.
     const long double denom = std::sqrt(std::max(rhs_sq, static_cast<long double>(1.0e-60)));
     const long double denom_floored = std::max(denom, static_cast<long double>(1.0e-30));
     return static_cast<double>(std::sqrt(residual_sq) / denom_floored);

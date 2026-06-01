@@ -1,5 +1,18 @@
 #pragma once
 
+// ---------------------------------------------------------------------------
+// cuda_linear_solve_kernels.hpp
+//
+// Declarations for the small CUDA support kernels used by the linear-solve and
+// torch-bridge paths. Definitions are split across two TUs:
+//   linear_solve_kernels.cu  - launch_prepare_rhs, launch_transpose_csr_values
+//   torch_bridge_kernels.cu  - launch_gather_adjoint_rhs,
+//                              launch_project_load_gradients,
+//                              launch_set_pf_inputs_from_load,
+//                              launch_copy_voltage_outputs
+// Callers (cuda_cudss.cpp, torch_bridge.cpp) include only this header.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_CUDA
 
 #include <cstdint>

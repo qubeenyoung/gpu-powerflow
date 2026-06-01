@@ -1,3 +1,12 @@
+// ---------------------------------------------------------------------------
+// voltage_update_kernels.hpp
+//
+// Device kernels + launchers for the CUDA voltage-update stage, the GPU
+// counterpart of cpu_voltage_update.cpp: apply the Newton step dx to (Va, Vm),
+// then rebuild the rectangular voltage. Header-only so the precision-specific
+// dispatch in cuda_voltage_update.cu can instantiate them per storage type.
+// ---------------------------------------------------------------------------
+
 #pragma once
 
 #ifdef CUPF_WITH_CUDA
@@ -12,6 +21,7 @@ namespace {
 
 constexpr int32_t kVoltageUpdateBlock = 256;
 
+// Precision-matched sincos so float state uses sincosf, double uses sincos.
 __device__ inline void sincos_scalar(double x, double* s, double* c)
 {
     sincos(x, s, c);
@@ -22,6 +32,15 @@ __device__ inline void sincos_scalar(float x, float* s, float* c)
     sincosf(x, s, c);
 }
 
+// Apply the Newton step to the polar voltage state (one thread per dx entry).
+//
+// The step solved J*dx = F (mismatch), so the Newton update is x <- x - dx.
+// dx is segmented per case by the dimF layout, mirroring the residual order:
+//   local in [0,         n_pv)        -> angle Va at pv bus  pv[local]
+//   local in [n_pv,      n_pv+n_pq)   -> angle Va at pq bus  pq[local-n_pv]
+//   local in [n_pv+n_pq, dimF)        -> magnitude Vm at pq bus pq[...]
+// (hence dimF == n_pv + 2*n_pq.) dx may be lower precision than the state
+// (Mixed: float dx into double state); static_cast bridges it before subtract.
 template <typename StateScalar, typename DxScalar>
 __global__ void apply_voltage_update_kernel(
     int32_t total_entries,
@@ -40,21 +59,26 @@ __global__ void apply_voltage_update_kernel(
         return;
     }
 
+    // Map the flat id to (batch case, position within that case's dx). Per-bus
+    // state is batch-major from bus_base; this case's dx starts at dx_base.
     const int32_t batch = tid / dimF;
     const int32_t local = tid - batch * dimF;
     const int32_t bus_base = batch * n_bus;
     const int32_t dx_base = batch * dimF;
     const StateScalar dx_value = static_cast<StateScalar>(dx[dx_base + local]);
 
+    // Route this dx component to its unknown per the segmentation above.
     if (local < n_pv) {
-        va[bus_base + pv[local]] -= dx_value;
+        va[bus_base + pv[local]] -= dx_value;                 // pv angle
     } else if (local < n_pv + n_pq) {
-        va[bus_base + pq[local - n_pv]] -= dx_value;
+        va[bus_base + pq[local - n_pv]] -= dx_value;          // pq angle
     } else {
-        vm[bus_base + pq[local - n_pv - n_pq]] -= dx_value;
+        vm[bus_base + pq[local - n_pv - n_pq]] -= dx_value;   // pq magnitude
     }
 }
 
+// Rebuild rectangular voltage from polar (one thread per bus):
+// V = Vm * (cos Va + i sin Va).
 template <typename StateScalar>
 __global__ void reconstruct_voltage_kernel(
     int32_t total_buses,

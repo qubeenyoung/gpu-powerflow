@@ -23,6 +23,10 @@ void require_pointer(const T* ptr, const char* name, int32_t count)
 }  // namespace
 
 
+// Allocate host state and build the Eigen sparse Jacobian skeleton. Eigen
+// stores the matrix CSC (column-major), but the scatter maps were built against
+// the CSR pattern, so the maps are remapped to CSC value positions here (see
+// the second block below). Per-solve values arrive later via upload().
 void CpuFp64Storage::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr, "InitializeContext.ybus.indptr", ctx.ybus.rows + 1);
@@ -69,6 +73,7 @@ void CpuFp64Storage::prepare(const InitializeContext& ctx)
 
     if (has_static_jacobian) {
         {
+            // Build the CSC sparsity from the CSR pattern (values filled later).
             using Triplet = CpuTriplet<double>;
             std::vector<Triplet> trips;
             trips.reserve(static_cast<std::size_t>(ctx.J.nnz));
@@ -88,6 +93,8 @@ void CpuFp64Storage::prepare(const InitializeContext& ctx)
         {
             // JacobianScatterMap(CSR 기반) → CSC 위치로 리맵.
             // CpuJacobianOpF64가 J.valuePtr()[pos]에 직접 scatter하므로 필요.
+            // Build csr_to_csc[csr_pos] = csc_pos by counting-sorting the CSC
+            // nonzeros back into row order, then translate every map entry.
             const int32_t* csc_col_ptr = J.outerIndexPtr();
             const int32_t* csc_row_idx = J.innerIndexPtr();
             const int32_t  j_nnz       = J.nonZeros();
@@ -131,6 +138,8 @@ void CpuFp64Storage::prepare(const InitializeContext& ctx)
 }
 
 
+// Load per-solve inputs: verify the Ybus pattern is unchanged since prepare(),
+// refresh Ybus values, rebuild the Eigen Ybus, and seed V/Va/Vm/Sbus from V0.
 void CpuFp64Storage::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
