@@ -224,6 +224,37 @@ amalgamation (ratio≥8 -> nc~16-20) regresses both because padded fill grows fa
 tensor-core gain — the sweet spot is mild (nc~7-10). All gated behind `MF_AMALG`/`MF_TC`; the
 default path is unchanged.
 
+### Solve cannot be tensor-core-accelerated, and amalgamation hurts the full pipeline
+
+Extending the same idea to the SOLVE fails for a fundamental reason. The factor trailing is a
+GEMM *per batch* (`C_b(uc×uc) = L_b(uc×nc)·U_b(nc×uc)`), so tensor cores apply. The solve applies
+the factor to a SINGLE right-hand side per system: per front per batch it is `L_b(uc×nc) ·
+p_b(nc×1)` — a **GEMV (N=1)**. The B systems have DISTINCT matrices `L_b`, so their RHS cannot be
+combined into a shared-N GEMM. Tensor cores need N≥8/16; on an N=1 GEMV a 16×16 tile wastes 15/16
+of its lanes, so WMMA is strictly worse than a tuned GEMV. (It would only help with many RHS per
+system — not the standard one-RHS power-flow solve.)
+
+Worse, **amalgamation HURTS the solve** (the opposite of the factor): bigger fronts mean more L/U
+rows to apply, i.e. more triangular-solve work from the padded fill. Measured per-system solve
+(B=64): 9241 0.060→0.120 (+100%), 25k 0.163→0.274 (+68%), 70k 0.457→0.714 (+56%).
+
+So the full f + s + IR pipeline regresses with amalgamation+TC, because the factor saving is
+overwhelmed by the larger solve plus the IR cost (FP16 factor needs ~2 IR steps, each ≈ a solve):
+
+| case | natural mixed f+s | natural FP64 f+s (exact) | amalg+TC f+s+2·IR |
+|------|-------------------|--------------------------|--------------------|
+| 9241 | 0.163 ms | 0.178 ms | 0.476 ms |
+| 25k  | 0.529 ms | 0.591 ms | 1.140 ms |
+| 70k  | 1.673 ms | 2.016 ms | 3.083 ms |
+
+**Conclusion for the whole linear solve:** the natural batched mixed-precision path (no
+amalgamation) is the fastest end-to-end — fast mixed FP32 factor on small fronts + fast GEMV
+solve, relres ~1e-3 (add 1 IR if a tighter residual is needed). Tensor cores are a genuine win
+for the FACTOR in isolation (factor-dominated or factor-only workloads, where amalg+TC is -20%),
+but they cannot help the single-RHS solve, and amalgamation's factor↔solve trade-off makes it a
+net loss once the solve and refinement are included. The amalg+TC path is kept behind
+`MF_AMALG`/`MF_TC` for factor-only / many-RHS use.
+
 Takeaway: **batching is the correct lever for this workload.** It converts the latency-bound
 single-system problem (where precision/tensor-cores are inert) into a compute-bound batched one
 (where they help), and on its own delivers 52–91% per-system factor/solve reductions.
