@@ -80,6 +80,30 @@ class CommandResult:
         return "\n".join(text.splitlines()[-lines:])
 
 
+@dataclass
+class PowerFlowSnapshot:
+    """The physical power-flow equation evaluated at one voltage vector."""
+
+    voltage: np.ndarray
+    ibus: np.ndarray
+    s_calc: np.ndarray
+    s_spec: np.ndarray
+    mismatch_complex: np.ndarray
+    mismatch_reduced: np.ndarray
+
+
+@dataclass
+class NewtonStepSnapshot:
+    """One Newton-Raphson step, exposed as data the notebooks can inspect."""
+
+    voltage: np.ndarray
+    mismatch: np.ndarray
+    jacobian: sp.csr_matrix
+    dx: np.ndarray
+    next_voltage: np.ndarray
+    pvpq: np.ndarray
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -196,6 +220,33 @@ def run_tutorial_benchmark(
     return output / name, result
 
 
+def benchmark_result_table(run_dir: str | Path) -> pd.DataFrame:
+    """Return a compact table that separates successful runs from skips."""
+
+    runs = load_tutorial_runs(run_dir)
+    summary = summarize_runs(runs)
+    skips = skipped_variants(run_dir)
+    if skips.empty:
+        return summary
+    skip_rows = pd.DataFrame(
+        {
+            "variant": skips["variant"],
+            "cases": 0,
+            "successful_rows": 0,
+            "converged_rows": 0,
+            "initialize_ms": math.nan,
+            "solve_ms": math.nan,
+            "worst_residual": math.nan,
+            "linear_solver": "",
+            "jacobian": "",
+            "entrypoint": "skipped: " + skips["reason"].astype(str),
+        }
+    )
+    if summary.empty:
+        return skip_rows
+    return pd.concat([summary, skip_rows], ignore_index=True)
+
+
 def load_tutorial_runs(run_dir: str | Path) -> pd.DataFrame:
     run_dir = Path(run_dir)
     frames = []
@@ -284,6 +335,12 @@ def plot_init_solve_stack(summary: pd.DataFrame, ax: Any | None = None, title: s
 
 
 def solver_catalog() -> pd.DataFrame:
+    return solver_path_table()
+
+
+def solver_path_table() -> pd.DataFrame:
+    """Map tutorial benchmark names to the Newton step component they exercise."""
+
     return pd.DataFrame(
         [
             {
@@ -324,6 +381,45 @@ def solver_catalog() -> pd.DataFrame:
             },
         ]
     )
+
+
+def matlab_env_summary() -> pd.DataFrame:
+    """Summarize MATLAB/MATPOWER environment without exposing secret values."""
+
+    env_path = repo_root() / ".env"
+    keys = [
+        "MATLAB_BIN",
+        "MATPOWER_HOME",
+        "MATLAB_LICMODE",
+        "MATLAB_USER_ID",
+        "MATLAB_PASSWORD",
+        "MATLAB_LICENSE_FILE",
+        "MLM_LICENSE_FILE",
+    ]
+    file_values: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            file_values[key.strip()] = value.strip().strip('"').strip("'")
+    rows = []
+    for key in keys:
+        source = []
+        if key in os.environ and os.environ[key]:
+            source.append("process env")
+        if key in file_values and file_values[key]:
+            source.append(".env")
+        rows.append(
+            {
+                "key": key,
+                "status": "set" if source else "unset",
+                "source": ", ".join(source) if source else "",
+                "secret": "yes" if key in {"MATLAB_USER_ID", "MATLAB_PASSWORD"} else "no",
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def resolve_case(name: str = "case9", dataset_root: str | Path = DEFAULT_DATASET_ROOT) -> Path:
@@ -482,6 +578,45 @@ def mismatch_vector(case: matpower_data.PreprocessedCase, voltage: np.ndarray) -
     return matpower_data.mismatch_vector(case.ybus, case.sbus, voltage, case.pv, case.pq)
 
 
+def power_flow_snapshot(case: matpower_data.PreprocessedCase, voltage: np.ndarray) -> PowerFlowSnapshot:
+    """Evaluate S_calc(V) and the reduced Newton mismatch at one voltage."""
+
+    voltage = np.asarray(voltage, dtype=np.complex128)
+    ibus = case.ybus @ voltage
+    s_calc = voltage * np.conj(ibus)
+    mismatch_complex = case.sbus - s_calc
+    return PowerFlowSnapshot(
+        voltage=voltage,
+        ibus=np.asarray(ibus).reshape(-1),
+        s_calc=np.asarray(s_calc).reshape(-1),
+        s_spec=np.asarray(case.sbus).reshape(-1),
+        mismatch_complex=np.asarray(mismatch_complex).reshape(-1),
+        mismatch_reduced=mismatch_vector(case, voltage),
+    )
+
+
+def power_flow_bus_table(snapshot: PowerFlowSnapshot, limit: int = 12) -> pd.DataFrame:
+    """Small bus-level table for connecting the equation to actual numbers."""
+
+    n = min(limit, snapshot.voltage.size)
+    rows = []
+    for bus in range(n):
+        rows.append(
+            {
+                "bus": bus + 1,
+                "|V|": abs(snapshot.voltage[bus]),
+                "Va_deg": math.degrees(math.atan2(snapshot.voltage[bus].imag, snapshot.voltage[bus].real)),
+                "P_spec": snapshot.s_spec[bus].real,
+                "Q_spec": snapshot.s_spec[bus].imag,
+                "P_calc": snapshot.s_calc[bus].real,
+                "Q_calc": snapshot.s_calc[bus].imag,
+                "P_mis": snapshot.mismatch_complex[bus].real,
+                "Q_mis": snapshot.mismatch_complex[bus].imag,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def build_reduced_jacobian(case: matpower_data.PreprocessedCase, voltage: np.ndarray) -> sp.csr_matrix:
     pvpq = np.r_[case.pv, case.pq]
     dS_dVm, dS_dVa = dSbus_dV(case.ybus, voltage)
@@ -490,6 +625,54 @@ def build_reduced_jacobian(case: matpower_data.PreprocessedCase, voltage: np.nda
     j21 = dS_dVa[np.ix_(case.pq, pvpq)].imag
     j22 = dS_dVm[np.ix_(case.pq, case.pq)].imag
     return vstack([hstack([j11, j12]), hstack([j21, j22])], format="csr")
+
+
+def jacobian_block_shapes(case: matpower_data.PreprocessedCase) -> pd.DataFrame:
+    """Explain the reduced Jacobian dimensions before showing the sparse plot."""
+
+    npv = len(case.pv)
+    npq = len(case.pq)
+    n_pvpq = npv + npq
+    return pd.DataFrame(
+        [
+            {"block": "J11 = dP/dVa", "rows": n_pvpq, "cols": n_pvpq, "equations": "P at PV+PQ", "unknowns": "Va at PV+PQ"},
+            {"block": "J12 = dP/dVm", "rows": n_pvpq, "cols": npq, "equations": "P at PV+PQ", "unknowns": "Vm at PQ"},
+            {"block": "J21 = dQ/dVa", "rows": npq, "cols": n_pvpq, "equations": "Q at PQ", "unknowns": "Va at PV+PQ"},
+            {"block": "J22 = dQ/dVm", "rows": npq, "cols": npq, "equations": "Q at PQ", "unknowns": "Vm at PQ"},
+        ]
+    )
+
+
+def newton_step_snapshot(case: matpower_data.PreprocessedCase, voltage: np.ndarray) -> NewtonStepSnapshot:
+    """Perform one transparent Newton update using the same reduced system as PYPOWER/MATPOWER."""
+
+    voltage = np.asarray(voltage, dtype=np.complex128)
+    pvpq = np.r_[case.pv, case.pq]
+    jac = build_reduced_jacobian(case, voltage)
+    mismatch = mismatch_vector(case, voltage)
+    dx = -np.asarray(spsolve(jac, mismatch)).reshape(-1)
+    va = np.angle(voltage).copy()
+    vm = np.abs(voltage).copy()
+    n_pvpq = len(pvpq)
+    va[pvpq] += dx[:n_pvpq]
+    vm[case.pq] += dx[n_pvpq:]
+    next_voltage = vm * np.exp(1j * va)
+    return NewtonStepSnapshot(voltage, mismatch, jac, dx, next_voltage, pvpq)
+
+
+def newton_step_table(step: NewtonStepSnapshot, limit: int = 12) -> pd.DataFrame:
+    """Show only the head of dx; the full vector is usually too long for a notebook."""
+
+    n_angle = len(step.pvpq)
+    rows = []
+    for idx, value in enumerate(step.dx[: min(limit, step.dx.size)]):
+        if idx < n_angle:
+            name = f"Va[{int(step.pvpq[idx]) + 1}]"
+        else:
+            pq_idx = idx - n_angle
+            name = f"Vm(PQ position {int(pq_idx) + 1})"
+        rows.append({"unknown": name, "dx": value})
+    return pd.DataFrame(rows)
 
 
 def plot_jacobian_blocks(case: matpower_data.PreprocessedCase, voltage: np.ndarray, ax: Any | None = None) -> Any:
@@ -509,6 +692,12 @@ def plot_jacobian_blocks(case: matpower_data.PreprocessedCase, voltage: np.ndarr
     ax.text(n_pvpq * 0.35, n_pvpq + max(npq, 1) * 0.45, "J21", ha="center", va="center")
     ax.text(n_pvpq + max(npq, 1) * 0.45, n_pvpq + max(npq, 1) * 0.45, "J22", ha="center", va="center")
     return ax
+
+
+def plot_jacobian_block_pattern(case: matpower_data.PreprocessedCase, voltage: np.ndarray, ax: Any | None = None) -> Any:
+    """Alias with a name that states why this sparse plot exists."""
+
+    return plot_jacobian_blocks(case, voltage, ax)
 
 
 def run_newton_with_stage_timing(
@@ -587,6 +776,16 @@ def run_newton_with_stage_timing(
     return NewtonTrace(voltage, df, totals, converged, iterations, final_mismatch)
 
 
+def newton_trace(
+    case: matpower_data.PreprocessedCase,
+    tolerance: float = 1e-8,
+    max_iter: int = 50,
+) -> NewtonTrace:
+    """Educational name for the staged Newton loop used in the notebooks."""
+
+    return run_newton_with_stage_timing(case, tolerance=tolerance, max_iter=max_iter)
+
+
 def plot_convergence(trace: NewtonTrace, ax: Any | None = None) -> Any:
     ax = ax or plt.gca()
     mismatch = (
@@ -600,6 +799,12 @@ def plot_convergence(trace: NewtonTrace, ax: Any | None = None) -> Any:
     ax.set_title("Residual convergence")
     ax.grid(True, which="both", alpha=0.25)
     return ax
+
+
+def plot_newton_convergence(trace: NewtonTrace, ax: Any | None = None) -> Any:
+    """Alias used by the notebooks after the Newton loop has been introduced."""
+
+    return plot_convergence(trace, ax)
 
 
 def plot_stage_pie(stage_ms: pd.Series | dict[str, float], ax: Any | None = None, title: str = "") -> Any:
@@ -630,6 +835,18 @@ def plot_stage_bar(stage_ms: pd.Series | dict[str, float], ax: Any | None = None
     for y, value in enumerate(series.values):
         ax.text(value, y, f" {value:.2f}", va="center", fontsize=8)
     return ax
+
+
+def plot_stage_timing(stage_ms: pd.Series | dict[str, float], ax: Any | None = None, title: str = "") -> Any:
+    """Use a bar chart as the default bottleneck view; it preserves absolute time."""
+
+    return plot_stage_bar(stage_ms, ax, title)
+
+
+def plot_variant_timing(summary: pd.DataFrame, ax: Any | None = None, title: str = "Variant solve time") -> Any:
+    """Compare solver variants using the same solve_ms column used by runs.csv."""
+
+    return plot_run_solve_bars(summary, ax, title)
 
 
 def load_benchmark_runs(result_root: str | Path | None = None) -> pd.DataFrame:

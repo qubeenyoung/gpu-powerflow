@@ -1,26 +1,32 @@
 # Python Tutorial Notebooks
 
-This folder contains live, story-style notebooks for first-time readers of
-power flow, MATPOWER/pandapower baselines, and cuPF acceleration paths.
+This directory is a narrative tutorial, not just a benchmark launcher. The
+notebooks move from the power-flow equation to Newton-Raphson internals, then
+to baseline implementations and cuPF acceleration choices.
 
-The notebooks run small reproducible benchmarks themselves. Fresh outputs are
-written under `python/tutorial/_runs/`, which is ignored by git.
+Fresh benchmark outputs are written under `python/tutorial/_runs/`, which is
+ignored by git.
 
-## Order
+## Reading Order
 
-1. `01_power_system_basics_case9.ipynb` - power-system vocabulary, the power
-   flow problem, `case9` topology, bus types, voltage phasors, and Ybus.
-2. `02_matpower_pandapower_baseline.ipynb` - live `case6468rte` pandapower
-   PYPOWER-derived and MATLAB/MATPOWER baseline runs, plus Python stage
-   bottleneck analysis.
-3. `03_cupf_cpu_path.ipynb` - live cuPF CPU build/run and comparison of
-   UMFPACK, KLU, pandapower-like Jacobian, and native fixed-pattern Jacobian.
-4. `04_cupf_gpu_path.ipynb` - live cuPF GPU build/run, cuDSS, Edge,
-   EdgeAtomic, VertexWarp, and optional custom solver notes.
-5. `05_multibatch_python_torch_interface.ipynb` - pybind `solve_batch`,
-   `NewtonOptions`, and Torch autograd usage.
-6. `06_bottlenecks_and_research.ipynb` - remaining bottlenecks and future work:
-   cuGraph, custom linear solver, multi-GPU, tensor core, and mixed precision.
+1. `01_power_system_basics_case9.ipynb`
+   Turns the physical grid into `Ybus`, `Sbus`, `V`, and the nonlinear equation
+   `S_spec - S_calc(V) = 0`.
+2. `02_newton_raphson_and_jacobian.ipynb`
+   Opens one Newton step on `case9`: mismatch, Jacobian blocks, sparse solve,
+   and voltage update.
+3. `03_matpower_pandapower_baseline.ipynb`
+   Runs pandapower's PYPOWER-derived path and MATLAB/MATPOWER on `case6468rte`,
+   with MATLAB environment checks.
+4. `04_cupf_cpu_acceleration.ipynb`
+   Separates UMFPACK, KLU, and fixed-pattern Jacobian effects in the cuPF CPU
+   path.
+5. `05_cupf_gpu_acceleration.ipynb`
+   Connects cuDSS, custom solver, and Edge/EdgeAtomic/VertexWarp Jacobian fill
+   choices to the same Newton bottlenecks.
+6. `06_batch_torch_and_research_direction.ipynb`
+   Shifts from one solve to batched/differentiable solves and closes with the
+   remaining research directions.
 
 ## Prerequisites
 
@@ -30,21 +36,29 @@ test -f /datasets/matpower/raw/case9.m
 test -f /datasets/matpower/raw/case6468rte.m
 ```
 
-MATLAB/MATPOWER, CUDA, cuDSS, and Torch sections are live but optional. If a
-component is unavailable, the relevant notebook cell records a skip/error table
-instead of hiding the condition.
+MATLAB settings live in the repository root `.env` file when needed:
+
+```bash
+MATLAB_BIN=matlab
+MATPOWER_HOME=/opt/matpower
+MATLAB_LICMODE=onlinelicensing
+MATLAB_USER_ID=your-account@example.edu
+MATLAB_PASSWORD=your-password
+# or: MATLAB_LICENSE_FILE=/path/to/license.lic
+```
+
+The notebooks report whether these keys are set, but never print secret values.
 
 ## Execute
 
 ```bash
 jupyter nbconvert --execute python/tutorial/01_power_system_basics_case9.ipynb --to notebook --inplace
-jupyter nbconvert --execute python/tutorial/02_matpower_pandapower_baseline.ipynb --to notebook --inplace
-jupyter nbconvert --execute python/tutorial/03_cupf_cpu_path.ipynb --to notebook --inplace
-jupyter nbconvert --execute python/tutorial/04_cupf_gpu_path.ipynb --to notebook --inplace
-jupyter nbconvert --execute python/tutorial/05_multibatch_python_torch_interface.ipynb --to notebook --inplace
-jupyter nbconvert --execute python/tutorial/06_bottlenecks_and_research.ipynb --to notebook --inplace
+jupyter nbconvert --execute python/tutorial/02_newton_raphson_and_jacobian.ipynb --to notebook --inplace
+jupyter nbconvert --execute python/tutorial/03_matpower_pandapower_baseline.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=9000
+jupyter nbconvert --execute python/tutorial/04_cupf_cpu_acceleration.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=9000
+jupyter nbconvert --execute python/tutorial/05_cupf_gpu_acceleration.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=12000
+jupyter nbconvert --execute python/tutorial/06_batch_torch_and_research_direction.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=12000
 ```
 
-Default live benchmark settings are intentionally short: `case6468rte`,
-`warmup=0`, and `repeats=1`. Increase the notebook parameters when you want a
-more stable timing report.
+The benchmark notebooks default to `case6468rte`, `warmup=0`, and `repeats=1`.
+For report-quality timing, increase the notebook `REPEATS` value to 5 or more.
