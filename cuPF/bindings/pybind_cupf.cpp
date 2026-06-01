@@ -2,10 +2,26 @@
 // pybind_cupf.cpp
 //
 // Python bindings for the cuPF solver (module name: _cupf). Exposes the option
-// enums/structs, the NR result structs, and the NewtonSolver class. Inputs are
-// taken as numpy arrays (Ybus as zero-copy CSR via YbusView) and results are
-// returned as numpy arrays. The optional torch zero-copy entry points are only
-// declared/bound when CUPF_WITH_TORCH is set (defined in torch_cupf_extension).
+// enums/structs, the NR result structs, and the NewtonSolver class.
+//
+// Memory / ownership contract:
+//   - Array inputs are declared py::array_t<..., c_style | forcecast>, so
+//     pybind accepts any numpy array and, if the dtype/layout differs, makes a
+//     contiguous converted copy before the call (the .data() pointers handed to
+//     the solver are valid only for the call's duration).
+//   - The CSR Ybus is wrapped as a *borrowing* YbusView (make_ybus_view) — no
+//     copy; the view is only valid while the caller's arrays are alive, which
+//     they are for the synchronous solve call (the solver uploads/copies the
+//     pattern internally during initialize()/upload()).
+//   - Results are returned as owning numpy arrays (the *_to_numpy helpers
+//     memcpy the solver's std::vectors out), so they safely outlive the result
+//     object. The plain def_readonly members expose the same data as Python
+//     lists/copies; the *_numpy properties give zero-extra-copy-after-this numpy
+//     views (still owning their own buffer).
+//
+// The optional torch zero-copy entry points are only declared/bound when
+// CUPF_WITH_TORCH is set (their bodies live in torch_cupf_extension.cpp); those
+// keep tensors on-device with no host copy.
 // ---------------------------------------------------------------------------
 
 #include <pybind11/pybind11.h>
@@ -45,7 +61,11 @@ AdjointResult solve_adjoint_torch_binding(NewtonSolver& self,
 
 
 // ---------------------------------------------------------------------------
-// Helper: numpy CSR 행렬을 YbusView로 감싼다 (zero-copy).
+// Wrap a numpy CSR matrix as a borrowing YbusView (zero-copy). Validates rank /
+// lengths so a malformed CSR is rejected here rather than read out of bounds
+// downstream. The returned view borrows the caller's numpy buffers, so it must
+// only be used within the same binding call (the solver consumes it before
+// returning). nnz is taken from the data length.
 // ---------------------------------------------------------------------------
 static YbusView make_ybus_view(
     py::array_t<int32_t>             indptr,
@@ -59,10 +79,10 @@ static YbusView make_ybus_view(
     if (indptr.ndim() != 1 || indices.ndim() != 1 || data.ndim() != 1) {
         throw std::invalid_argument("Ybus indptr, indices, and data must be 1D arrays");
     }
-    if (indptr.size() != static_cast<py::ssize_t>(rows + 1)) {
+    if (indptr.size() != static_cast<py::ssize_t>(rows + 1)) {  // CSR row pointers: rows+1 entries
         throw std::invalid_argument("Ybus indptr length must be rows + 1");
     }
-    if (indices.size() != data.size()) {
+    if (indices.size() != data.size()) {                        // one column index per value
         throw std::invalid_argument("Ybus indices and data must have the same length");
     }
     return YbusView{
@@ -75,6 +95,12 @@ static YbusView make_ybus_view(
 }
 
 // --- Result converters: copy solver std::vectors into owning numpy arrays ---
+//
+// Each returns a freshly allocated numpy array and memcpy's the solver vector
+// into it, so the returned array owns its buffer and is safe to keep after the
+// result object is gone. 1D variants return [N]; the matrix variants reshape a
+// batch-major flat vector into [batch_size, dim] (the layout the solver writes:
+// case b occupies the contiguous slice [b*dim, (b+1)*dim)).
 
 static py::array_t<std::complex<double>> complex_vector_to_numpy(
     const std::vector<std::complex<double>>& values)
@@ -86,6 +112,7 @@ static py::array_t<std::complex<double>> complex_vector_to_numpy(
     return out;
 }
 
+// Reshape the batch-major voltage vector [batch_size * n_bus] to [batch, n_bus].
 static py::array_t<std::complex<double>> batch_voltage_to_numpy(
     const NRBatchResult& result)
 {
