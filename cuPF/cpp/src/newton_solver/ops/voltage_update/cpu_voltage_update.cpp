@@ -6,7 +6,10 @@
 #include <stdexcept>
 
 
-void CpuVoltageUpdateOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
+// Apply the Newton step dx to the voltage state: V <- V - dx, in the dimF
+// ordering [ dVa@pv | dVa@pq | dVm@pq ], then rebuild the rectangular voltage
+// V = Vm * (cos Va + i sin Va). Marks the cached Ibus stale for the next iter.
+void CpuVoltageUpdateOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     if (buf.n_bus <= 0 || buf.dimF <= 0) {
         throw std::runtime_error("CpuVoltageUpdateOp::run: buffers are not prepared");
@@ -18,6 +21,7 @@ void CpuVoltageUpdateOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
         throw std::invalid_argument("CpuVoltageUpdateOp::run: pv/pq dimensions do not match buffers");
     }
 
+    // Angle update at pv buses, then angle and magnitude updates at pq buses.
     for (int32_t i = 0; i < ctx.n_pv; ++i) {
         buf.Va[static_cast<std::size_t>(ctx.pv[i])] -= buf.dx[static_cast<std::size_t>(i)];
     }
@@ -30,6 +34,7 @@ void CpuVoltageUpdateOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
             buf.dx[static_cast<std::size_t>(ctx.n_pv + ctx.n_pq + i)];
     }
 
+    // Refresh the rectangular voltage from the updated polar (Vm, Va).
     for (int32_t bus = 0; bus < buf.n_bus; ++bus) {
         const double vm = buf.Vm[static_cast<std::size_t>(bus)];
         const double va = buf.Va[static_cast<std::size_t>(bus)];

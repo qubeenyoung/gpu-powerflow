@@ -1,0 +1,19 @@
+{
+  "goal_id": "04-cudss-cudss-prepare",
+  "goal_type": "task",
+  "experiment_branch": "agent/04-cudss-cudss-prepare",
+  "backstops": {
+    "max_cycle": 100
+  },
+  "protected_paths": [
+    ".agent",
+    ".agent/**",
+    "tests",
+    "tests/**"
+  ],
+  "goal_prompt_file": "goal.md",
+  "experiment": {
+    "image": "cupf:latest",
+    "build_ctr": "/tmp/cupf_build"
+  }
+}

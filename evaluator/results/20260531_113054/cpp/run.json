@@ -1,0 +1,15 @@
+{
+  "backend": "cuda",
+  "cases": [],
+  "compute": "mixed",
+  "created_at_utc": "2026-05-31T11:30:54.646743+00:00",
+  "cuda_linear_solver": "cudss",
+  "dataset_root": "/datasets/matpower",
+  "max_iter": 50,
+  "mode": "cpp",
+  "reference_max_iter": 80,
+  "reference_tolerance": 1e-10,
+  "repeats": 5,
+  "tolerance": 1e-08,
+  "warmup": 1
+}

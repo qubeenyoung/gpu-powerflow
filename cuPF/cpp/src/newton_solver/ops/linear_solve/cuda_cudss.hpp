@@ -9,16 +9,16 @@
 
 struct InitializeContext;
 struct IterationContext;
-struct CudaFp64Buffers;
-struct CudaFp32Buffers;
-struct CudaMixedBuffers;
+struct CudaFp64Storage;
+struct CudaFp32Storage;
+struct CudaMixedStorage;
 
 
 // ---------------------------------------------------------------------------
 // CudaLinearSolveCuDSS<T, Buffers>: cuDSS 기반 희소 직접 솔버.
 //
-// T = double : CUDA FP64 프로파일 (Buffers = CudaFp64Buffers)
-// T = float  : CUDA FP32/Mixed 프로파일 (Buffers = CudaFp32Buffers/CudaMixedBuffers)
+// T = double : CUDA FP64 프로파일 (Buffers = CudaFp64Storage)
+// T = float  : CUDA FP32/Mixed 프로파일 (Buffers = CudaFp32Storage/CudaMixedStorage)
 //
 // cuDSS 핸들·디스크립터 등 solver 상태를 소유한다.
 // 버퍼는 각 메서드 호출 시 직접 전달받는다.
@@ -67,8 +67,8 @@ private:
 };
 
 
-extern template struct CudaLinearSolveCuDSS<double, CudaFp64Buffers>;
-extern template struct CudaLinearSolveCuDSS<float,  CudaFp32Buffers>;
-extern template struct CudaLinearSolveCuDSS<float,  CudaMixedBuffers>;
+extern template struct CudaLinearSolveCuDSS<double, CudaFp64Storage>;
+extern template struct CudaLinearSolveCuDSS<float,  CudaFp32Storage>;
+extern template struct CudaLinearSolveCuDSS<float,  CudaMixedStorage>;
 
 #endif  // CUPF_WITH_CUDA

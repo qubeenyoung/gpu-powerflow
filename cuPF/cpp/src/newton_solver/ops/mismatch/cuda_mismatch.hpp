@@ -5,9 +5,9 @@
 #include "newton_solver/core/solver_contexts.hpp"
 
 
-struct CudaFp64Buffers;
-struct CudaFp32Buffers;
-struct CudaMixedBuffers;
+struct CudaFp64Storage;
+struct CudaFp32Storage;
+struct CudaMixedStorage;
 
 
 // ---------------------------------------------------------------------------

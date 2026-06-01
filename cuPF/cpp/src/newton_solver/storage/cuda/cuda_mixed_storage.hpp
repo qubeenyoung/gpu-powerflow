@@ -12,13 +12,13 @@
 
 
 // ---------------------------------------------------------------------------
-// CudaMixedBuffers: mixed precision CUDA 경로의 device 버퍼.
+// CudaMixedStorage: mixed precision CUDA 경로의 device 버퍼.
 //
 // Ybus/Va/Vm/F/Ibus/Sbus → FP64 (authoritative)
 // d_J_values/d_dx → FP32 (Jacobian·solve 연산용)
 // Batch-major layout: [batch_size * dim] contiguous.
 // ---------------------------------------------------------------------------
-struct CudaMixedBuffers {
+struct CudaMixedStorage {
     void prepare(const InitializeContext& ctx);
     void upload(const SolveContext& ctx);
     void download(NRResult& result) const;
@@ -54,7 +54,7 @@ struct CudaMixedBuffers {
     DeviceBuffer<double>  d_Ybus_im;
     DeviceBuffer<int32_t> d_Ybus_indptr;
     DeviceBuffer<int32_t> d_Ybus_indices;
-    DeviceBuffer<int32_t> d_Y_row;
+    DeviceBuffer<int32_t> d_Ybus_row;
 
     DeviceBuffer<float>   d_J_values;
     DeviceBuffer<int32_t> d_J_row_ptr;

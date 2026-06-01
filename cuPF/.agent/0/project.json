@@ -1,0 +1,21 @@
+{
+  "goal_id": "0",
+  "goal_type": "task",
+  "experiment_branch": "feat/refactor",
+  "backstops": {
+    "max_iterations": 8,
+    "max_wallclock_seconds": 7200,
+    "max_budget_usd": null
+  },
+  "protected_paths": [
+    ".agent",
+    ".agent/**",
+    "tests",
+    "tests/**"
+  ],
+  "goal_prompt_file": "goal.md",
+  "experiment": {
+    "image": "cupf:latest",
+    "build_ctr": "/tmp/cupf_build"
+  }
+}

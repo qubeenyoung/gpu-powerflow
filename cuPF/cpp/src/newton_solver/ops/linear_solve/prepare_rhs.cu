@@ -1,7 +1,15 @@
 // ---------------------------------------------------------------------------
 // prepare_rhs.cu
 //
-// CUDA RHS preparation kernel for solver value buffers.
+// CUDA support kernels for the linear-solve and torch-bridge paths. Despite the
+// historical name, this unit hosts several small kernels (each followed by its
+// typed launch_* wrapper declared in cuda_linear_solve_kernels.hpp):
+//   - prepare_rhs            : down-cast FP64 RHS -> FP32 working buffer
+//   - transpose_csr_values   : scatter J values into J^T order (adjoint)
+//   - gather_adjoint_rhs     : pack dL/dVa, dL/dVm into the dimF RHS
+//   - project_load_gradients : scatter the adjoint solution onto load grads
+//   - set_pf_inputs_from_load: build Sbus / V from base power + load tensors
+//   - copy_voltage_outputs   : write Va/Vm out at the caller's precision
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
@@ -14,8 +22,12 @@
 #include <type_traits>
 
 
+// ===========================================================================
+// Device kernels
+// ===========================================================================
 namespace {
 
+// Element-wise FP64 -> FP32 down-cast of the residual into the FP32 RHS buffer.
 __global__ void prepare_rhs_kernel(
     const double* __restrict__ src,
     float* __restrict__ dst,
@@ -26,9 +38,10 @@ __global__ void prepare_rhs_kernel(
         return;
     }
 
-    dst[tid] = static_cast<float>(src[tid]);
+    dst[tid] = static_cast<float>(src[tid]);  // explicit narrowing double -> float
 }
 
+// Move each batched J value to its transposed slot via the precomputed map.
 template <typename T>
 __global__ void transpose_csr_values_kernel(
     const T* __restrict__ src,
@@ -47,6 +60,9 @@ __global__ void transpose_csr_values_kernel(
     dst[batch * nnz + dst_pos] = src[tid];
 }
 
+// Pack the dense per-bus gradients into the dimF adjoint RHS (one thread per
+// RHS entry). Row layout: [dVa@pv | dVa@pq | dVm@pq] — the device counterpart
+// of build_grad_state() in adjoint_math.cpp.
 template <typename T>
 __global__ void gather_adjoint_rhs_kernel(
     const T* __restrict__ grad_va,
@@ -75,6 +91,9 @@ __global__ void gather_adjoint_rhs_kernel(
     }
 }
 
+// Scatter the adjoint solution lambda onto per-bus load gradients (one thread
+// per bus): load gradient = -lambda at pv/pq buses, zero elsewhere. Device
+// counterpart of project_load_gradients() in adjoint_math.cpp.
 template <typename T>
 __global__ void project_load_gradients_kernel(
     const T* __restrict__ lambda,
@@ -90,19 +109,15 @@ __global__ void project_load_gradients_kernel(
 {
     const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= total_bus) return;
+
+    // Default to zero; pv/pq buses below overwrite their own entry.
     grad_load_p[tid] = T(0);
     grad_load_q[tid] = T(0);
-    const int32_t batch_size = total_bus / n_bus;
-    (void)batch_size;
 
     const int32_t n_pvpq = n_pv + n_pq;
-    const int32_t total_rows = total_bus / n_bus * dimF;
-    const int32_t row_tid = tid;
-    (void)total_rows;
-
-    const int32_t b = tid / n_bus;
-    const int32_t base_bus = b * n_bus;
-    const int32_t base_state = b * dimF;
+    const int32_t b = tid / n_bus;            // batch case for this bus
+    const int32_t base_bus = b * n_bus;       // start of this case's bus block
+    const int32_t base_state = b * dimF;      // start of this case's lambda block
     for (int32_t i = 0; i < n_pv; ++i) {
         if (tid == base_bus + pv[i]) {
             grad_load_p[tid] = -lambda[base_state + i];
@@ -114,9 +129,12 @@ __global__ void project_load_gradients_kernel(
             grad_load_q[tid] = -lambda[base_state + n_pvpq + i];
         }
     }
-    (void)row_tid;
 }
 
+// Build the solver's Sbus and initial voltage from base power, load, and flat-
+// start angle/magnitude (one thread per bus). Inputs (InputT) may differ in
+// precision from storage (StorageT); static_cast bridges the two. Sbus = base
+// injection - load; V = mag * (cos(angle) + i sin(angle)).
 template <typename InputT, typename StorageT>
 __global__ void set_pf_inputs_from_load_kernel(
     const InputT* __restrict__ sbus_base_re,
@@ -141,6 +159,7 @@ __global__ void set_pf_inputs_from_load_kernel(
     const StorageT q = static_cast<StorageT>(sbus_base_im[bus]) - static_cast<StorageT>(load_q[tid]);
     const StorageT angle = static_cast<StorageT>(v0_va[bus]);
     const StorageT mag = static_cast<StorageT>(v0_vm[bus]);
+    // Use the precision-matched sincos intrinsic for the polar -> rect step.
     StorageT s = StorageT(0);
     StorageT c = StorageT(0);
     if constexpr (std::is_same_v<StorageT, double>) {
@@ -156,6 +175,7 @@ __global__ void set_pf_inputs_from_load_kernel(
     v_im[tid] = mag * s;
 }
 
+// Copy converged Va/Vm to the output tensors, casting storage -> output type.
 template <typename StorageT, typename OutputT>
 __global__ void copy_voltage_outputs_kernel(
     const StorageT* __restrict__ va,
@@ -166,12 +186,18 @@ __global__ void copy_voltage_outputs_kernel(
 {
     const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= total_bus) return;
-    va_out[tid] = static_cast<OutputT>(va[tid]);
+    va_out[tid] = static_cast<OutputT>(va[tid]);  // storage precision -> output precision
     vm_out[tid] = static_cast<OutputT>(vm[tid]);
 }
 
 }  // namespace
 
+
+// ===========================================================================
+// Host launch wrappers (validate args, size the grid, launch on the cuPF
+// stream, then check for errors). Templated launchers are explicitly
+// instantiated at the bottom for the type combinations the pipelines use.
+// ===========================================================================
 
 void launch_prepare_rhs(const double* src, float* dst, int32_t count)
 {

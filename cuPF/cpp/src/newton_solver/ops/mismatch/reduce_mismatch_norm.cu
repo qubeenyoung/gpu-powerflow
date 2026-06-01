@@ -18,12 +18,15 @@
 
 namespace {
 
+// One block per batch case computes max|F| for that case. Threads first take a
+// strided partial max, then reduce in shared memory; lane 0 writes the result.
 template <typename Scalar>
 __global__ void reduce_mismatch_norm_kernel(
     const Scalar* __restrict__ F,
     int32_t dimF,
     Scalar* __restrict__ normF)
 {
+    // Dynamic shared scratch, typed to the kernel's scalar.
     extern __shared__ unsigned char shared[];
     Scalar* sdata = reinterpret_cast<Scalar*>(shared);
 
@@ -31,12 +34,14 @@ __global__ void reduce_mismatch_norm_kernel(
     const int32_t lane = threadIdx.x;
     const int32_t base = batch * dimF;
 
+    // Per-thread partial max over a strided slice of this case's residual.
     Scalar local_max = Scalar(0);
     for (int32_t i = lane; i < dimF; i += blockDim.x) {
         const Scalar value = fabs(F[base + i]);
         local_max = fmax(local_max, value);
     }
 
+    // Tree reduction of the partials in shared memory.
     sdata[lane] = local_max;
     __syncthreads();
 
@@ -55,7 +60,7 @@ __global__ void reduce_mismatch_norm_kernel(
 }  // namespace
 
 
-void launch_reduce_mismatch_norm(CudaFp64Buffers& storage)
+void launch_reduce_mismatch_norm(CudaFp64Storage& storage)
 {
     if (storage.dimF <= 0) {
         throw std::runtime_error("launch_reduce_mismatch_norm: storage is not prepared");
@@ -74,7 +79,7 @@ void launch_reduce_mismatch_norm(CudaFp64Buffers& storage)
 }
 
 
-void launch_reduce_mismatch_norm(CudaFp32Buffers& storage)
+void launch_reduce_mismatch_norm(CudaFp32Storage& storage)
 {
     if (storage.dimF <= 0 || storage.batch_size <= 0) {
         throw std::runtime_error("launch_reduce_mismatch_norm: storage is not prepared");
@@ -93,7 +98,7 @@ void launch_reduce_mismatch_norm(CudaFp32Buffers& storage)
 }
 
 
-void launch_reduce_mismatch_norm(CudaMixedBuffers& storage)
+void launch_reduce_mismatch_norm(CudaMixedStorage& storage)
 {
     if (storage.dimF <= 0 || storage.batch_size <= 0) {
         throw std::runtime_error("launch_reduce_mismatch_norm: storage is not prepared");

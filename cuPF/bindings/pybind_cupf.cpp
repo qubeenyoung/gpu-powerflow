@@ -1,3 +1,13 @@
+// ---------------------------------------------------------------------------
+// pybind_cupf.cpp
+//
+// Python bindings for the cuPF solver (module name: _cupf). Exposes the option
+// enums/structs, the NR result structs, and the NewtonSolver class. Inputs are
+// taken as numpy arrays (Ybus as zero-copy CSR via YbusView) and results are
+// returned as numpy arrays. The optional torch zero-copy entry points are only
+// declared/bound when CUPF_WITH_TORCH is set (defined in torch_cupf_extension).
+// ---------------------------------------------------------------------------
+
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -64,6 +74,8 @@ static YbusView make_ybus_view(
     };
 }
 
+// --- Result converters: copy solver std::vectors into owning numpy arrays ---
+
 static py::array_t<std::complex<double>> complex_vector_to_numpy(
     const std::vector<std::complex<double>>& values)
 {
@@ -126,6 +138,7 @@ PYBIND11_MODULE(_cupf, m)
     // Enum 바인딩
     // -----------------------------------------------------------------------
 
+    // --- Configuration enums ---
     py::enum_<BackendKind>(m, "BackendKind",
         "연산 백엔드 선택 (CPU 또는 CUDA)")
         .value("CPU",  BackendKind::CPU)
@@ -169,6 +182,7 @@ PYBIND11_MODULE(_cupf, m)
     // 설정 구조체 바인딩
     // -----------------------------------------------------------------------
 
+    // --- Option / config structs ---
     py::class_<NRConfig>(m, "NRConfig",
         "Newton-Raphson 수렴 조건.")
         .def(py::init<>())
@@ -238,6 +252,7 @@ PYBIND11_MODULE(_cupf, m)
     // 결과 구조체 바인딩
     // -----------------------------------------------------------------------
 
+    // --- Result structs (returned to Python) ---
     py::class_<NRResult>(m, "NRResult",
         "solve() 결과. public I/O는 항상 FP64.")
         .def_readonly("V",              &NRResult::V,
@@ -335,6 +350,7 @@ PYBIND11_MODULE(_cupf, m)
     // NewtonSolver 바인딩
     // -----------------------------------------------------------------------
 
+    // --- Solver class (initialize -> solve/solve_batch -> solve_adjoint) ---
     py::class_<NewtonSolver>(m, "NewtonSolver",
         "Newton-Raphson 전력조류 solver.\n\n"
         "사용 예::\n\n"

@@ -245,7 +245,7 @@
 - 계획:
   mixed profile의 `Ybus`도 FP64로 유지한다.
 - 실제 구현:
-  `CudaMixedBuffers::d_Ybus_re/im`은 FP64 buffer로 유지하고, mixed `Ibus` kernel은
+  `CudaMixedStorage::d_Ybus_re/im`은 FP64 buffer로 유지하고, mixed `Ibus` kernel은
   `Ybus64 * V64 -> Ibus64`를 계산한다. Jacobian fill은 `JScalar`와 `YbusScalar`를 분리해
   mixed에서 `Ybus64/V64/Ibus64`를 읽은 뒤 FP32 산술로 `J32`를 쓴다.
 - 차이:
@@ -290,3 +290,42 @@
   수렴했다. final mismatch 범위는 `4.284e-12`~`6.906e-09`였다.
   `case_ACTIVSg200`, `B=4` smoke에서도 edge는 3 iteration, final mismatch `4.479e-12`,
   vertex는 3 iteration, final mismatch `3.664e-12`로 수렴했다.
+
+---
+
+## 2026-05-31 (cycle 5 / s5 — docs ↔ src 동기화)
+
+### 설계 문서 vs 구현
+
+- 계획:
+  설계 문서(`overview.md`, `core/README.md`, `ops/README.md`, `storage/README.md`,
+  `variants/README.md`)는 가상 인터페이스 설계(`IStorage`, `I*Op`, `op_interfaces.hpp`,
+  `solver stage configuration::build()`)를 전제했다.
+- 실제 구현:
+  코드는 정적 디스패치로 옮겨졌다. stateless `Cpu*Op`/`Cuda*Op` struct를 프로파일별
+  pipeline struct가 값으로 소유하고, `SolverPipeline` `std::variant`로 묶이며,
+  조립은 `newton_solver.cpp`의 `NewtonSolver` 생성자에서 직접 수행한다. 전역 네임스페이스를
+  쓰며(`cupf::` 없음), `op_interfaces.hpp`/`reference/`/`solver_stages.cpp`는 존재하지 않는다.
+- 차이:
+  설계 변경이 아니라 문서가 구현 진화를 따라오지 못한 것이다. s5에서 5개 설계 문서를
+  variant/정적 디스패치 현실에 맞게 재작성하고, 깨진 경로(`reference/`, in-tree `benchmarks/`,
+  `cuda_batch/TODO.md`)와 garbled 식별자를 제거했다. 대조표·요약은
+  `docs/implementation/docs_src_reconciliation.md`에 정리했다.
+
+### 프로파일 개수
+
+- 계획:
+  문서는 CPU FP64 / CUDA FP64 / CUDA Mixed 3개 프로파일을 기술했다.
+- 실제 구현:
+  `SolverPipeline` variant는 `CpuFp64Pipeline`, `CudaFp64Pipeline`, `CudaFp32Pipeline`,
+  `CudaMixedPipeline`을 항상 포함하고, `CUPF_ENABLE_CUSTOM_SOLVER=ON`이면
+  `CudaFp64CustomPipeline`이 추가된다.
+- 차이:
+  `CudaFp32Pipeline`(full-FP32, `batch_supported`)과 gated custom solver 경로를 문서에 추가했다.
+
+### 검증
+
+- 컴파일 소스를 건드리지 않는 문서 전용 변경이므로 빌드에 영향이 없다. 마지막 green build는
+  s4의 isolated `docker run --rm cupf:latest`(`WITH_CUDA=ON -DBUILD_EVALUATORS=ON
+  -DBUILD_TESTING=ON`, `ctest` 1/1 pass)이다. 문서에 인용한 모든 파일 경로·심볼은
+  작성 시점 트리에 대해 grep으로 확인했다.

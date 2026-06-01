@@ -1,3 +1,13 @@
+// ---------------------------------------------------------------------------
+// torch_cupf_extension.cpp
+//
+// Zero-copy glue between PyTorch tensors and cuPF. Each binding validates the
+// caller's CUDA tensors (device/contiguity/dtype/shape), binds cuPF to torch's
+// current CUDA stream for the call, and forwards raw device pointers into the
+// cupf::torch_api forward/backward entry points — no host copies. Built only
+// when CUPF_WITH_TORCH is set; the bindings are registered in pybind_cupf.cpp.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_TORCH
 
 #include <torch/extension.h>
@@ -11,8 +21,10 @@
 
 #include <string>
 
+// --- Tensor validation helpers (throw via TORCH_CHECK on violation) ---
 namespace {
 
+// cuPF dtype string for a tensor (float64/float32 only).
 const char* tensor_dtype_name(const at::Tensor& t)
 {
     if (t.scalar_type() == at::kDouble) return "float64";
@@ -20,6 +32,7 @@ const char* tensor_dtype_name(const at::Tensor& t)
     TORCH_CHECK(false, "cuPF torch extension supports only torch.float64 and torch.float32 tensors");
 }
 
+// Require a defined, CUDA-resident, contiguous float32/float64 tensor.
 void check_cuda_contiguous(const at::Tensor& t, const char* name)
 {
     TORCH_CHECK(t.defined(), name, " must be defined");
@@ -62,6 +75,9 @@ void check_bus_vector_like(const at::Tensor& ref_batch, const at::Tensor& t, con
 }  // namespace
 
 
+// Forward pass binding: validate the input/output tensors, run cuPF's forward
+// solve on torch's current CUDA stream writing Va/Vm into the output tensors,
+// and tag the result as a zero-copy torch call.
 AdjointResult solve_with_adjoint_cache_torch_binding(NewtonSolver& self,
                                                      at::Tensor sbus_base_re,
                                                      at::Tensor sbus_base_im,
@@ -115,6 +131,9 @@ AdjointResult solve_with_adjoint_cache_torch_binding(NewtonSolver& self,
 }
 
 
+// Backward pass binding: validate the upstream-gradient and output tensors,
+// run cuPF's adjoint solve on torch's current CUDA stream writing the load
+// gradients into the output tensors.
 AdjointResult solve_adjoint_torch_binding(NewtonSolver& self,
                                           at::Tensor grad_va,
                                           at::Tensor grad_vm,

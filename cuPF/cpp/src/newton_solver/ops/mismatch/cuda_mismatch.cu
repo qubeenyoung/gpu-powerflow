@@ -1,3 +1,13 @@
+// ---------------------------------------------------------------------------
+// cuda_mismatch.cu
+//
+// CUDA dispatch for the mismatch and mismatch-norm NR stages. The actual
+// kernels live in compute_mismatch_from_ibus.cu and reduce_mismatch_norm.cu;
+// these Op::run overloads validate state, launch them, and (for the norm) pull
+// the result to host and set the convergence flag. The convergence norm is the
+// infinity-norm of the residual, reduced across the batch.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_mismatch.hpp"
@@ -14,18 +24,18 @@
 #include <vector>
 
 
-void launch_compute_mismatch_from_ibus(CudaFp64Buffers& buf);
-void launch_compute_mismatch_from_ibus(CudaFp32Buffers& buf);
-void launch_compute_mismatch_from_ibus(CudaMixedBuffers& buf);
-void launch_reduce_mismatch_norm(CudaFp64Buffers& buf);
-void launch_reduce_mismatch_norm(CudaFp32Buffers& buf);
-void launch_reduce_mismatch_norm(CudaMixedBuffers& buf);
+void launch_compute_mismatch_from_ibus(CudaFp64Storage& buf);
+void launch_compute_mismatch_from_ibus(CudaFp32Storage& buf);
+void launch_compute_mismatch_from_ibus(CudaMixedStorage& buf);
+void launch_reduce_mismatch_norm(CudaFp64Storage& buf);
+void launch_reduce_mismatch_norm(CudaFp32Storage& buf);
+void launch_reduce_mismatch_norm(CudaMixedStorage& buf);
 
 
 // CudaMismatchOp
 
 template <>
-void CudaMismatchOp<CudaFp64Buffers>::run(CudaFp64Buffers& buf, IterationContext& ctx)
+void CudaMismatchOp<CudaFp64Storage>::run(CudaFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
     if (buf.n_bus <= 0 || buf.dimF <= 0) {
@@ -35,7 +45,7 @@ void CudaMismatchOp<CudaFp64Buffers>::run(CudaFp64Buffers& buf, IterationContext
 }
 
 template <>
-void CudaMismatchOp<CudaFp32Buffers>::run(CudaFp32Buffers& buf, IterationContext& ctx)
+void CudaMismatchOp<CudaFp32Storage>::run(CudaFp32Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
     if (buf.n_bus <= 0 || buf.dimF <= 0 || buf.batch_size <= 0) {
@@ -45,7 +55,7 @@ void CudaMismatchOp<CudaFp32Buffers>::run(CudaFp32Buffers& buf, IterationContext
 }
 
 template <>
-void CudaMismatchOp<CudaMixedBuffers>::run(CudaMixedBuffers& buf, IterationContext& ctx)
+void CudaMismatchOp<CudaMixedStorage>::run(CudaMixedStorage& buf, IterationContext& ctx)
 {
     (void)ctx;
     if (buf.n_bus <= 0 || buf.dimF <= 0 || buf.batch_size <= 0) {
@@ -58,7 +68,7 @@ void CudaMismatchOp<CudaMixedBuffers>::run(CudaMixedBuffers& buf, IterationConte
 // CudaMismatchNormOp
 
 template <>
-void CudaMismatchNormOp<CudaFp64Buffers>::run(CudaFp64Buffers& buf, IterationContext& ctx)
+void CudaMismatchNormOp<CudaFp64Storage>::run(CudaFp64Storage& buf, IterationContext& ctx)
 {
     if (buf.dimF <= 0) {
         throw std::runtime_error("CudaMismatchNormOp::run: buffers are not prepared");
@@ -82,7 +92,7 @@ void CudaMismatchNormOp<CudaFp64Buffers>::run(CudaFp64Buffers& buf, IterationCon
 }
 
 template <>
-void CudaMismatchNormOp<CudaFp32Buffers>::run(CudaFp32Buffers& buf, IterationContext& ctx)
+void CudaMismatchNormOp<CudaFp32Storage>::run(CudaFp32Storage& buf, IterationContext& ctx)
 {
     if (buf.dimF <= 0 || buf.batch_size <= 0) {
         throw std::runtime_error("CudaMismatchNormOp::run: buffers are not prepared");
@@ -90,12 +100,13 @@ void CudaMismatchNormOp<CudaFp32Buffers>::run(CudaFp32Buffers& buf, IterationCon
 
     launch_reduce_mismatch_norm(buf);
 
+    // Per-case norms reduced on device; take the worst case as the batch norm.
     std::vector<float> h_norm(buf.batch_size);
     buf.d_normF.copyTo(h_norm.data(), h_norm.size());
 
     ctx.normF = 0.0;
     for (float v : h_norm) {
-        ctx.normF = std::max(ctx.normF, static_cast<double>(v));
+        ctx.normF = std::max(ctx.normF, static_cast<double>(v));  // widen for the host max
     }
 
     if (!std::isfinite(ctx.normF)) {
@@ -113,7 +124,7 @@ void CudaMismatchNormOp<CudaFp32Buffers>::run(CudaFp32Buffers& buf, IterationCon
 }
 
 template <>
-void CudaMismatchNormOp<CudaMixedBuffers>::run(CudaMixedBuffers& buf, IterationContext& ctx)
+void CudaMismatchNormOp<CudaMixedStorage>::run(CudaMixedStorage& buf, IterationContext& ctx)
 {
     if (buf.dimF <= 0 || buf.batch_size <= 0) {
         throw std::runtime_error("CudaMismatchNormOp::run: buffers are not prepared");

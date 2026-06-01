@@ -1,3 +1,11 @@
+// ---------------------------------------------------------------------------
+// cuda_fp64_storage.cpp
+//
+// FP64 single-case (batch_size == 1) device storage. Like the FP32/Mixed
+// variants but with no batch dimension and no precision conversion — host
+// FP64 inputs map straight to FP64 device buffers.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_fp64_storage.hpp"
@@ -11,6 +19,7 @@
 
 namespace {
 
+// Throw if a required input pointer is null for a non-empty array.
 template <typename T>
 void require_pointer(const T* ptr, const char* name, int32_t count)
 {
@@ -19,6 +28,7 @@ void require_pointer(const T* ptr, const char* name, int32_t count)
     }
 }
 
+// Per-nonzero row index of the CSR Ybus (the kernels need the row of each nz).
 std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
 {
     std::vector<int32_t> rows(static_cast<std::size_t>(ybus.nnz), 0);
@@ -30,6 +40,7 @@ std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
     return rows;
 }
 
+// Split a complex array into separate real/imag FP64 device buffers.
 void upload_complex_components(DeviceBuffer<double>& dst_re,
                                DeviceBuffer<double>& dst_im,
                                const std::complex<double>* src,
@@ -48,7 +59,8 @@ void upload_complex_components(DeviceBuffer<double>& dst_re,
 }  // namespace
 
 
-void CudaFp64Buffers::prepare(const InitializeContext& ctx)
+// Allocate buffers and upload the static topology (Ybus, J pattern, maps).
+void CudaFp64Storage::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr,  "InitializeContext.ybus.indptr",  ctx.ybus.rows + 1);
     require_pointer(ctx.ybus.indices, "InitializeContext.ybus.indices", ctx.ybus.nnz);
@@ -70,7 +82,7 @@ void CudaFp64Buffers::prepare(const InitializeContext& ctx)
     d_Ybus_indices.assign(ctx.ybus.indices, static_cast<std::size_t>(nnz_ybus));
 
     const std::vector<int32_t> h_y_row = build_ybus_row_index(ctx.ybus);
-    d_Y_row.assign(h_y_row.data(), h_y_row.size());
+    d_Ybus_row.assign(h_y_row.data(), h_y_row.size());
 
     d_J_values.resize(nnz_J);
     d_J_row_ptr.assign(ctx.J.row_ptr.data(), static_cast<std::size_t>(ctx.J.dim + 1));
@@ -116,16 +128,17 @@ void CudaFp64Buffers::prepare(const InitializeContext& ctx)
 }
 
 
-void CudaFp64Buffers::upload(const SolveContext& ctx)
+// Push per-solve inputs (Ybus/Sbus/V0) and seed polar (Va, Vm) from V0.
+void CudaFp64Storage::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
-        throw std::invalid_argument("CudaFp64Buffers::upload: solve context is incomplete");
+        throw std::invalid_argument("CudaFp64Storage::upload: solve context is incomplete");
     }
 
     const YbusView& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus ||
         ybus.nnz != static_cast<int32_t>(d_Ybus_re.size())) {
-        throw std::runtime_error("CudaFp64Buffers::upload: Ybus dimensions do not match initialize()");
+        throw std::runtime_error("CudaFp64Storage::upload: Ybus dimensions do not match initialize()");
     }
 
     require_pointer(ybus.data,  "SolveContext.ybus->data", ybus.nnz);
@@ -153,7 +166,8 @@ void CudaFp64Buffers::upload(const SolveContext& ctx)
 }
 
 
-void CudaFp64Buffers::download(NRResult& result) const
+// Copy the converged voltage back into the FP64 result.
+void CudaFp64Storage::download(NRResult& result) const
 {
     std::vector<double> h_re(static_cast<std::size_t>(n_bus));
     std::vector<double> h_im(static_cast<std::size_t>(n_bus));

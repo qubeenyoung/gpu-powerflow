@@ -1,9 +1,10 @@
 // ---------------------------------------------------------------------------
-// cpu_fp64_storage.cpp — CpuFp64Buffers 구현
+// cpu_fp64_storage.cpp — CpuFp64Storage 구현
 // ---------------------------------------------------------------------------
 
 #include "cpu_fp64_storage.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -22,7 +23,11 @@ void require_pointer(const T* ptr, const char* name, int32_t count)
 }  // namespace
 
 
-void CpuFp64Buffers::prepare(const InitializeContext& ctx)
+// Allocate host state and build the Eigen sparse Jacobian skeleton. Eigen
+// stores the matrix CSC (column-major), but the scatter maps were built against
+// the CSR pattern, so the maps are remapped to CSC value positions here (see
+// the second block below). Per-solve values arrive later via upload().
+void CpuFp64Storage::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr, "InitializeContext.ybus.indptr", ctx.ybus.rows + 1);
     require_pointer(ctx.ybus.indices, "InitializeContext.ybus.indices", ctx.ybus.nnz);
@@ -33,14 +38,14 @@ void CpuFp64Buffers::prepare(const InitializeContext& ctx)
     dimF   = n_pvpq + n_pq;
 
     if (!ctx.maps.pvpq.empty() && ctx.maps.n_pvpq != n_pvpq) {
-        throw std::runtime_error("CpuFp64Buffers::prepare: JacobianScatterMap n_pvpq does not match pv/pq dimensions");
+        throw std::runtime_error("CpuFp64Storage::prepare: JacobianScatterMap n_pvpq does not match pv/pq dimensions");
     }
 
     const bool has_static_jacobian =
         ctx.J.dim > 0 || ctx.J.nnz > 0 || !ctx.J.row_ptr.empty() || !ctx.J.col_idx.empty();
 
     if (has_static_jacobian && ctx.J.dim != dimF) {
-        throw std::runtime_error("CpuFp64Buffers::prepare: Jacobian dimension does not match dimF");
+        throw std::runtime_error("CpuFp64Storage::prepare: Jacobian dimension does not match dimF");
     }
 
     maps      = ctx.maps;
@@ -68,7 +73,8 @@ void CpuFp64Buffers::prepare(const InitializeContext& ctx)
 
     if (has_static_jacobian) {
         {
-            using Triplet = Eigen::Triplet<double, int32_t>;
+            // Build the CSC sparsity from the CSR pattern (values filled later).
+            using Triplet = CpuTriplet<double>;
             std::vector<Triplet> trips;
             trips.reserve(static_cast<std::size_t>(ctx.J.nnz));
 
@@ -87,6 +93,8 @@ void CpuFp64Buffers::prepare(const InitializeContext& ctx)
         {
             // JacobianScatterMap(CSR 기반) → CSC 위치로 리맵.
             // CpuJacobianOpF64가 J.valuePtr()[pos]에 직접 scatter하므로 필요.
+            // Build csr_to_csc[csr_pos] = csc_pos by counting-sorting the CSC
+            // nonzeros back into row order, then translate every map entry.
             const int32_t* csc_col_ptr = J.outerIndexPtr();
             const int32_t* csc_row_idx = J.innerIndexPtr();
             const int32_t  j_nnz       = J.nonZeros();
@@ -130,16 +138,18 @@ void CpuFp64Buffers::prepare(const InitializeContext& ctx)
 }
 
 
-void CpuFp64Buffers::upload(const SolveContext& ctx)
+// Load per-solve inputs: verify the Ybus pattern is unchanged since prepare(),
+// refresh Ybus values, rebuild the Eigen Ybus, and seed V/Va/Vm/Sbus from V0.
+void CpuFp64Storage::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
-        throw std::invalid_argument("CpuFp64Buffers::upload: solve context is incomplete");
+        throw std::invalid_argument("CpuFp64Storage::upload: solve context is incomplete");
     }
 
     const YbusView& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus ||
         ybus.nnz != static_cast<int32_t>(Ybus_data.size())) {
-        throw std::runtime_error("CpuFp64Buffers::upload: Ybus dimensions do not match initialize()");
+        throw std::runtime_error("CpuFp64Storage::upload: Ybus dimensions do not match initialize()");
     }
 
     require_pointer(ybus.indptr,  "SolveContext.ybus->indptr",  ybus.rows + 1);
@@ -150,18 +160,18 @@ void CpuFp64Buffers::upload(const SolveContext& ctx)
 
     for (int32_t row = 0; row <= n_bus; ++row) {
         if (ybus.indptr[row] != Ybus_indptr[static_cast<std::size_t>(row)]) {
-            throw std::runtime_error("CpuFp64Buffers::upload: Ybus 희소 구조가 initialize() 이후 변경되었습니다.");
+            throw std::runtime_error("CpuFp64Storage::upload: Ybus 희소 구조가 initialize() 이후 변경되었습니다.");
         }
     }
     for (int32_t k = 0; k < ybus.nnz; ++k) {
         if (ybus.indices[k] != Ybus_indices[static_cast<std::size_t>(k)]) {
-            throw std::runtime_error("CpuFp64Buffers::upload: Ybus 희소 구조가 initialize() 이후 변경되었습니다.");
+            throw std::runtime_error("CpuFp64Storage::upload: Ybus 희소 구조가 initialize() 이후 변경되었습니다.");
         }
         Ybus_data[static_cast<std::size_t>(k)] = ybus.data[k];
     }
 
     {
-        using Triplet = Eigen::Triplet<std::complex<double>, int32_t>;
+        using Triplet = CpuTriplet<std::complex<double>>;
         std::vector<Triplet> trips;
         trips.reserve(static_cast<std::size_t>(ybus.nnz));
 
@@ -193,7 +203,7 @@ void CpuFp64Buffers::upload(const SolveContext& ctx)
 }
 
 
-void CpuFp64Buffers::download(NRResult& result) const
+void CpuFp64Storage::download(NRResult& result) const
 {
     result.V = V;
 }

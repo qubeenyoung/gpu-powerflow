@@ -1,24 +1,25 @@
 # storage — 스토리지 레이어 설계
 
 Storage는 한 실행 프로파일에 필요한 **메모리 버퍼**와 **라이브러리 핸들**을 소유하는 레이어다.
-Op는 `IStorage`를 통해 버퍼에 접근하며 계산 로직만 구현한다.
+stage Op는 Storage(`buf`)를 인자로 받아 버퍼에 접근하며 계산 로직만 구현한다.
 
 ---
 
-## IStorage 인터페이스
+## Storage 공통 메서드 (가상 인터페이스 아님)
 
-**파일:** [op_interfaces.hpp](../../cpp/src/newton_solver/ops/op_interfaces.hpp)
+각 프로파일은 자기 Storage struct(`CpuFp64Storage`, `CudaFp64Storage`,
+`CudaFp32Storage`, `CudaMixedStorage`)를 갖는다. 공통 base class나
+`op_interfaces.hpp` 같은 추상 인터페이스는 없고, pipeline이 정적으로 아래
+같은 멤버를 호출한다.
 
 ```cpp
-class IStorage {
-    virtual BackendKind   backend() const = 0;
-    virtual ComputePolicy compute()  const = 0;
-    virtual void prepare(const InitializeContext& ctx) = 0;  // initialize 단계
-    virtual void upload(const SolveContext& ctx)    = 0;  // solve 시작 시
-    virtual void download_result(NRResult& result) const = 0;
-    virtual void download_batch_result(NRBatchResult& result) const;
-};
+void prepare(const InitializeContext& ctx);   // initialize 단계 (한 번)
+void upload(const SolveContext& ctx);          // solve 시작 시 데이터 업로드
+void download(NRResult& result) const;         // 최종 결과 다운로드 (B=1)
+void download_batch(NRBatchResult& result) const;  // batch 결과 (batch-capable storage만)
 ```
+
+backend/precision은 타입 자체(struct + dtype alias)로 구분되며 런타임 질의 메서드가 아니다.
 
 ### prepare()
 
@@ -34,10 +35,11 @@ class IStorage {
 Ybus의 희소 구조가 `initialize()` 당시와 같은지 검증한다.
 기본 실행 모델은 batch-major layout이며, single-case solve는 `batch_size=1`이다.
 
-### download_result() / download_batch_result()
+### download() / download_batch()
 
 NR 루프 완료 후 device의 V 벡터를 host result로 복사한다.
-batch-aware storage는 `download_batch_result()`를 override하고, 기본 구현은 `B=1` wrapper다.
+batch-capable storage(`CudaFp32Storage`, `CudaMixedStorage`)는 `download_batch()`를
+제공하고, single-case는 `download()`(B=1)다.
 
 ---
 
@@ -66,8 +68,8 @@ CPU FP64 경로의 host-side 버퍼와 Eigen/KLU 상태를 관리한다.
 
 - Eigen은 내부적으로 CSC를 사용하지만 JacobianMapBuilder는 CSR 맵을 생성한다.
   `prepare()`에서 CSR→CSC 리맵 테이블(`csr_to_csc`)을 만들어 `mapJ**`를 CSC 위치로 변환한다.
-- `has_cached_Ibus`: MismatchOp이 Ibus를 계산하면 true로 설정, JacobianOp이 재사용.
-  VoltageUpdateOp이 V를 변경하면 false로 무효화.
+- `has_cached_Ibus`: ibus/mismatch stage가 Ibus를 계산하면 true로 설정, Jacobian이 재사용.
+  voltage update가 V를 변경하면 false로 무효화.
 - `has_klu_symbolic`: KLU symbolic 분석 완료 여부.
 
 ---
@@ -94,7 +96,7 @@ SolveScalar    = double
 | `d_Ybus_re/im` | `DeviceBuffer<double>` | [nnz_Y] | Ybus 실수·허수부 |
 | `d_Ybus_indptr` | `DeviceBuffer<int32_t>` | [n_bus+1] | Ybus CSR 행 포인터 |
 | `d_Ybus_indices` | `DeviceBuffer<int32_t>` | [nnz_Y] | Ybus CSR 열 인덱스 |
-| `d_Y_row` | `DeviceBuffer<int32_t>` | [nnz_Y] | Ybus CSR 행 번호 (edge kernel용) |
+| `d_Ybus_row` | `DeviceBuffer<int32_t>` | [nnz_Y] | Ybus CSR 행 번호 (edge kernel용) |
 | `d_J_values` | `DeviceBuffer<double>` | [nnz_J] | Jacobian 값 |
 | `d_J_row_ptr/col_idx` | `DeviceBuffer<int32_t>` | — | Jacobian CSR 구조 |
 | `d_F` | `DeviceBuffer<double>` | [dimF] | 미스매치 벡터 |
@@ -105,6 +107,8 @@ SolveScalar    = double
 | `d_mapJ11/12/21/22` | `DeviceBuffer<int32_t>` | [nnz_Y] | 오프 대각 산포 맵 |
 | `d_diagJ11/12/21/22` | `DeviceBuffer<int32_t>` | [n_bus] | 대각 산포 맵 |
 | `d_pvpq, d_pv, d_pq` | `DeviceBuffer<int32_t>` | [n_pvpq/n_pv/n_pq] | 버스 유형 인덱스 |
+
+> `CudaFp32Storage`는 같은 레이아웃을 FP32 값 버퍼로 둔 full-FP32 변형이다.
 
 ---
 
@@ -182,6 +186,6 @@ class DeviceBuffer {
 |------|-------------|
 | CPU 개발·디버깅 | `CpuFp64Storage` |
 | CUDA, 정확도 최우선 | `CudaFp64Storage` |
-| CUDA, 처리량 최우선 | `CudaMixedStorage` |
+| CUDA, 처리량 최우선 | `CudaMixedStorage` (또는 full-FP32 `CudaFp32Storage`) |
 
 Mixed 모드는 Jacobian이 FP32이므로 수치적으로 민감한 계통(ill-conditioned Y)에서 수렴에 더 많은 반복이 필요할 수 있다.

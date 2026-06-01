@@ -19,7 +19,7 @@
 #include <stdexcept>
 
 
-void CudaVoltageUpdateOp<double>::run(CudaFp64Buffers& buf, IterationContext& ctx)
+void CudaVoltageUpdateOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
     if (buf.n_bus <= 0 || buf.dimF <= 0) {
@@ -27,7 +27,7 @@ void CudaVoltageUpdateOp<double>::run(CudaFp64Buffers& buf, IterationContext& ct
     }
 
     const int32_t n_pv = buf.n_pvpq - buf.n_pq;
-    launch_voltage_update_state<double, double>(
+    launch_apply_voltage_update<double, double>(
         1,
         buf.n_bus,
         buf.dimF,
@@ -50,7 +50,7 @@ void CudaVoltageUpdateOp<double>::run(CudaFp64Buffers& buf, IterationContext& ct
 }
 
 
-void CudaVoltageUpdateOp<float>::run(CudaFp32Buffers& buf, IterationContext& ctx)
+void CudaVoltageUpdateOp<float>::run(CudaFp32Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
     if (buf.n_bus <= 0 || buf.dimF <= 0 || buf.batch_size <= 0) {
@@ -59,7 +59,7 @@ void CudaVoltageUpdateOp<float>::run(CudaFp32Buffers& buf, IterationContext& ctx
 
     const int32_t n_pv = buf.n_pvpq - buf.n_pq;
     const int32_t total_buses = buf.batch_size * buf.n_bus;
-    launch_voltage_update_state<float, float>(
+    launch_apply_voltage_update<float, float>(
         buf.batch_size,
         buf.n_bus,
         buf.dimF,
@@ -82,7 +82,7 @@ void CudaVoltageUpdateOp<float>::run(CudaFp32Buffers& buf, IterationContext& ctx
 }
 
 
-void CudaVoltageUpdateOp<float>::run(CudaMixedBuffers& buf, IterationContext& ctx)
+void CudaVoltageUpdateOp<float>::run(CudaMixedStorage& buf, IterationContext& ctx)
 {
     (void)ctx;
     if (buf.n_bus <= 0 || buf.dimF <= 0 || buf.batch_size <= 0) {
@@ -91,7 +91,7 @@ void CudaVoltageUpdateOp<float>::run(CudaMixedBuffers& buf, IterationContext& ct
 
     const int32_t n_pv = buf.n_pvpq - buf.n_pq;
     const int32_t total_buses = buf.batch_size * buf.n_bus;
-    launch_voltage_update_state<double, float>(
+    launch_apply_voltage_update<double, float>(
         buf.batch_size,
         buf.n_bus,
         buf.dimF,

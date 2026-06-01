@@ -7,6 +7,7 @@ option(WITH_CUDA             "Build the CUDA backend"           OFF)
 option(BUILD_PYTHON_BINDINGS "Build the pybind11 Python module" OFF)
 option(CUPF_WITH_TORCH      "Build torch::Tensor zero-copy Python extension APIs" OFF)
 option(BUILD_BENCHMARKS      "Build benchmark executables"      OFF)
+option(BUILD_EVALUATORS      "Build cuPF evaluation executables" OFF)
 option(ENABLE_LOG            "Enable spdlog logging when available" ON)
 option(ENABLE_DUMP           "Enable debug dump utilities"      OFF)
 option(ENABLE_TIMING         "Enable ScopedTimer timing collection" OFF)
@@ -35,7 +36,6 @@ endif()
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
-find_package(Eigen3 REQUIRED)
 find_package(spdlog QUIET)
 
 if(CUPF_WITH_TORCH)
@@ -88,19 +88,6 @@ if(ENABLE_LOG AND spdlog_FOUND)
   set(CUPF_LOGGING_ENABLED ON)
 elseif(ENABLE_LOG)
   message(STATUS "spdlog not found: disabling cuPF logging")
-endif()
-
-set(CUPF_SUPERLU_ENABLED OFF)
-find_path(SUPERLU_INCLUDE_DIR
-  NAMES slu_ddefs.h
-  PATHS /usr/include/superlu /usr/local/include/superlu)
-find_library(LIB_SUPERLU
-  NAMES superlu
-  PATHS /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib)
-if(SUPERLU_INCLUDE_DIR AND LIB_SUPERLU)
-  set(CUPF_SUPERLU_ENABLED ON)
-else()
-  message(STATUS "SuperLU not found: disabling CpuSuperLU kernel variant")
 endif()
 
 # SuiteSparse KLU (required for CPU backend)
@@ -174,10 +161,15 @@ if(WITH_CUDA)
   endif()
   message(STATUS "cuDSS ND_NLEVELS: ${CUPF_CUDSS_ND_NLEVELS}")
 
+  # The Debian libcudss0-dev-cuda-12 package installs versioned subdirectories
+  # (/usr/include/libcudss/12, /usr/lib/x86_64-linux-gnu/libcudss/12), which
+  # differ from the flat /usr/include layout of the pip nvidia-cudss wheel, so
+  # search both.
   find_path(CUDSS_INCLUDE_DIR
     NAMES cuDSS.h cudss.h
     HINTS
       /usr/include
+      /usr/include/libcudss/12
       /usr/local/include
       /usr/local/cuda/include
       $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/cu12/include)
@@ -186,6 +178,7 @@ if(WITH_CUDA)
     HINTS
       /usr/lib
       /usr/lib/x86_64-linux-gnu
+      /usr/lib/x86_64-linux-gnu/libcudss/12
       /usr/local/lib
       $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/cu12/lib)
 
@@ -231,10 +224,12 @@ endif()
 # ---------------------------------------------------------------------------
 set(CUPF_CORE_SOURCES
   # Core
+  cpp/src/newton_solver/core/csr_transpose.cpp
   cpp/src/newton_solver/ops/jacobian/jacobian_analysis.cpp
   cpp/src/newton_solver/core/newton_solver.cpp
   cpp/src/newton_solver/core/newton_solver_adjoint.cpp
-  cpp/src/newton_solver/core/newton_solver_torch_bridge.cpp
+  cpp/src/newton_solver/core/adjoint_math.cpp
+  cpp/src/newton_solver/core/torch_bridge.cpp
 
   # Storage — CPU
   cpp/src/newton_solver/storage/cpu/cpu_fp64_storage.cpp
@@ -302,13 +297,10 @@ endif()
 
 target_include_directories(cupf PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/cpp/src
-  $<$<BOOL:${CUPF_SUPERLU_ENABLED}>:${SUPERLU_INCLUDE_DIR}>
 )
 
 target_link_libraries(cupf PUBLIC
-  Eigen3::Eigen
   ${LIB_KLU} ${LIB_BTF} ${LIB_AMD} ${LIB_COLAMD} ${LIB_SSCONFIG}
-  $<$<BOOL:${CUPF_SUPERLU_ENABLED}>:${LIB_SUPERLU}>
   $<$<BOOL:${CUPF_LOGGING_ENABLED}>:spdlog::spdlog>
 )
 
@@ -322,7 +314,6 @@ target_compile_definitions(cupf PUBLIC
   $<$<BOOL:${CUPF_CUDSS_ENABLE_MT}>:CUPF_CUDSS_ENABLE_MT>
   $<$<BOOL:${CUPF_CUDSS_SET_HOST_NTHREADS}>:CUPF_CUDSS_HOST_NTHREADS=${CUPF_CUDSS_HOST_NTHREADS_DEFINE}>
   $<$<BOOL:${CUPF_CUDSS_SET_ND_NLEVELS}>:CUPF_CUDSS_ND_NLEVELS=${CUPF_CUDSS_ND_NLEVELS_DEFINE}>
-  $<$<BOOL:${CUPF_SUPERLU_ENABLED}>:CUPF_WITH_SUPERLU>
   $<$<BOOL:${CUPF_LOGGING_ENABLED}>:CUPF_ENABLE_LOG>
   $<$<BOOL:${ENABLE_DUMP}>:CUPF_ENABLE_DUMP>
   $<$<BOOL:${ENABLE_TIMING}>:CUPF_ENABLE_TIMING>
@@ -399,6 +390,20 @@ if(BUILD_BENCHMARKS)
       "Set CUPF_BENCHMARKS_DIR to the benchmarks directory.")
   endif()
   add_subdirectory("${CUPF_BENCHMARKS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/benchmarks")
+endif()
+
+# ---------------------------------------------------------------------------
+# Evaluators
+# ---------------------------------------------------------------------------
+if(BUILD_EVALUATORS)
+  add_executable(cupf_cpp_evaluate
+    evaluator/cpp/cupf_cpp_evaluate.cpp
+    tests/dump_case_loader.cpp
+  )
+  target_link_libraries(cupf_cpp_evaluate PRIVATE cupf)
+  target_include_directories(cupf_cpp_evaluate PRIVATE
+    ${PROJECT_SOURCE_DIR}/cpp/inc
+    ${PROJECT_SOURCE_DIR}/tests)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,12 @@
+// ---------------------------------------------------------------------------
+// voltage_update_kernels.hpp
+//
+// Device kernels + launchers for the CUDA voltage-update stage, the GPU
+// counterpart of cpu_voltage_update.cpp: apply the Newton step dx to (Va, Vm),
+// then rebuild the rectangular voltage. Header-only so the precision-specific
+// dispatch in cuda_voltage_update.cu can instantiate them per storage type.
+// ---------------------------------------------------------------------------
+
 #pragma once
 
 #ifdef CUPF_WITH_CUDA
@@ -12,6 +21,7 @@ namespace {
 
 constexpr int32_t kVoltageUpdateBlock = 256;
 
+// Precision-matched sincos so float state uses sincosf, double uses sincos.
 __device__ inline void sincos_scalar(double x, double* s, double* c)
 {
     sincos(x, s, c);
@@ -22,6 +32,9 @@ __device__ inline void sincos_scalar(float x, float* s, float* c)
     sincosf(x, s, c);
 }
 
+// Apply dx to the voltage state (one thread per dx entry): subtract from Va at
+// pv/pq buses (angle) and Vm at pq buses (magnitude), per the dimF layout.
+// dx may be a lower precision than the state; static_cast bridges it.
 template <typename StateScalar, typename DxScalar>
 __global__ void apply_voltage_update_kernel(
     int32_t total_entries,
@@ -55,6 +68,8 @@ __global__ void apply_voltage_update_kernel(
     }
 }
 
+// Rebuild rectangular voltage from polar (one thread per bus):
+// V = Vm * (cos Va + i sin Va).
 template <typename StateScalar>
 __global__ void reconstruct_voltage_kernel(
     int32_t total_buses,
@@ -80,7 +95,7 @@ __global__ void reconstruct_voltage_kernel(
 }
 
 template <typename StateScalar, typename DxScalar>
-void launch_voltage_update_state(
+void launch_apply_voltage_update(
     int32_t batch_size,
     int32_t n_bus,
     int32_t dimF,
@@ -94,7 +109,7 @@ void launch_voltage_update_state(
 {
     if (batch_size <= 0 || n_bus <= 0 || dimF <= 0 || n_pv < 0 || n_pq < 0 ||
         dimF != n_pv + 2 * n_pq) {
-        throw std::runtime_error("launch_voltage_update_state: invalid dimensions");
+        throw std::runtime_error("launch_apply_voltage_update: invalid dimensions");
     }
 
     const int32_t total_dx = batch_size * dimF;

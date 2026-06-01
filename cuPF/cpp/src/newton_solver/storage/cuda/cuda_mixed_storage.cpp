@@ -1,3 +1,12 @@
+// ---------------------------------------------------------------------------
+// cuda_mixed_storage.cpp
+//
+// Mixed-precision batched device storage: voltage/Ybus/Sbus state is kept in
+// FP64 while the Jacobian and dx are FP32 (set by the storage type's scalars),
+// so the upload helpers are templated on DeviceScalar. Same prepare / upload /
+// download responsibilities as cuda_fp32_storage.cpp.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_mixed_storage.hpp"
@@ -11,6 +20,7 @@
 
 namespace {
 
+// Throw if a required input pointer is null for a non-empty array.
 template <typename T>
 void require_pointer(const T* ptr, const char* name, int32_t count)
 {
@@ -19,6 +29,7 @@ void require_pointer(const T* ptr, const char* name, int32_t count)
     }
 }
 
+// Per-nonzero row index of the CSR Ybus (the kernels need the row of each nz).
 std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
 {
     std::vector<int32_t> rows(static_cast<std::size_t>(ybus.nnz), 0);
@@ -30,6 +41,8 @@ std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
     return rows;
 }
 
+// Split a batched complex array into separate real/imag device buffers at the
+// device precision (cast double -> DeviceScalar), honoring the source stride.
 template <typename DeviceScalar>
 void upload_complex_components(DeviceBuffer<DeviceScalar>& dst_re,
                                DeviceBuffer<DeviceScalar>& dst_im,
@@ -56,6 +69,7 @@ void upload_complex_components(DeviceBuffer<DeviceScalar>& dst_re,
     dst_im.assign(h_im.data(), h_im.size());
 }
 
+// Same split for Ybus values; a single shared Ybus unless values_batched.
 template <typename DeviceScalar>
 void upload_ybus_components(DeviceBuffer<DeviceScalar>& dst_re,
                             DeviceBuffer<DeviceScalar>& dst_im,
@@ -88,7 +102,9 @@ void upload_ybus_components(DeviceBuffer<DeviceScalar>& dst_re,
 }  // namespace
 
 
-void CudaMixedBuffers::prepare(const InitializeContext& ctx)
+// Allocate device buffers and upload the static topology (Ybus pattern/values,
+// Jacobian pattern, scatter maps); per-solve data is uploaded in upload().
+void CudaMixedStorage::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr,  "InitializeContext.ybus.indptr",  ctx.ybus.rows + 1);
     require_pointer(ctx.ybus.indices, "InitializeContext.ybus.indices", ctx.ybus.nnz);
@@ -113,7 +129,7 @@ void CudaMixedBuffers::prepare(const InitializeContext& ctx)
     d_Ybus_indices.assign(ctx.ybus.indices, static_cast<std::size_t>(nnz_ybus));
 
     const std::vector<int32_t> h_y_row = build_ybus_row_index(ctx.ybus);
-    d_Y_row.assign(h_y_row.data(), h_y_row.size());
+    d_Ybus_row.assign(h_y_row.data(), h_y_row.size());
 
     d_J_values.resize(nnz_J);
     d_J_row_ptr.assign(ctx.J.row_ptr.data(), static_cast<std::size_t>(ctx.J.dim + 1));
@@ -159,15 +175,17 @@ void CudaMixedBuffers::prepare(const InitializeContext& ctx)
 }
 
 
-void CudaMixedBuffers::upload(const SolveContext& ctx)
+// Push per-solve inputs: resize for the batch, upload Ybus/Sbus (FP64 state),
+// and seed V/Va/Vm from the V0 guess.
+void CudaMixedStorage::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
-        throw std::invalid_argument("CudaMixedBuffers::upload: solve context is incomplete");
+        throw std::invalid_argument("CudaMixedStorage::upload: solve context is incomplete");
     }
 
     const YbusView& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus || ybus.nnz != nnz_ybus) {
-        throw std::runtime_error("CudaMixedBuffers::upload: Ybus dimensions do not match initialize()");
+        throw std::runtime_error("CudaMixedStorage::upload: Ybus dimensions do not match initialize()");
     }
 
     require_pointer(ybus.data, "SolveContext.ybus->data", ybus.nnz);
@@ -175,10 +193,10 @@ void CudaMixedBuffers::upload(const SolveContext& ctx)
     require_pointer(ctx.V0,    "SolveContext.V0",         n_bus);
 
     if (ctx.batch_size <= 0) {
-        throw std::invalid_argument("CudaMixedBuffers::upload: batch_size must be positive");
+        throw std::invalid_argument("CudaMixedStorage::upload: batch_size must be positive");
     }
     if (ctx.sbus_stride < n_bus || ctx.V0_stride < n_bus) {
-        throw std::invalid_argument("CudaMixedBuffers::upload: batch strides must be at least n_bus");
+        throw std::invalid_argument("CudaMixedStorage::upload: batch strides must be at least n_bus");
     }
 
     batch_size = ctx.batch_size;
@@ -239,10 +257,11 @@ void CudaMixedBuffers::upload(const SolveContext& ctx)
 }
 
 
-void CudaMixedBuffers::download(NRResult& result) const
+// Single-case voltage readback to the FP64 result.
+void CudaMixedStorage::download(NRResult& result) const
 {
     if (batch_size != 1) {
-        throw std::runtime_error("CudaMixedBuffers::download: use download_batch for batch_size > 1");
+        throw std::runtime_error("CudaMixedStorage::download: use download_batch for batch_size > 1");
     }
 
     std::vector<double> h_Va(static_cast<std::size_t>(n_bus));
@@ -261,7 +280,8 @@ void CudaMixedBuffers::download(NRResult& result) const
 }
 
 
-void CudaMixedBuffers::download_batch(NRBatchResult& result) const
+// Batched voltage readback plus per-case final mismatch norms.
+void CudaMixedStorage::download_batch(NRBatchResult& result) const
 {
     const std::size_t total = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
     std::vector<double> h_Va(total);

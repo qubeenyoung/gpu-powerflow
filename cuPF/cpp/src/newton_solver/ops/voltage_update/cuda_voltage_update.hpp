@@ -5,9 +5,9 @@
 #include "newton_solver/core/solver_contexts.hpp"
 
 
-struct CudaFp64Buffers;
-struct CudaFp32Buffers;
-struct CudaMixedBuffers;
+struct CudaFp64Storage;
+struct CudaFp32Storage;
+struct CudaMixedStorage;
 
 
 // ---------------------------------------------------------------------------
@@ -23,13 +23,13 @@ struct CudaVoltageUpdateOp;
 
 template <>
 struct CudaVoltageUpdateOp<double> {
-    void run(CudaFp64Buffers& buf, IterationContext& ctx);
+    void run(CudaFp64Storage& buf, IterationContext& ctx);
 };
 
 template <>
 struct CudaVoltageUpdateOp<float> {
-    void run(CudaFp32Buffers& buf, IterationContext& ctx);
-    void run(CudaMixedBuffers& buf, IterationContext& ctx);
+    void run(CudaFp32Storage& buf, IterationContext& ctx);
+    void run(CudaMixedStorage& buf, IterationContext& ctx);
 };
 
 #endif  // CUPF_WITH_CUDA

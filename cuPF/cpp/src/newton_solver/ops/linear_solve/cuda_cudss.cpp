@@ -3,8 +3,8 @@
 //
 // cuDSS sparse direct linear solver. T selects precision:
 //   - double: RHS = buf.d_F directly
-//   - float + CudaFp32Buffers: RHS = buf.d_F directly
-//   - float + CudaMixedBuffers: RHS is a cast copy of FP64 buf.d_F
+//   - float + CudaFp32Storage: RHS = buf.d_F directly
+//   - float + CudaMixedStorage: RHS is a cast copy of FP64 buf.d_F
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
@@ -12,6 +12,7 @@
 #include "cuda_cudss.hpp"
 
 #include "cuda_linear_solve_kernels.hpp"
+#include "newton_solver/core/csr_transpose.hpp"
 #include "cudss_config.hpp"
 #include "newton_solver/core/solver_contexts.hpp"
 #include "newton_solver/storage/cuda/cuda_fp64_storage.hpp"
@@ -30,37 +31,52 @@
 #include <vector>
 
 
+// ===========================================================================
+// Solver state (PIMPL)
+//
+// All cuDSS handles and device buffers live here so the public class header
+// stays free of cuDSS types. One State instance is owned per solver object.
+// ===========================================================================
 template <typename T, typename Buffers>
 struct CudaLinearSolveCuDSS<T, Buffers>::State {
 #ifdef CUPF_ENABLE_CUDSS
+    // --- cuDSS library objects (forward solve) ---
     cudssHandle_t handle           = nullptr;
     cudssConfig_t config           = nullptr;
     cudssData_t   data             = nullptr;
-    cudssMatrix_t jacobian         = nullptr;
-    cudssMatrix_t rhs_matrix       = nullptr;
-    cudssMatrix_t solution_matrix  = nullptr;
+    cudssMatrix_t jacobian         = nullptr;  // J  (CSR)
+    cudssMatrix_t rhs_matrix       = nullptr;  // F  (dense)
+    cudssMatrix_t solution_matrix  = nullptr;  // dx (dense)
+
+    // --- cuDSS library objects (adjoint solve, uses J^T) ---
     cudssMatrix_t adjoint_matrix   = nullptr;
     cudssMatrix_t adjoint_rhs_matrix = nullptr;
     cudssMatrix_t adjoint_solution_matrix = nullptr;
 #endif
-    DeviceBuffer<T> rhs;
-    DeviceBuffer<int32_t> adjoint_row_ptr;
+    // --- device buffers ---
+    DeviceBuffer<T> rhs;                            // FP32 RHS copy (mixed precision only)
+    DeviceBuffer<int32_t> adjoint_row_ptr;          // J^T sparsity, computed once
     DeviceBuffer<int32_t> adjoint_col_idx;
-    DeviceBuffer<int32_t> adjoint_src_to_transpose_pos;
+    DeviceBuffer<int32_t> adjoint_src_to_transpose_pos;  // maps J value index -> J^T value index
     DeviceBuffer<T> adjoint_values;
     DeviceBuffer<T> adjoint_rhs;
     DeviceBuffer<T> adjoint_solution;
+
+    // --- cached descriptor dimensions; a change forces matrix re-creation ---
     int32_t descriptor_batch_size  = 0;
     int32_t descriptor_dimF        = 0;
     int32_t descriptor_nnz_J       = 0;
     int32_t adjoint_descriptor_batch_size = 0;
     int32_t adjoint_descriptor_dimF = 0;
     int32_t adjoint_descriptor_nnz_J = 0;
+
+    // --- pipeline progress flags (skip redundant analysis/factorization) ---
     bool    analysis_done          = false;
     bool    factorized             = false;
     bool    adjoint_analysis_done  = false;
     bool    adjoint_factorized     = false;
 
+    // Release every cuDSS object in reverse creation order.
     ~State()
     {
 #ifdef CUPF_ENABLE_CUDSS
@@ -78,20 +94,26 @@ struct CudaLinearSolveCuDSS<T, Buffers>::State {
 };
 
 
+// ===========================================================================
+// Translation-unit-local helpers
+// ===========================================================================
 namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// Wall-clock elapsed time between two steady-clock samples.
 double elapsed_ms(Clock::time_point start, Clock::time_point end)
 {
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
 #ifdef CUPF_ENABLE_CUDSS
+// Map the C++ scalar type T to the matching cuDSS runtime data-type enum.
 template <typename T> cudaDataType_t cudss_value_type();
 template <> cudaDataType_t cudss_value_type<double>() { return CUDA_R_64F; }
 template <> cudaDataType_t cudss_value_type<float>()  { return CUDA_R_32F; }
 
+// Destroy a cuDSS matrix descriptor and null it so it is safe to call twice.
 void destroy_matrix(cudssMatrix_t& matrix)
 {
     if (matrix != nullptr) {
@@ -100,61 +122,34 @@ void destroy_matrix(cudssMatrix_t& matrix)
     }
 }
 
+// Bind cuDSS work to the project's current CUDA stream.
 void set_cudss_stream(cudssHandle_t handle)
 {
     CUDSS_CHECK(cudssSetStream(handle, cupf_current_cuda_stream()));
 }
 #endif
 
-int32_t buf_batch_size(const CudaFp64Buffers&)         { return 1; }
-int32_t buf_batch_size(const CudaFp32Buffers& b)       { return b.batch_size; }
-int32_t buf_batch_size(const CudaMixedBuffers& b)       { return b.batch_size; }
+// Batch size per storage layout: FP64 is always single-case (B=1).
+int32_t buf_batch_size(const CudaFp64Storage&)         { return 1; }
+int32_t buf_batch_size(const CudaFp32Storage& b)       { return b.batch_size; }
+int32_t buf_batch_size(const CudaMixedStorage& b)       { return b.batch_size; }
 
-int32_t buf_nnz_j(const CudaFp64Buffers& b)
+// Non-zero count of J per storage layout.
+int32_t buf_nnz_j(const CudaFp64Storage& b)
 {
+    // FP64 storage tracks nnz only via the value buffer length; narrow the
+    // size_t length to the int32 that cuDSS descriptors use for nnz.
     return static_cast<int32_t>(b.d_J_values.size());
 }
-int32_t buf_nnz_j(const CudaFp32Buffers& b)            { return b.nnz_J; }
-int32_t buf_nnz_j(const CudaMixedBuffers& b)            { return b.nnz_J; }
-
-struct CsrTransposePattern {
-    std::vector<int32_t> row_ptr;
-    std::vector<int32_t> col_idx;
-    std::vector<int32_t> src_to_transpose_pos;
-};
-
-CsrTransposePattern build_transpose_pattern(const std::vector<int32_t>& row_ptr,
-                                            const std::vector<int32_t>& col_idx,
-                                            int32_t dim)
-{
-    CsrTransposePattern out;
-    const int32_t nnz = static_cast<int32_t>(col_idx.size());
-    out.row_ptr.assign(static_cast<std::size_t>(dim + 1), 0);
-    out.col_idx.assign(static_cast<std::size_t>(nnz), 0);
-    out.src_to_transpose_pos.assign(static_cast<std::size_t>(nnz), -1);
-
-    for (int32_t k = 0; k < nnz; ++k) {
-        ++out.row_ptr[static_cast<std::size_t>(col_idx[static_cast<std::size_t>(k)] + 1)];
-    }
-    for (int32_t row = 0; row < dim; ++row) {
-        out.row_ptr[static_cast<std::size_t>(row + 1)] += out.row_ptr[static_cast<std::size_t>(row)];
-    }
-    std::vector<int32_t> cursor = out.row_ptr;
-    for (int32_t row = 0; row < dim; ++row) {
-        for (int32_t k = row_ptr[static_cast<std::size_t>(row)];
-             k < row_ptr[static_cast<std::size_t>(row + 1)]; ++k) {
-            const int32_t col = col_idx[static_cast<std::size_t>(k)];
-            const int32_t dst = cursor[static_cast<std::size_t>(col)]++;
-            out.col_idx[static_cast<std::size_t>(dst)] = row;
-            out.src_to_transpose_pos[static_cast<std::size_t>(k)] = dst;
-        }
-    }
-    return out;
-}
+int32_t buf_nnz_j(const CudaFp32Storage& b)            { return b.nnz_J; }
+int32_t buf_nnz_j(const CudaMixedStorage& b)            { return b.nnz_J; }
 
 }  // namespace
 
 
+// ===========================================================================
+// Construction / destruction
+// ===========================================================================
 template <typename T, typename Buffers>
 CudaLinearSolveCuDSS<T, Buffers>::CudaLinearSolveCuDSS(CuDSSOptions cudss_options)
     : cudss_options_(cudss_options) {}
@@ -167,6 +162,12 @@ CudaLinearSolveCuDSS<T, Buffers>::~CudaLinearSolveCuDSS()
 }
 
 
+// ===========================================================================
+// Forward solve pipeline:  initialize -> prepare_rhs -> factorize -> solve
+// ===========================================================================
+
+// Create the cuDSS handle/config/data, build descriptors, and run symbolic
+// analysis (plus the adjoint analysis when the Jacobian pattern is known).
 template <typename T, typename Buffers>
 void CudaLinearSolveCuDSS<T, Buffers>::initialize(Buffers& buf, const InitializeContext& ctx)
 {
@@ -177,6 +178,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::initialize(Buffers& buf, const Initialize
 #ifndef CUPF_ENABLE_CUDSS
     throw std::runtime_error("CudaLinearSolveCuDSS::initialize requires a cuDSS-enabled build");
 #else
+    // Start from a clean state, then create the cuDSS handle/config/data trio.
     delete state_;
     state_ = nullptr;
 
@@ -187,7 +189,11 @@ void CudaLinearSolveCuDSS<T, Buffers>::initialize(Buffers& buf, const Initialize
     CUDSS_CHECK(cudssDataCreate(state->handle, &state->data));
     state_ = state.release();
 
+    // Build the forward J/F/dx descriptors for the current dimensions.
     ensure_descriptors(buf);
+
+    // When the Jacobian pattern is already known, precompute the J^T sparsity
+    // so adjoint solves can reuse it without re-transposing every iteration.
     if (ctx.J.dim == buf.dimF && ctx.J.nnz == buf_nnz_j(buf)) {
         const CsrTransposePattern transpose =
             build_transpose_pattern(ctx.J.row_ptr, ctx.J.col_idx, ctx.J.dim);
@@ -196,6 +202,9 @@ void CudaLinearSolveCuDSS<T, Buffers>::initialize(Buffers& buf, const Initialize
         state_->adjoint_src_to_transpose_pos.assign(
             transpose.src_to_transpose_pos.data(), transpose.src_to_transpose_pos.size());
     }
+
+    // Symbolic analysis can run now unless this reordering needs matrix values
+    // (in that case it is deferred to factorize()).
     if (!cupf_cudss_detail::analysis_requires_matrix_values(cudss_options_)) {
         newton_solver::utils::ScopedTimer timer("NR.initialize.cudss_analyze");
         set_cudss_stream(state_->handle);
@@ -206,6 +215,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::initialize(Buffers& buf, const Initialize
         sync_cuda_for_timing();
         state_->analysis_done = true;
     }
+    // Mirror the symbolic analysis for the adjoint (J^T) system when possible.
     if (ctx.J.dim == buf.dimF && ctx.J.nnz == buf_nnz_j(buf)) {
         ensure_adjoint_descriptors(buf);
         if (!state_->adjoint_analysis_done) {
@@ -222,6 +232,9 @@ void CudaLinearSolveCuDSS<T, Buffers>::initialize(Buffers& buf, const Initialize
 }
 
 
+// In mixed precision the RHS must be down-cast from the FP64 residual into a
+// dedicated FP32 buffer; all other layouts solve against buf.d_F in place and
+// this step is a no-op.
 template <typename T, typename Buffers>
 void CudaLinearSolveCuDSS<T, Buffers>::prepare_rhs(Buffers& buf, IterationContext& ctx)
 {
@@ -237,7 +250,8 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_rhs(Buffers& buf, IterationContex
 #ifndef CUPF_ENABLE_CUDSS
     throw std::runtime_error("CudaLinearSolveCuDSS::prepare_rhs requires a cuDSS-enabled build");
 #else
-    if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedBuffers>) {
+    // Only the float + mixed-storage combination keeps a separate FP32 RHS.
+    if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedStorage>) {
         ensure_descriptors(buf);
         const int32_t rhs_count = buf_batch_size(buf) * buf.dimF;
         launch_prepare_rhs(buf.d_F.data(), state_->rhs.data(), rhs_count);
@@ -246,6 +260,9 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_rhs(Buffers& buf, IterationContex
 }
 
 
+// Numeric factorization of J. The first call does a full factorization; later
+// calls (same sparsity, new values) take the cheaper refactorization path.
+// If analysis was deferred in initialize(), it runs here first.
 template <typename T, typename Buffers>
 void CudaLinearSolveCuDSS<T, Buffers>::factorize(Buffers& buf, IterationContext& ctx)
 {
@@ -263,6 +280,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::factorize(Buffers& buf, IterationContext&
 #else
     ensure_descriptors(buf);
 
+    // Deferred symbolic analysis (value-dependent reordering path).
     if (!state_->analysis_done) {
         newton_solver::utils::ScopedTimer timer("NR.iteration.cudss_analyze");
         set_cudss_stream(state_->handle);
@@ -274,6 +292,8 @@ void CudaLinearSolveCuDSS<T, Buffers>::factorize(Buffers& buf, IterationContext&
         state_->analysis_done = true;
     }
 
+    // First time -> full factorization; afterwards -> refactorization (reuses
+    // the symbolic structure, only the numeric values change).
     const bool is_refactorization = state_->factorized;
     const int  phase = is_refactorization ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
     set_cudss_stream(state_->handle);
@@ -287,6 +307,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::factorize(Buffers& buf, IterationContext&
 }
 
 
+// Triangular solve producing dx; optionally dumps the result for debugging.
 template <typename T, typename Buffers>
 void CudaLinearSolveCuDSS<T, Buffers>::solve(Buffers& buf, IterationContext& ctx)
 {
@@ -306,8 +327,11 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve(Buffers& buf, IterationContext& ctx
         state_->config, state_->data,
         state_->jacobian, state_->solution_matrix, state_->rhs_matrix));
     sync_cuda_for_timing();
+
+    // Debug-only: copy dx back to host and record it.
     if (newton_solver::utils::isDumpEnabled()) {
         const int32_t count = buf_batch_size(buf) * buf.dimF;
+        // count is a positive element count; widen to size_t for the host vector.
         std::vector<T> h_dx(static_cast<std::size_t>(count));
         buf.d_dx.copyTo(h_dx.data(), h_dx.size());
         newton_solver::utils::dumpVector("dx", ctx.iter, h_dx);
@@ -316,6 +340,11 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve(Buffers& buf, IterationContext& ctx
 }
 
 
+// ===========================================================================
+// Adjoint solve pipeline (J^T x = b), used for gradient / sensitivity passes
+// ===========================================================================
+
+// True once the adjoint system has been numerically factorized.
 template <typename T, typename Buffers>
 bool CudaLinearSolveCuDSS<T, Buffers>::has_adjoint_cache() const
 {
@@ -323,6 +352,7 @@ bool CudaLinearSolveCuDSS<T, Buffers>::has_adjoint_cache() const
 }
 
 
+// True once the adjoint symbolic analysis (sparsity) has been computed.
 template <typename T, typename Buffers>
 bool CudaLinearSolveCuDSS<T, Buffers>::has_adjoint_symbolic_analysis() const
 {
@@ -330,6 +360,9 @@ bool CudaLinearSolveCuDSS<T, Buffers>::has_adjoint_symbolic_analysis() const
 }
 
 
+// Materialize J^T (values + descriptors) and factorize it, caching the result
+// so repeated adjoint solves only pay for the triangular solve. Reports the
+// factorization wall-clock time via the out-parameter.
 template <typename T, typename Buffers>
 void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
     Buffers& buf,
@@ -349,6 +382,8 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
     throw std::runtime_error("CudaLinearSolveCuDSS::prepare_adjoint_explicit_transpose_cache requires a cuDSS-enabled build");
 #else
     ensure_adjoint_descriptors(buf);
+
+    // Scatter J's values into J^T order using the precomputed position map.
     const int32_t batch_size = buf_batch_size(buf);
     const int32_t nnz_J = buf_nnz_j(buf);
     launch_transpose_csr_values(
@@ -358,6 +393,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
         nnz_J,
         batch_size);
 
+    // Analyze (once) then factorize J^T; only the factorization is timed.
     const auto start = Clock::now();
     if (!state_->adjoint_analysis_done) {
         set_cudss_stream(state_->handle);
@@ -368,13 +404,15 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
         sync_cuda_for_timing();
         state_->adjoint_analysis_done = true;
     }
+    
     const bool is_refactorization = state_->adjoint_factorized;
     const int phase = is_refactorization ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
     set_cudss_stream(state_->handle);
     CUDSS_CHECK(cudssExecute(
         state_->handle, phase,
         state_->config, state_->data,
-        state_->adjoint_matrix, state_->adjoint_solution_matrix, state_->adjoint_rhs_matrix));
+        state_->adjoint_matrix, state_->adjoint_solution_matrix, state_->adjoint_rhs_matrix
+    ));
     sync_cuda_for_timing();
     state_->adjoint_factorized = true;
     factorization_time_ms = elapsed_ms(start, Clock::now());
@@ -382,6 +420,8 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
 }
 
 
+// One-shot adjoint solve from host memory: cast RHS in, solve J^T x = b on the
+// device, cast the solution back out. Used when no cached RHS is in flight.
 template <typename T, typename Buffers>
 void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_host(
     const double* rhs,
@@ -403,13 +443,18 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_host(
     throw std::runtime_error("CudaLinearSolveCuDSS::solve_adjoint_explicit_transpose_host requires a cuDSS-enabled build");
 #else
     const int32_t count = batch_size * state_->adjoint_descriptor_dimF;
-    std::vector<T> rhs_t(static_cast<std::size_t>(count));
+
+    // Down-cast the FP64 host RHS into the solver's working precision T.
+    // (static_cast<T> is the explicit double->float narrowing for FP32 solves;
+    //  for the double instantiation it is an identity conversion.)
+    std::vector<T> rhs_t(static_cast<std::size_t>(count));  // count>0 -> widen to size_t for sizing
     for (int32_t i = 0; i < count; ++i) {
         rhs_t[static_cast<std::size_t>(i)] = static_cast<T>(rhs[i]);
     }
     state_->adjoint_rhs.assign(rhs_t.data(), rhs_t.size());
     state_->adjoint_solution.memsetZero();
 
+    // Time only the device solve.
     const auto start = Clock::now();
     set_cudss_stream(state_->handle);
     CUDSS_CHECK(cudssExecute(
@@ -419,6 +464,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_host(
     sync_cuda_for_timing();
     solve_time_ms = elapsed_ms(start, Clock::now());
 
+    // Copy the solution back and up-cast T -> FP64 for the caller's buffer.
     std::vector<T> sol_t(static_cast<std::size_t>(count));
     state_->adjoint_solution.copyTo(sol_t.data(), sol_t.size());
     for (int32_t i = 0; i < count; ++i) {
@@ -428,6 +474,8 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_host(
 }
 
 
+// Direct device pointer to the cached adjoint RHS buffer (caller fills it in
+// place to avoid a host round-trip before solve_..._cached()).
 template <typename T, typename Buffers>
 T* CudaLinearSolveCuDSS<T, Buffers>::adjoint_rhs_data()
 {
@@ -438,6 +486,7 @@ T* CudaLinearSolveCuDSS<T, Buffers>::adjoint_rhs_data()
 }
 
 
+// Direct device pointer to the cached adjoint solution buffer.
 template <typename T, typename Buffers>
 T* CudaLinearSolveCuDSS<T, Buffers>::adjoint_solution_data()
 {
@@ -448,6 +497,7 @@ T* CudaLinearSolveCuDSS<T, Buffers>::adjoint_solution_data()
 }
 
 
+// Adjoint solve that reuses an RHS already staged on the device (no host copy).
 template <typename T, typename Buffers>
 void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_cached(double& solve_time_ms)
 {
@@ -470,6 +520,15 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_cached(d
 }
 
 
+// ===========================================================================
+// Descriptor management
+//
+// cuDSS matrix descriptors are bound to fixed dimensions, so they are cached
+// and only re-created when batch_size / dimF / nnz_J change. rhs_data() picks
+// the correct RHS pointer for the active precision/storage combination.
+// ===========================================================================
+
+// (Re)create the forward J/F/dx descriptors for the current buffer dimensions.
 template <typename T, typename Buffers>
 void CudaLinearSolveCuDSS<T, Buffers>::ensure_descriptors(Buffers& buf)
 {
@@ -485,6 +544,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_descriptors(Buffers& buf)
         throw std::runtime_error("CudaLinearSolveCuDSS: invalid descriptor dimensions");
     }
 
+    // Reuse existing descriptors when dimensions are unchanged.
     const bool match =
         state_->jacobian        != nullptr &&
         state_->rhs_matrix      != nullptr &&
@@ -495,19 +555,23 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_descriptors(Buffers& buf)
 
     if (match) return;
 
+    // Dimensions changed: tear down stale descriptors and rebuild.
     destroy_matrix(state_->jacobian);
     destroy_matrix(state_->rhs_matrix);
     destroy_matrix(state_->solution_matrix);
 
     cupf_cudss_detail::configure_solver(state_->config, cudss_options_, batch_size);
 
-    if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedBuffers>) {
+    // Mixed precision needs its own FP32 RHS buffer sized batch_size * dimF.
+    if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedStorage>) {
+        // Widen both factors to size_t before multiplying to avoid int overflow.
         state_->rhs.resize(static_cast<std::size_t>(batch_size) *
                            static_cast<std::size_t>(dimF));
     }
 
     CUDSS_CHECK(cudssMatrixCreateCsr(
         &state_->jacobian,
+        // cuDSS takes nnz as int64; widen the int32 count explicitly.
         dimF, dimF, static_cast<int64_t>(nnz_J),
         buf.d_J_row_ptr.data(), nullptr, buf.d_J_col_idx.data(), buf.d_J_values.data(),
         CUDA_R_32I, cudss_value_type<T>(),
@@ -530,6 +594,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_descriptors(Buffers& buf)
 }
 
 
+// (Re)create the adjoint J^T/rhs/solution descriptors and their device buffers.
 template <typename T, typename Buffers>
 void CudaLinearSolveCuDSS<T, Buffers>::ensure_adjoint_descriptors(Buffers& buf)
 {
@@ -559,12 +624,15 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_adjoint_descriptors(Buffers& buf)
         state_->adjoint_descriptor_nnz_J == nnz_J;
     if (match) return;
 
+    // Dimensions changed: tear down stale adjoint descriptors and rebuild.
     destroy_matrix(state_->adjoint_matrix);
     destroy_matrix(state_->adjoint_rhs_matrix);
     destroy_matrix(state_->adjoint_solution_matrix);
 
     cupf_cudss_detail::configure_solver(state_->config, cudss_options_, batch_size);
 
+    // Allocate and zero the J^T value / RHS / solution buffers.
+    // (size_t widening guards the batch_size * dim products against overflow.)
     state_->adjoint_values.resize(static_cast<std::size_t>(batch_size) *
                                   static_cast<std::size_t>(nnz_J));
     state_->adjoint_rhs.resize(static_cast<std::size_t>(batch_size) *
@@ -577,6 +645,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_adjoint_descriptors(Buffers& buf)
 
     CUDSS_CHECK(cudssMatrixCreateCsr(
         &state_->adjoint_matrix,
+        // cuDSS takes nnz as int64; widen the int32 count explicitly.
         dimF, dimF, static_cast<int64_t>(nnz_J),
         state_->adjoint_row_ptr.data(), nullptr,
         state_->adjoint_col_idx.data(), state_->adjoint_values.data(),
@@ -600,12 +669,16 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_adjoint_descriptors(Buffers& buf)
 }
 
 
+// Select the RHS device pointer for the active precision / storage:
+//   - double               -> solve against buf.d_F directly
+//   - float + mixed storage -> solve against the cast FP32 copy (state_->rhs)
+//   - float + fp32 storage  -> solve against buf.d_F directly
 template <typename T, typename Buffers>
 T* CudaLinearSolveCuDSS<T, Buffers>::rhs_data(Buffers& buf)
 {
     if constexpr (std::is_same_v<T, double>) {
         return buf.d_F.data();
-    } else if constexpr (std::is_same_v<Buffers, CudaMixedBuffers>) {
+    } else if constexpr (std::is_same_v<Buffers, CudaMixedStorage>) {
         return state_->rhs.data();
     } else {
         return buf.d_F.data();
@@ -613,8 +686,15 @@ T* CudaLinearSolveCuDSS<T, Buffers>::rhs_data(Buffers& buf)
 }
 
 
-template struct CudaLinearSolveCuDSS<double, CudaFp64Buffers>;
-template struct CudaLinearSolveCuDSS<float,  CudaFp32Buffers>;
-template struct CudaLinearSolveCuDSS<float,  CudaMixedBuffers>;
+// ===========================================================================
+// Explicit template instantiations
+//
+// This .cpp is the single translation unit that defines every member of the
+// class template, so all supported (T, Buffers) combinations are instantiated
+// here. Keep these in sync with the storage layouts the solver supports.
+// ===========================================================================
+template struct CudaLinearSolveCuDSS<double, CudaFp64Storage>;
+template struct CudaLinearSolveCuDSS<float,  CudaFp32Storage>;
+template struct CudaLinearSolveCuDSS<float,  CudaMixedStorage>;
 
 #endif  // CUPF_WITH_CUDA

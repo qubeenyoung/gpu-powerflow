@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-struct CudaFp64Buffers;
+struct CudaFp64Storage;
 struct InitializeContext;
 struct IterationContext;
 
@@ -18,12 +18,12 @@ struct CudaLinearSolveCustomFp64 {
     CudaLinearSolveCustomFp64(const CudaLinearSolveCustomFp64&) = delete;
     CudaLinearSolveCustomFp64& operator=(const CudaLinearSolveCustomFp64&) = delete;
 
-    void initialize(CudaFp64Buffers& buf, const InitializeContext& ctx);
-    void prepare_rhs(CudaFp64Buffers& buf, IterationContext& ctx);
-    void factorize(CudaFp64Buffers& buf, IterationContext& ctx);
-    void solve(CudaFp64Buffers& buf, IterationContext& ctx);
+    void initialize(CudaFp64Storage& buf, const InitializeContext& ctx);
+    void prepare_rhs(CudaFp64Storage& buf, IterationContext& ctx);
+    void factorize(CudaFp64Storage& buf, IterationContext& ctx);
+    void solve(CudaFp64Storage& buf, IterationContext& ctx);
 
-    void prepare_adjoint_explicit_transpose_cache(CudaFp64Buffers& buf,
+    void prepare_adjoint_explicit_transpose_cache(CudaFp64Storage& buf,
                                                   IterationContext& ctx,
                                                   double& factorization_time_ms);
     void solve_adjoint_explicit_transpose_host(const double* rhs,

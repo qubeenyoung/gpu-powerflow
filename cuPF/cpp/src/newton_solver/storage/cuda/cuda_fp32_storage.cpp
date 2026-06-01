@@ -1,3 +1,14 @@
+// ---------------------------------------------------------------------------
+// cuda_fp32_storage.cpp
+//
+// FP32 batched device storage for the CUDA pipeline. prepare() allocates the
+// device buffers and uploads the static topology (Ybus pattern, Jacobian
+// pattern, scatter maps); upload() pushes per-solve inputs (down-cast FP64 ->
+// FP32) and resizes for the batch; download()/download_batch() copy the
+// converged voltages back (FP32 -> FP64). The buffers themselves are declared
+// in the matching header.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_fp32_storage.hpp"
@@ -11,6 +22,7 @@
 
 namespace {
 
+// Throw if a required input pointer is null for a non-empty array.
 template <typename T>
 void require_pointer(const T* ptr, const char* name, int32_t count)
 {
@@ -19,6 +31,7 @@ void require_pointer(const T* ptr, const char* name, int32_t count)
     }
 }
 
+// Per-nonzero row index of the CSR Ybus (the kernels need the row of each nz).
 std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
 {
     std::vector<int32_t> rows(static_cast<std::size_t>(ybus.nnz), 0);
@@ -30,6 +43,8 @@ std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
     return rows;
 }
 
+// Split a batched complex array into separate FP32 real/imag device buffers,
+// honoring the per-case source stride (down-casts double -> float).
 void upload_complex_components(DeviceBuffer<float>& dst_re,
                                DeviceBuffer<float>& dst_im,
                                const std::complex<double>* src,
@@ -55,6 +70,8 @@ void upload_complex_components(DeviceBuffer<float>& dst_re,
     dst_im.assign(h_im.data(), h_im.size());
 }
 
+// Same split for Ybus values; when values_batched is false a single shared
+// Ybus is stored, otherwise one set of values per case.
 void upload_ybus_components(DeviceBuffer<float>& dst_re,
                             DeviceBuffer<float>& dst_im,
                             const std::complex<double>* src,
@@ -86,7 +103,10 @@ void upload_ybus_components(DeviceBuffer<float>& dst_re,
 }  // namespace
 
 
-void CudaFp32Buffers::prepare(const InitializeContext& ctx)
+// Allocate device buffers and upload the time-invariant topology once: Ybus
+// pattern + values, Jacobian pattern, and the scatter maps. Per-solve data is
+// (re)uploaded later in upload().
+void CudaFp32Storage::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr,  "InitializeContext.ybus.indptr",  ctx.ybus.rows + 1);
     require_pointer(ctx.ybus.indices, "InitializeContext.ybus.indices", ctx.ybus.nnz);
@@ -111,7 +131,7 @@ void CudaFp32Buffers::prepare(const InitializeContext& ctx)
     d_Ybus_indices.assign(ctx.ybus.indices, static_cast<std::size_t>(nnz_ybus));
 
     const std::vector<int32_t> h_y_row = build_ybus_row_index(ctx.ybus);
-    d_Y_row.assign(h_y_row.data(), h_y_row.size());
+    d_Ybus_row.assign(h_y_row.data(), h_y_row.size());
 
     d_J_values.resize(nnz_J);
     d_J_row_ptr.assign(ctx.J.row_ptr.data(), static_cast<std::size_t>(ctx.J.dim + 1));
@@ -157,15 +177,17 @@ void CudaFp32Buffers::prepare(const InitializeContext& ctx)
 }
 
 
-void CudaFp32Buffers::upload(const SolveContext& ctx)
+// Push per-solve inputs to the device: resize buffers for the batch, upload
+// (down-cast) Ybus/Sbus values, and seed V/Va/Vm from the V0 guess.
+void CudaFp32Storage::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
-        throw std::invalid_argument("CudaFp32Buffers::upload: solve context is incomplete");
+        throw std::invalid_argument("CudaFp32Storage::upload: solve context is incomplete");
     }
 
     const YbusView& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus || ybus.nnz != nnz_ybus) {
-        throw std::runtime_error("CudaFp32Buffers::upload: Ybus dimensions do not match initialize()");
+        throw std::runtime_error("CudaFp32Storage::upload: Ybus dimensions do not match initialize()");
     }
 
     require_pointer(ybus.data, "SolveContext.ybus->data", ybus.nnz);
@@ -173,10 +195,10 @@ void CudaFp32Buffers::upload(const SolveContext& ctx)
     require_pointer(ctx.V0,    "SolveContext.V0",         n_bus);
 
     if (ctx.batch_size <= 0) {
-        throw std::invalid_argument("CudaFp32Buffers::upload: batch_size must be positive");
+        throw std::invalid_argument("CudaFp32Storage::upload: batch_size must be positive");
     }
     if (ctx.sbus_stride < n_bus || ctx.V0_stride < n_bus) {
-        throw std::invalid_argument("CudaFp32Buffers::upload: batch strides must be at least n_bus");
+        throw std::invalid_argument("CudaFp32Storage::upload: batch strides must be at least n_bus");
     }
 
     batch_size = ctx.batch_size;
@@ -207,6 +229,7 @@ void CudaFp32Buffers::upload(const SolveContext& ctx)
                            ybus.nnz, batch_size, ctx.ybus_value_stride, ybus_values_batched);
     upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
 
+    // Seed rectangular V plus polar (Va, Vm) from the FP64 V0 guess.
     std::vector<float> h_V_re(bus_count);
     std::vector<float> h_V_im(bus_count);
     std::vector<float> h_Va(bus_count);
@@ -237,10 +260,11 @@ void CudaFp32Buffers::upload(const SolveContext& ctx)
 }
 
 
-void CudaFp32Buffers::download(NRResult& result) const
+// Single-case voltage readback: copy device V (FP32) to host, up-cast to FP64.
+void CudaFp32Storage::download(NRResult& result) const
 {
     if (batch_size != 1) {
-        throw std::runtime_error("CudaFp32Buffers::download: use download_batch for batch_size > 1");
+        throw std::runtime_error("CudaFp32Storage::download: use download_batch for batch_size > 1");
     }
 
     std::vector<float> h_re(static_cast<std::size_t>(n_bus));
@@ -258,7 +282,8 @@ void CudaFp32Buffers::download(NRResult& result) const
 }
 
 
-void CudaFp32Buffers::download_batch(NRBatchResult& result) const
+// Batched voltage readback (FP32 -> FP64) plus per-case final mismatch norms.
+void CudaFp32Storage::download_batch(NRBatchResult& result) const
 {
     const std::size_t total = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
     std::vector<float> h_re(total);

@@ -3,20 +3,18 @@
 #include "newton_solver/storage/cpu/cpu_fp64_storage.hpp"
 #include "utils/dump.hpp"
 
-#include <Eigen/Sparse>
-
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 
 
-namespace {
-using CpuComplexVectorF64 = Eigen::Matrix<std::complex<double>, Eigen::Dynamic, 1>;
-}
-
-
-void CpuMismatchOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
+// Power-flow residual F from the complex power mismatch S(V) - Sbus. Packed in
+// the dimF order [ dP@pv | dP@pq | dQ@pq ]: real parts (active power) for pv+pq
+// buses, then imaginary parts (reactive power) for pq buses.
+void CpuMismatchOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     if (buf.n_bus <= 0 || buf.dimF <= 0) {
         throw std::runtime_error("CpuMismatchOp::run: buffers are not prepared");
@@ -28,26 +26,27 @@ void CpuMismatchOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
         throw std::runtime_error("CpuMismatchOp::run: Ibus stage has not run");
     }
 
-    Eigen::Map<const CpuComplexVectorF64> V(buf.V.data(), buf.n_bus);
-    Eigen::Map<const CpuComplexVectorF64> Sbus(buf.Sbus.data(), buf.n_bus);
-    Eigen::Map<const CpuComplexVectorF64> Ibus(buf.Ibus.data(), buf.n_bus);
-
-    const CpuComplexVectorF64 mis =
-        V.array() * Ibus.array().conjugate() - Sbus.array();
+    // mis[i] = V[i] * conj(Ibus[i]) - Sbus[i]
+    auto mis_at = [&buf](int32_t i) -> std::complex<double> {
+        const std::size_t idx = static_cast<std::size_t>(i);
+        return buf.V[idx] * std::conj(buf.Ibus[idx]) - buf.Sbus[idx];
+    };
 
     int32_t k = 0;
-    for (int32_t i = 0; i < ctx.n_pv; ++i) buf.F[k++] = mis[ctx.pv[i]].real();
-    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[k++] = mis[ctx.pq[i]].real();
-    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[k++] = mis[ctx.pq[i]].imag();
+    for (int32_t i = 0; i < ctx.n_pv; ++i) buf.F[static_cast<std::size_t>(k++)] = mis_at(ctx.pv[i]).real();
+    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[static_cast<std::size_t>(k++)] = mis_at(ctx.pq[i]).real();
+    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[static_cast<std::size_t>(k++)] = mis_at(ctx.pq[i]).imag();
 }
 
 
-void CpuMismatchNormOp::run(CpuFp64Buffers& buf, IterationContext& ctx)
+// Infinity-norm of the residual; sets the convergence flag against tolerance.
+void CpuMismatchNormOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     if (buf.dimF <= 0 || buf.F.empty()) {
         throw std::runtime_error("CpuMismatchNormOp::run: buffers are not prepared");
     }
 
+    // max |F_i| over all residual entries.
     ctx.normF = 0.0;
     for (double value : buf.F) {
         ctx.normF = std::max(ctx.normF, std::abs(value));
