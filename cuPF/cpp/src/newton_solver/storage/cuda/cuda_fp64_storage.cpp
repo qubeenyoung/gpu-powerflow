@@ -1,3 +1,11 @@
+// ---------------------------------------------------------------------------
+// cuda_fp64_storage.cpp
+//
+// FP64 single-case (batch_size == 1) device storage. Like the FP32/Mixed
+// variants but with no batch dimension and no precision conversion — host
+// FP64 inputs map straight to FP64 device buffers.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_fp64_storage.hpp"
@@ -11,6 +19,7 @@
 
 namespace {
 
+// Throw if a required input pointer is null for a non-empty array.
 template <typename T>
 void require_pointer(const T* ptr, const char* name, int32_t count)
 {
@@ -19,6 +28,7 @@ void require_pointer(const T* ptr, const char* name, int32_t count)
     }
 }
 
+// Per-nonzero row index of the CSR Ybus (the kernels need the row of each nz).
 std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
 {
     std::vector<int32_t> rows(static_cast<std::size_t>(ybus.nnz), 0);
@@ -30,6 +40,7 @@ std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
     return rows;
 }
 
+// Split a complex array into separate real/imag FP64 device buffers.
 void upload_complex_components(DeviceBuffer<double>& dst_re,
                                DeviceBuffer<double>& dst_im,
                                const std::complex<double>* src,
@@ -48,6 +59,7 @@ void upload_complex_components(DeviceBuffer<double>& dst_re,
 }  // namespace
 
 
+// Allocate buffers and upload the static topology (Ybus, J pattern, maps).
 void CudaFp64Storage::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr,  "InitializeContext.ybus.indptr",  ctx.ybus.rows + 1);
@@ -116,6 +128,7 @@ void CudaFp64Storage::prepare(const InitializeContext& ctx)
 }
 
 
+// Push per-solve inputs (Ybus/Sbus/V0) and seed polar (Va, Vm) from V0.
 void CudaFp64Storage::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
@@ -153,6 +166,7 @@ void CudaFp64Storage::upload(const SolveContext& ctx)
 }
 
 
+// Copy the converged voltage back into the FP64 result.
 void CudaFp64Storage::download(NRResult& result) const
 {
     std::vector<double> h_re(static_cast<std::size_t>(n_bus));
