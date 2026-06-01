@@ -108,9 +108,13 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     }
     std::vector<idx_t> x0, a0, x1, a1;
     std::vector<int> m0, m1;
-    if (is_root) {
-        // Root: only this thread is active -> extract the two halves concurrently, each
-        // internally multi-core. Removes the single-threaded induce from the critical path.
+    // Use the multi-core induce on the few TOP levels (large subgraphs, few active recursion
+    // threads), where the single-threaded induce sits on the critical path. The inner par_for
+    // self-limits to serial below 32768, so deeper/smaller subgraphs keep serial induce and the
+    // oversubscription from concurrent branches stays bounded. PARND_TOPIND overrides the cutoff.
+    const char* ti_s = std::getenv("PARND_TOPIND");
+    const int topind = ti_s ? std::atoi(ti_s) : 49152;
+    if (is_root || n >= topind) {
         std::thread ti([&] { induce_par(xadj, adj, part, 0, x0, a0, m0); });
         induce_par(xadj, adj, part, 1, x1, a1, m1);
         ti.join();
