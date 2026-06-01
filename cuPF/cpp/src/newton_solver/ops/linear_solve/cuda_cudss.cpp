@@ -153,15 +153,6 @@ void set_cudss_stream(cudssHandle_t handle)
 }
 #endif
 
-// Batch size / per-case J nnz of any CUDA storage profile. All three profiles
-// (CudaFp32/Fp64/MixedStorage) expose these members, so one template each
-// suffices (they used to be three identical overloads per accessor).
-template <typename Storage>
-int32_t buf_batch_size(const Storage& b) { return b.batch_size; }
-
-template <typename Storage>
-int32_t buf_nnz_j(const Storage& b) { return b.nnz_J; }  // per case, not batch-multiplied
-
 }  // namespace
 
 
@@ -212,7 +203,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::initialize(Buffers& buf, const Initialize
 
     // When the Jacobian pattern is already known, precompute the J^T sparsity
     // so adjoint solves can reuse it without re-transposing every iteration.
-    if (ctx.J.dim == buf.dimF && ctx.J.nnz == buf_nnz_j(buf)) {
+    if (ctx.J.dim == buf.dimF && ctx.J.nnz == cuda_storage_nnz_j(buf)) {
         const CsrTransposePattern transpose =
             build_transpose_pattern(ctx.J.row_ptr, ctx.J.col_idx, ctx.J.dim);
         state_->adjoint_row_ptr.assign(transpose.row_ptr.data(), transpose.row_ptr.size());
@@ -234,7 +225,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::initialize(Buffers& buf, const Initialize
         state_->analysis_done = true;
     }
     // Mirror the symbolic analysis for the adjoint (J^T) system when possible.
-    if (ctx.J.dim == buf.dimF && ctx.J.nnz == buf_nnz_j(buf)) {
+    if (ctx.J.dim == buf.dimF && ctx.J.nnz == cuda_storage_nnz_j(buf)) {
         ensure_adjoint_descriptors(buf);
         if (!state_->adjoint_analysis_done) {
             set_cudss_stream(state_->handle);
@@ -271,7 +262,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_rhs(Buffers& buf, IterationContex
     // Only the float + mixed-storage combination keeps a separate FP32 RHS.
     if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedStorage>) {
         ensure_descriptors(buf);
-        const int32_t rhs_count = buf_batch_size(buf) * buf.dimF;
+        const int32_t rhs_count = cuda_storage_batch_size(buf) * buf.dimF;
         launch_prepare_rhs(buf.d_F.data(), state_->rhs.data(), rhs_count);
     }
 #endif
@@ -348,7 +339,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve(Buffers& buf, IterationContext& ctx
 
     // Debug-only: copy dx back to host and record it.
     if (newton_solver::utils::isDumpEnabled()) {
-        const int32_t count = buf_batch_size(buf) * buf.dimF;
+        const int32_t count = cuda_storage_batch_size(buf) * buf.dimF;
         // count is a positive element count; widen to size_t for the host vector.
         std::vector<T> h_dx(static_cast<std::size_t>(count));
         buf.d_dx.copyTo(h_dx.data(), h_dx.size());
@@ -414,8 +405,8 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
     ensure_adjoint_descriptors(buf);
 
     // Scatter J's values into J^T order using the precomputed position map.
-    const int32_t batch_size = buf_batch_size(buf);
-    const int32_t nnz_J = buf_nnz_j(buf);
+    const int32_t batch_size = cuda_storage_batch_size(buf);
+    const int32_t nnz_J = cuda_storage_nnz_j(buf);
     launch_transpose_csr_values(
         buf.d_J_values.data(),
         state_->adjoint_values.data(),
@@ -566,9 +557,9 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_descriptors(Buffers& buf)
     (void)buf;
     throw std::runtime_error("CudaLinearSolveCuDSS: requires a cuDSS-enabled build");
 #else
-    const int32_t batch_size = buf_batch_size(buf);
+    const int32_t batch_size = cuda_storage_batch_size(buf);
     const int32_t dimF       = buf.dimF;
-    const int32_t nnz_J      = buf_nnz_j(buf);
+    const int32_t nnz_J      = cuda_storage_nnz_j(buf);
 
     if (batch_size <= 0 || dimF <= 0 || nnz_J <= 0) {
         throw std::runtime_error("CudaLinearSolveCuDSS: invalid descriptor dimensions");
@@ -632,9 +623,9 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_adjoint_descriptors(Buffers& buf)
     (void)buf;
     throw std::runtime_error("CudaLinearSolveCuDSS: requires a cuDSS-enabled build");
 #else
-    const int32_t batch_size = buf_batch_size(buf);
+    const int32_t batch_size = cuda_storage_batch_size(buf);
     const int32_t dimF = buf.dimF;
-    const int32_t nnz_J = buf_nnz_j(buf);
+    const int32_t nnz_J = cuda_storage_nnz_j(buf);
 
     if (batch_size <= 0 || dimF <= 0 || nnz_J <= 0) {
         throw std::runtime_error("CudaLinearSolveCuDSS: invalid adjoint descriptor dimensions");

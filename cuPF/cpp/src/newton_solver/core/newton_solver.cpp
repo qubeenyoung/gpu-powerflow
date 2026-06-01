@@ -1,8 +1,20 @@
 // ---------------------------------------------------------------------------
 // newton_solver.cpp
 //
-// NewtonSolver orchestration. Backend-specific math, adjoint solve, and
-// Torch interop live in companion core files.
+// NewtonSolver orchestration — the backend-agnostic driver. It selects a
+// pipeline "profile" (CPU-FP64 / CUDA-FP64 / FP32 / Mixed) from NewtonOptions,
+// then drives the standard lifecycle:
+//
+//   initialize()  -> Jacobian symbolic analysis + pipeline.initialize() (once)
+//   solve_batch() -> upload inputs, run the NR loop, optionally cache a
+//                    factorization for backward, download voltages + per-case stats
+//   solve()       -> single-case convenience wrapper around solve_batch(B=1)
+//   solve_adjoint()-> backward / sensitivity pass (J^T), in newton_solver_adjoint.cpp
+//
+// The active pipeline lives in a std::variant (SolverPipeline) and every stage
+// is dispatched with std::visit, so this file contains no precision-specific
+// math — only the loop structure and result bookkeeping. The per-stage device
+// math, adjoint solve, and Torch interop live in companion core files.
 // ---------------------------------------------------------------------------
 
 #include "newton_solver/core/newton_solver.hpp"
@@ -56,13 +68,6 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end)
 {
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
-
-#ifdef CUPF_WITH_CUDA
-// Batch size per CUDA storage layout (FP64 is single-case).
-int32_t cuda_batch_size(const CudaFp64Storage&) { return 1; }
-int32_t cuda_batch_size(const CudaFp32Storage& b) { return b.batch_size; }
-int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
-#endif
 
 }  // namespace
 
@@ -371,7 +376,7 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
                 return 1;
             } else {
 #ifdef CUPF_WITH_CUDA
-                return cuda_batch_size(p.buf);
+                return cuda_storage_batch_size(p.buf);
 #else
                 return 1;
 #endif
@@ -453,20 +458,29 @@ int32_t NewtonSolver::run_iteration_stages(IterationContext& ctx)
         ctx.jacobian_updated_this_iter = false;
         completed = iter + 1;
 
+        // Evaluate the residual at the current voltage: Ibus = Ybus*V, then the
+        // mismatch F = S(V) - Sbus, then its infinity norm (sets ctx.converged).
         std::visit([&](auto& p) {
             { StageScope s("NR.iteration.ibus");          p.ibus(ctx); }
             { StageScope s("NR.iteration.mismatch");      p.mismatch(ctx); }
             { StageScope s("NR.iteration.mismatch_norm"); p.mismatch_norm(ctx); }
         }, pipeline_->v);
 
+        // Converged at the start of an iteration -> stop before building/solving
+        // the Jacobian, so the last (converged) state is not perturbed by another
+        // step and the expensive factorize/solve is skipped.
         if (ctx.converged) break;
 
+        // Assemble the Jacobian at the current state (marks it fresh for the
+        // adjoint cache exactness check).
         std::visit([&](auto& p) {
             { StageScope s("NR.iteration.jacobian");       p.jacobian(ctx); }
         }, pipeline_->v);
         ctx.jacobian_updated_this_iter = true;
         ctx.jacobian_age = 0;
 
+        // Solve J dx = F and apply the Newton step: prepare/cast the RHS,
+        // factorize J, triangular-solve for dx, then update V from dx.
         std::visit([&](auto& p) {
             { StageScope s("NR.iteration.prepare_rhs");    p.prepare_rhs(ctx); }
             { StageScope s("NR.iteration.factorize");      p.factorize(ctx); }

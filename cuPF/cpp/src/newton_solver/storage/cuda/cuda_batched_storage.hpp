@@ -138,4 +138,16 @@ struct CudaBatchedStorage {
     bool    ybus_values_batched = false;
 };
 
+
+// Uniform accessors for the batch size and per-case Jacobian nnz of any CUDA
+// storage profile (FP32/FP64/Mixed all derive from CudaBatchedStorage and
+// expose these members). Defined once here so the value cannot drift per TU —
+// these used to be copy-pasted into each .cpp as overload sets, and the FP64
+// batch flag once went out of sync across those copies.
+template <typename Storage>
+int32_t cuda_storage_batch_size(const Storage& b) { return b.batch_size; }
+
+template <typename Storage>
+int32_t cuda_storage_nnz_j(const Storage& b) { return b.nnz_J; }  // per case, not batch-multiplied
+
 #endif  // CUPF_WITH_CUDA

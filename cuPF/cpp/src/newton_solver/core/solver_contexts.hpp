@@ -43,25 +43,38 @@ struct SolveContext {
 };
 
 
+// ---------------------------------------------------------------------------
+// AdjointCache: per-pipeline record of the factorization cached at the final
+// converged state for a later solve_adjoint() (J^T solve). Holds both the
+// "is the cache usable" flags the adjoint path checks and provenance/diagnostic
+// flags surfaced in AdjointResult (how J^T was obtained for this backend).
+// Reset at the start of every forward solve and (re)populated by
+// prepare_adjoint_cache(). See newton_solver.cpp / newton_solver_adjoint.cpp.
+// ---------------------------------------------------------------------------
 struct AdjointCache {
-    bool has_adjoint_cache = false;
-    bool adjoint_cache_matches_final_state = false;
-    bool factorization_supports_transpose_solve = false;
-    bool refactorized_for_adjoint_cache = false;
-    bool reused_forward_factorization = false;
-    bool used_explicit_transpose = false;
+    // --- usability: is there an exact cached factorization to reuse? ---
+    bool has_adjoint_cache = false;                    // a factorization is cached
+    bool adjoint_cache_matches_final_state = false;    // ...and it is the converged-state J
+    bool factorization_supports_transpose_solve = false;  // cache can solve J^T directly (CPU/KLU)
+    bool refactorized_for_adjoint_cache = false;       // J was refactorized to build the cache
+    bool reused_forward_factorization = false;         // reused the last NR-iteration factorization
+
+    // --- provenance flags (diagnostics; copied into AdjointResult) ---
+    bool used_explicit_transpose = false;              // explicit J^T was materialized (cuDSS)
     bool includes_host_device_transfer = false;
-    bool jt_symbolic_analyzed_at_initialize = false;
-    bool jt_values_transposed_on_device = false;
-    bool jt_factorized_during_forward_cache = false;
+    bool jt_symbolic_analyzed_at_initialize = false;   // J^T symbolic analysis done in initialize()
+    bool jt_values_transposed_on_device = false;       // J values scattered to J^T on device
+    bool jt_factorized_during_forward_cache = false;   // J^T factorized while caching (not in backward)
     bool host_roundtrip_for_jt_transpose = false;
+
+    // --- dimensions / metadata ---
     int64_t final_state_generation = 0;
     double final_mismatch_norm = 0.0;
-    int32_t batch_size = 0;
+    int32_t batch_size = 0;     // batch the cache was built for (must match the adjoint call)
     int32_t dimF = 0;
-    std::string backend_name;
+    std::string backend_name;                  // e.g. "cuda_cudss_fp64", "cpu_klu"
     std::string transpose_solve_backend_name;
-    double factorization_time_ms = 0.0;
+    double factorization_time_ms = 0.0;        // wall-clock of the cache factorization
 };
 
 

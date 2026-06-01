@@ -38,28 +38,30 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end)
 }
 
 #ifdef CUPF_WITH_CUDA
-// Batch size per storage layout (FP64 is single-case).
-int32_t cuda_batch_size(const CudaFp64Storage&) { return 1; }
-int32_t cuda_batch_size(const CudaFp32Storage& b) { return b.batch_size; }
-int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
-
-// Resize every device buffer to match the current case/batch dimensions.
-// FP64 is limited to batch_size==1; FP32/Mixed scale each buffer by batch_size.
+// Resize every device buffer to match the current case/batch dimensions. All
+// three CUDA profiles now scale each buffer by batch_size (FP64 gained batch
+// support along with batched storage/kernels/cuDSS uniform-batch).
 // (All size_t casts widen positive int32 dimensions before multiplying, which
 //  both matches the buffer API and guards the products against int overflow.)
 void ensure_cuda_tensor_batch(CudaFp64Storage& buf, int32_t batch_size)
 {
-    if (batch_size != 1) {
-        throw std::runtime_error(
-            "CUDA FP64 torch extension path currently supports batch_size=1; use fp32 or mixed for batched runs");
+    if (batch_size <= 0) {
+        throw std::invalid_argument("torch extension path requires a positive batch size");
     }
-    const std::size_t bus_count = static_cast<std::size_t>(buf.n_bus);
-    const std::size_t residual_count = static_cast<std::size_t>(buf.dimF);
+    buf.batch_size = batch_size;
+    buf.ybus_values_batched = false;
+    const std::size_t bus_count =
+        static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(buf.n_bus);
+    const std::size_t residual_count =
+        static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(buf.dimF);
+    const std::size_t jacobian_count =
+        static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(buf.nnz_J);
     const auto ensure_size = [](auto& b, std::size_t count) {
         if (b.size() != count) b.resize(count);
     };
+    ensure_size(buf.d_J_values, jacobian_count);
     ensure_size(buf.d_F, residual_count);
-    ensure_size(buf.d_normF, 1);
+    ensure_size(buf.d_normF, static_cast<std::size_t>(batch_size));
     ensure_size(buf.d_dx, residual_count);
     ensure_size(buf.d_Va, bus_count);
     ensure_size(buf.d_Vm, bus_count);
@@ -197,7 +199,7 @@ void fill_common_cuda_adjoint_metadata(PipelineT& p, AdjointResult& result)
     result.jt_refactorized_during_backward = false;
     result.host_roundtrip_for_jt_transpose = p.adjoint_cache.host_roundtrip_for_jt_transpose;
     result.n_bus = p.buf.n_bus;
-    result.batch_size = cuda_batch_size(p.buf);
+    result.batch_size = cuda_storage_batch_size(p.buf);
     result.dimF = p.buf.dimF;
     result.backend = p.adjoint_cache.backend_name.empty()
         ? cuda_pipeline_backend_name<PipelineT>()
@@ -262,7 +264,7 @@ void NewtonSolver::solve_torch_backward(
                     std::string("cupf::torch_api::solve_backward(): dtype must be ") +
                     expected_dtype + " for this cuPF compute policy");
             }
-            if (batch_size != cuda_batch_size(p.buf) || n_bus != p.buf.n_bus) {
+            if (batch_size != cuda_storage_batch_size(p.buf) || n_bus != p.buf.n_bus) {
                 throw std::invalid_argument("cupf::torch_api::solve_backward(): shape does not match cached forward solve");
             }
             const bool cache_ok =

@@ -2,10 +2,26 @@
 // pybind_cupf.cpp
 //
 // Python bindings for the cuPF solver (module name: _cupf). Exposes the option
-// enums/structs, the NR result structs, and the NewtonSolver class. Inputs are
-// taken as numpy arrays (Ybus as zero-copy CSR via YbusView) and results are
-// returned as numpy arrays. The optional torch zero-copy entry points are only
-// declared/bound when CUPF_WITH_TORCH is set (defined in torch_cupf_extension).
+// enums/structs, the NR result structs, and the NewtonSolver class.
+//
+// Memory / ownership contract:
+//   - Array inputs are declared py::array_t<..., c_style | forcecast>, so
+//     pybind accepts any numpy array and, if the dtype/layout differs, makes a
+//     contiguous converted copy before the call (the .data() pointers handed to
+//     the solver are valid only for the call's duration).
+//   - The CSR Ybus is wrapped as a *borrowing* YbusView (make_ybus_view) — no
+//     copy; the view is only valid while the caller's arrays are alive, which
+//     they are for the synchronous solve call (the solver uploads/copies the
+//     pattern internally during initialize()/upload()).
+//   - Results are returned as owning numpy arrays (the *_to_numpy helpers
+//     memcpy the solver's std::vectors out), so they safely outlive the result
+//     object. The plain def_readonly members expose the same data as Python
+//     lists/copies; the *_numpy properties give zero-extra-copy-after-this numpy
+//     views (still owning their own buffer).
+//
+// The optional torch zero-copy entry points are only declared/bound when
+// CUPF_WITH_TORCH is set (their bodies live in torch_cupf_extension.cpp); those
+// keep tensors on-device with no host copy.
 // ---------------------------------------------------------------------------
 
 #include <pybind11/pybind11.h>
@@ -45,7 +61,11 @@ AdjointResult solve_adjoint_torch_binding(NewtonSolver& self,
 
 
 // ---------------------------------------------------------------------------
-// Helper: numpy CSR 행렬을 YbusView로 감싼다 (zero-copy).
+// Wrap a numpy CSR matrix as a borrowing YbusView (zero-copy). Validates rank /
+// lengths so a malformed CSR is rejected here rather than read out of bounds
+// downstream. The returned view borrows the caller's numpy buffers, so it must
+// only be used within the same binding call (the solver consumes it before
+// returning). nnz is taken from the data length.
 // ---------------------------------------------------------------------------
 static YbusView make_ybus_view(
     py::array_t<int32_t>             indptr,
@@ -59,10 +79,10 @@ static YbusView make_ybus_view(
     if (indptr.ndim() != 1 || indices.ndim() != 1 || data.ndim() != 1) {
         throw std::invalid_argument("Ybus indptr, indices, and data must be 1D arrays");
     }
-    if (indptr.size() != static_cast<py::ssize_t>(rows + 1)) {
+    if (indptr.size() != static_cast<py::ssize_t>(rows + 1)) {  // CSR row pointers: rows+1 entries
         throw std::invalid_argument("Ybus indptr length must be rows + 1");
     }
-    if (indices.size() != data.size()) {
+    if (indices.size() != data.size()) {                        // one column index per value
         throw std::invalid_argument("Ybus indices and data must have the same length");
     }
     return YbusView{
@@ -75,6 +95,12 @@ static YbusView make_ybus_view(
 }
 
 // --- Result converters: copy solver std::vectors into owning numpy arrays ---
+//
+// Each returns a freshly allocated numpy array and memcpy's the solver vector
+// into it, so the returned array owns its buffer and is safe to keep after the
+// result object is gone. 1D variants return [N]; the matrix variants reshape a
+// batch-major flat vector into [batch_size, dim] (the layout the solver writes:
+// case b occupies the contiguous slice [b*dim, (b+1)*dim)).
 
 static py::array_t<std::complex<double>> complex_vector_to_numpy(
     const std::vector<std::complex<double>>& values)
@@ -86,13 +112,16 @@ static py::array_t<std::complex<double>> complex_vector_to_numpy(
     return out;
 }
 
+// Reshape the batch-major voltage vector [batch_size * n_bus] to [batch, n_bus].
 static py::array_t<std::complex<double>> batch_voltage_to_numpy(
     const NRBatchResult& result)
 {
     py::array_t<std::complex<double>> out({result.batch_size, result.n_bus});
-    std::memcpy(out.mutable_data(),
-                result.V.data(),
-                result.V.size() * sizeof(std::complex<double>));
+    if (!result.V.empty()) {
+        std::memcpy(out.mutable_data(),
+                    result.V.data(),
+                    result.V.size() * sizeof(std::complex<double>));
+    }
     return out;
 }
 
@@ -313,7 +342,11 @@ PYBIND11_MODULE(_cupf, m)
     py::class_<AdjointResult>(m, "AdjointResult",
         "solve_adjoint() 결과. lambda와 load gradients는 batch-major layout이다.")
         .def_readonly("lambda", &AdjointResult::lambda,
-            "adjoint 변수 lambda [batch_size * dimF]")
+            "adjoint 변수 lambda [batch_size * dimF]. 주의: 'lambda'는 파이썬 예약어라 "
+            "result.lambda 로 직접 접근할 수 없다 — lambda_ / lambda_numpy 또는 "
+            "getattr(result, 'lambda') 를 사용한다.")
+        .def_readonly("lambda_", &AdjointResult::lambda,
+            "lambda의 키워드-안전 별칭 ('lambda'는 파이썬 예약어). 동일한 [batch_size * dimF].")
         .def_property_readonly("lambda_numpy",
             [](const AdjointResult& result) {
                 return double_matrix_to_numpy(result.lambda, result.batch_size, result.dimF);
@@ -441,7 +474,8 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("pq"),
              py::arg("config") = NRConfig{},
              py::arg("solve_options") = SolveOptions{},
-             "단일 scenario Newton-Raphson solve를 실행한다.")
+             "단일 scenario Newton-Raphson solve를 실행한다. "
+             "pv/pq는 initialize()에 전달한 것과 동일해야 한다(분석된 symbolic state와 일치).")
         .def("solve_batch",
              [](NewtonSolver& self,
                 py::array_t<int32_t, py::array::c_style | py::array::forcecast> indptr,
@@ -487,7 +521,9 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("pq"),
              py::arg("config") = NRConfig{},
              py::arg("solve_options") = SolveOptions{},
-             "batch-major scenario 배열 [batch, n_bus]에 대해 solve_batch를 실행한다.")
+             "batch-major scenario 배열 [batch, n_bus]에 대해 solve_batch를 실행한다. "
+             "batch_size>1은 CUDA FP32/Mixed/FP64에서 지원된다(CPU는 단일 케이스). "
+             "pv/pq는 initialize()에 전달한 것과 동일해야 한다.")
         .def("solve_adjoint",
              [](NewtonSolver& self,
                 py::array_t<double, py::array::c_style | py::array::forcecast> grad_va,
@@ -533,7 +569,8 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("pq"),
              py::arg("options") = AdjointOptions{},
              "마지막 forward state에서 native adjoint solve J^T lambda = dL/dx를 실행한다. "
-             "grad_va/grad_vm은 full-bus layout이며 1D 또는 batch-major 2D 배열이다.")
+             "grad_va/grad_vm은 full-bus layout이며 1D 또는 batch-major 2D 배열이다. "
+             "pv/pq는 initialize()/직전 forward와 동일해야 하고, batch_size도 직전 forward와 일치해야 한다.")
 #ifdef CUPF_WITH_TORCH
         .def("solve_with_adjoint_cache_torch",
              &solve_with_adjoint_cache_torch_binding,
@@ -547,7 +584,10 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("vm_out"),
              py::arg("config") = NRConfig{},
              py::arg("solve_options") = SolveOptions{},
-             "torch::Tensor CUDA zero-copy forward path. Dynamic load tensors and output tensors stay on device.")
+             "torch::Tensor CUDA zero-copy forward path. Dynamic load tensors and output tensors stay on device.\n"
+             "모든 텐서 dtype은 compute policy와 일치해야 한다: FP64 -> torch.float64, "
+             "FP32/Mixed -> torch.float32 (Mixed는 비-torch 경로의 FP64 입력과 달리 float32 텐서를 받는다). "
+             "load_p/load_q/va_out/vm_out은 [batch, n_bus], sbus_base_*/v0_*는 [n_bus] (배치 공통).")
         .def("solve_torch",
              &solve_with_adjoint_cache_torch_binding,
              py::arg("sbus_base_re"),
@@ -560,7 +600,8 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("vm_out"),
              py::arg("config") = NRConfig{},
              py::arg("solve_options") = SolveOptions{},
-             "Alias for solve_with_adjoint_cache_torch; set solve_options.prepare_adjoint_cache as needed.")
+             "Alias for solve_with_adjoint_cache_torch; set solve_options.prepare_adjoint_cache as needed.\n"
+             "텐서 dtype 규칙은 solve_with_adjoint_cache_torch와 동일: FP64 -> float64, FP32/Mixed -> float32.")
         .def("solve_adjoint_torch",
              &solve_adjoint_torch_binding,
              py::arg("grad_va"),
@@ -568,7 +609,9 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("grad_load_p_out"),
              py::arg("grad_load_q_out"),
              py::arg("options") = AdjointOptions{},
-             "torch::Tensor CUDA zero-copy cached adjoint path using PyTorch current CUDA stream.")
+             "torch::Tensor CUDA zero-copy cached adjoint path using PyTorch current CUDA stream.\n"
+             "grad_va/grad_vm/grad_load_*_out은 모두 [batch, n_bus]이고 dtype은 forward와 동일해야 한다 "
+             "(FP64 -> float64, FP32/Mixed -> float32). batch는 직전 forward solve와 일치해야 한다.")
 #endif
         ;
 }
