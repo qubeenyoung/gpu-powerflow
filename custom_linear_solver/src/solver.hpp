@@ -43,8 +43,8 @@ public:
     Status get_solution(DenseVectorView* solution) const;
 
     Status analyze();
-    Status factorize();
-    Status solve();
+    Status factorize(double* kernel_ms = nullptr);
+    Status solve(double* kernel_ms = nullptr);
 
 private:
     struct Impl;

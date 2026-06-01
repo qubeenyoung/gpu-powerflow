@@ -462,6 +462,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     namespace sym = custom_linear_solver::symbolic;
     const bool tm = std::getenv("MF_TIME") != nullptr;  // analysis sub-phase profiling
     const bool solve_f32 = std::getenv("MF_SOLVE_F32") != nullptr;  // cy170: FP32 solve A/B
+    if (std::getenv("MF_MIXED") != nullptr) fp32 = true;  // force FP64-master/FP32-LU mixed factor
     auto tclk = std::chrono::steady_clock::now();
     auto lap = [&](const char* nm) {
         if (tm) {
@@ -845,19 +846,23 @@ bool factorize_multifrontal_device(MultifrontalPlan& plan, const double* d_csr_v
         return false;
 
     cudaStream_t stream = static_cast<cudaStream_t>(plan.stream);
+    const bool split = std::getenv("CLS_FACTOR_SPLIT") != nullptr;
+
+    const int T = 128;
+    cudaEvent_t k0, k1, km, ks;
+    cudaEventCreate(&k0);
+    cudaEventCreate(&k1);
+    if (split) { cudaEventCreate(&km); cudaEventCreate(&ks); }
+    cudaEventRecord(k0, stream);
     // FP64 master holds the assembly (both modes); the FP32 working arena is overwritten
     // per front by the mixed kernel's narrow, so it needs no memset.
     cudaMemsetAsync(plan.d_front, 0, plan.front_total * sizeof(double), stream);
     cudaMemsetAsync(plan.d_sing, 0, sizeof(int), stream);
-
-    const int T = 128;
-    cudaEvent_t k0, k1;
-    cudaEventCreate(&k0);
-    cudaEventCreate(&k1);
-    cudaEventRecord(k0, stream);
+    if (split) cudaEventRecord(km, stream);
     const int sb = (plan.nnz_a + T - 1) / T;  // scatter A into the FP64 master (both modes)
     mf_scatter_csr_values<<<sb, T, 0, stream>>>(plan.nnz_a, d_ordered_value_to_csr,
                                                 plan.d_a_pos, d_csr_values, plan.d_front);
+    if (split) cudaEventRecord(ks, stream);
     cudaGraphLaunch(static_cast<cudaGraphExec_t>(plan.graph_exec), stream);
     cudaEventRecord(k1, stream);
     cudaEventSynchronize(k1);
@@ -865,6 +870,14 @@ bool factorize_multifrontal_device(MultifrontalPlan& plan, const double* d_csr_v
         float ms = 0.0f;
         cudaEventElapsedTime(&ms, k0, k1);
         *kernel_ms = ms;
+    }
+    if (split) {
+        float mms = 0, sms = 0, gms = 0;
+        cudaEventElapsedTime(&mms, k0, km);
+        cudaEventElapsedTime(&sms, km, ks);
+        cudaEventElapsedTime(&gms, ks, k1);
+        std::fprintf(stderr, "  [factor-split] memset=%.3f scatter=%.3f graph=%.3f ms\n", mms, sms, gms);
+        cudaEventDestroy(km); cudaEventDestroy(ks);
     }
     cudaEventDestroy(k0);
     cudaEventDestroy(k1);

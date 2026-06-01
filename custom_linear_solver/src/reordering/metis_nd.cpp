@@ -200,7 +200,79 @@ void build_symmetric_adjacency(int n, const int* col_ptr, const int* row_idx,
     });
 }
 
+// Run the ND ordering (parallel nested dissection or serial METIS NodeND) on an already-built
+// symmetric idx_t graph. Fills perm in METIS convention (perm[new_pos] = old_vertex). Shared by
+// metis_nd (CPU graph build) and metis_nd_from_graph (GPU graph build).
+bool run_nd_on_graph(int n, std::vector<idx_t>& xadj, std::vector<idx_t>& adjncy,
+                     std::vector<int>& perm, bool parallel, double t_build_ms)
+{
+    const bool tm = std::getenv("METIS_TIME") != nullptr;
+    auto t1 = std::chrono::steady_clock::now();
+
+    if (adjncy.empty()) {  // no edges: natural order is optimal
+        for (int i = 0; i < n; ++i) perm[i] = i;
+        return true;
+    }
+
+    idx_t options[METIS_NOPTIONS];
+    METIS_SetDefaultOptions(options);
+    options[METIS_OPTION_NUMBERING] = 0;
+
+    const char* pd = std::getenv("PAR_ND");
+    if (parallel || pd) {
+        const int depth = (pd && std::atoi(pd) > 0) ? std::atoi(pd) : 4;
+        const char* bs = std::getenv("PAR_ND_BASE");
+        const int base_thr = bs ? std::atoi(bs) : (n < 20000 ? 4000 : 20000);
+        std::vector<int> pp;
+        par_nd_rec(xadj, adjncy, pp, depth, base_thr);
+        for (int i = 0; i < n; ++i) perm[i] = pp[i];
+        if (tm) {
+            auto t2 = std::chrono::steady_clock::now();
+            std::fprintf(stderr, "  [metis-PAR] n=%d adj_build=%.1fms parND(d=%d)=%.1fms\n", n,
+                         t_build_ms, depth,
+                         std::chrono::duration<double, std::milli>(t2 - t1).count());
+        }
+        return true;
+    }
+    idx_t nvtxs = n;
+    std::vector<idx_t> mperm(n);
+    std::vector<idx_t> miperm(n);
+    const int rc = METIS_NodeND(&nvtxs, xadj.data(), adjncy.data(), nullptr, options,
+                                mperm.data(), miperm.data());
+    if (tm) {
+        auto t2 = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "  [metis] n=%d adj_build=%.1fms NodeND=%.1fms\n", n, t_build_ms,
+                     std::chrono::duration<double, std::milli>(t2 - t1).count());
+    }
+    if (rc != METIS_OK) {
+        for (int i = 0; i < n; ++i) perm[i] = i;
+        return true;
+    }
+    for (int i = 0; i < n; ++i) perm[i] = static_cast<int>(mperm[i]);
+    return true;
+}
+
 }  // namespace
+
+bool metis_nd_from_graph(int n, std::vector<int>& xadj_in, std::vector<int>& adjncy_in,
+                         std::vector<int>& perm, bool parallel)
+{
+    if (n < 0) return false;
+    perm.assign(static_cast<std::size_t>(n), 0);
+    if (n <= 1) { if (n == 1) perm[0] = 0; return true; }
+
+    // Adopt the prebuilt (GPU-produced) symmetric graph as idx_t. When idx_t == int the
+    // host arrays are moved in with no copy; otherwise widen element-wise.
+    std::vector<idx_t> xadj, adjncy;
+    if constexpr (std::is_same_v<idx_t, int>) {
+        xadj = std::move(xadj_in);
+        adjncy = std::move(adjncy_in);
+    } else {
+        xadj.assign(xadj_in.begin(), xadj_in.end());
+        adjncy.assign(adjncy_in.begin(), adjncy_in.end());
+    }
+    return run_nd_on_graph(n, xadj, adjncy, perm, parallel, 0.0);
+}
 
 bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& perm,
               bool parallel, std::vector<int>* sym_col_ptr, std::vector<int>* sym_row_idx)

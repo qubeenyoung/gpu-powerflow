@@ -40,4 +40,12 @@ Status permute_csc_device(const DeviceCscPattern& csc, const int* d_iperm,
 Status download_csc_structure(const DeviceCscPattern& csc, std::vector<int>& col_ptr,
                               std::vector<int>& row_idx);
 
+// Build the symmetric adjacency graph (A + Aᵀ pattern, diagonal/self-loops removed,
+// neighbors sorted + deduplicated per vertex) directly on the GPU from a device CSC
+// pattern, and download it to host METIS-ready arrays (`xadj` size n+1, `adjncy` size =
+// number of directed unique off-diagonal edges). Replaces the CPU adjacency build
+// (build_symmetric_adjacency) and the separate CSC download in the analyze hot path.
+Status build_symmetric_graph_device(const DeviceCscPattern& csc, std::vector<int>& xadj,
+                                    std::vector<int>& adjncy);
+
 }  // namespace custom_linear_solver::matrix

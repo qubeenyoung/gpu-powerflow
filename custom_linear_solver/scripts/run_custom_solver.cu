@@ -259,21 +259,28 @@ int main(int argc, char** argv)
 
         std::vector<double> factor_ms;
         std::vector<double> solve_ms;
+        std::vector<double> factor_kms;
+        std::vector<double> solve_kms;
         factor_ms.reserve(static_cast<std::size_t>(options.repeat));
         solve_ms.reserve(static_cast<std::size_t>(options.repeat));
+        const bool kernel_time = std::getenv("CLS_KERNEL_TIME") != nullptr;
 
         for (int r = 0; r < options.repeat; ++r) {
+            double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
-            require_success(solver.factorize(), "factorize");
+            require_success(solver.factorize(kernel_time ? &kms : nullptr), "factorize");
             const auto stop = std::chrono::steady_clock::now();
             factor_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
+            if (kernel_time) factor_kms.push_back(kms);
         }
 
         for (int r = 0; r < options.repeat; ++r) {
+            double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
-            require_success(solver.solve(), "solve");
+            require_success(solver.solve(kernel_time ? &kms : nullptr), "solve");
             const auto stop = std::chrono::steady_clock::now();
             solve_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
+            if (kernel_time) solve_kms.push_back(kms);
         }
         const auto t_solve = std::chrono::steady_clock::now();
 
@@ -297,7 +304,12 @@ int main(int argc, char** argv)
                   << "set_ms=" << ms(t_upload, t_set) << '\n'
                   << "analyze_ms=" << ms(t_set, t_analyze) << '\n'
                   << "factorize_ms=" << median(factor_ms) << '\n'
-                  << "solve_ms=" << median(solve_ms) << '\n'
+                  << "solve_ms=" << median(solve_ms) << '\n';
+        if (kernel_time) {
+            std::cout << "factorize_kernel_ms=" << median(factor_kms) << '\n'
+                      << "solve_kernel_ms=" << median(solve_kms) << '\n';
+        }
+        std::cout
                   << "download_check_ms=" << ms(t_solve, t_done) << '\n'
                   << "residual_l2=" << stats.abs_l2 << '\n'
                   << "relative_residual_l2=" << stats.rel_l2 << '\n'

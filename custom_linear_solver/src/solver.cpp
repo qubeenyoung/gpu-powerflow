@@ -182,19 +182,19 @@ Status Solver::analyze()
         if (st != Status::Success) return st;
         lap("build_csc_device");
 
-        CscMatrix csc;
-        csc.n = n;
-        st = custom_linear_solver::matrix::download_csc_structure(csc_device, csc.col_ptr,
-                                                                  csc.row_idx);
-        if (st != Status::Success) return st;
-        lap("download_csc_for_metis");
-        impl_->perm.assign(static_cast<std::size_t>(n), 0);
+        // GPU-built symmetric adjacency graph (replaces the host CSC download + CPU
+        // build_symmetric_adjacency). Also reused below for permute_metis_graph.
         std::vector<int> metis_sym_col_ptr, metis_sym_row_idx;
-        if (!custom_linear_solver::reordering::metis_nd(n, csc.col_ptr.data(),
-                                                        csc.row_idx.data(), impl_->perm,
-                                                        impl_->config.use_parallel_nested_dissection,
-                                                        &metis_sym_col_ptr,
-                                                        &metis_sym_row_idx))
+        st = custom_linear_solver::matrix::build_symmetric_graph_device(
+            csc_device, metis_sym_col_ptr, metis_sym_row_idx);
+        if (st != Status::Success) return st;
+        lap("build_symmetric_graph_device");
+        impl_->perm.assign(static_cast<std::size_t>(n), 0);
+        std::vector<int> nd_xadj = metis_sym_col_ptr;     // consumed (moved-from) by the ND call
+        std::vector<int> nd_adjncy = metis_sym_row_idx;
+        if (!custom_linear_solver::reordering::metis_nd_from_graph(
+                n, nd_xadj, nd_adjncy, impl_->perm,
+                impl_->config.use_parallel_nested_dissection))
             return Status::AnalysisFailed;
         lap("metis_nd");
         impl_->iperm.assign(static_cast<std::size_t>(n), 0);
@@ -238,12 +238,12 @@ Status Solver::analyze()
     }
 }
 
-Status Solver::factorize()
+Status Solver::factorize(double* kernel_ms)
 {
     if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::InvalidState;
     try {
         if (!custom_linear_solver::factorize::factorize_multifrontal_device(
-                impl_->plan, impl_->matrix.values, impl_->d_ordered_value_to_csr.ptr))
+                impl_->plan, impl_->matrix.values, impl_->d_ordered_value_to_csr.ptr, kernel_ms))
             return Status::FactorizationFailed;
         return Status::Success;
     } catch (const std::bad_alloc&) {
@@ -253,7 +253,7 @@ Status Solver::factorize()
     }
 }
 
-Status Solver::solve()
+Status Solver::solve(double* kernel_ms)
 {
     if (!impl_ || !impl_->has_rhs || !impl_->has_solution || !impl_->analyzed)
         return Status::InvalidState;
@@ -261,7 +261,7 @@ Status Solver::solve()
     if (impl_->rhs.size != n || impl_->solution.size != n) return Status::InvalidValue;
     try {
         if (!custom_linear_solver::solve::solve_multifrontal_device(
-                impl_->plan, impl_->rhs.values, impl_->solution.values, impl_->d_perm.ptr))
+                impl_->plan, impl_->rhs.values, impl_->solution.values, impl_->d_perm.ptr, kernel_ms))
             return Status::SolveFailed;
         return Status::Success;
     } catch (const std::bad_alloc&) {
