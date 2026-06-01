@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include <cuda_runtime.h>
+#include <mma.h>
 
 namespace custom_linear_solver::factorize {
 
@@ -190,6 +191,135 @@ __global__ void mf_factor_extend_mixed_b(int lbegin, int lend, const int* __rest
 
 constexpr int MF_REG_NC = 16;
 
+// ---- batched MIXED factor with FP16 TENSOR-CORE (WMMA) trailing update --------------
+// Same FP64-master / FP32-working design as mf_factor_extend_mixed_b, but the dense
+// rank-nc trailing update (the compute bulk of the big fronts) is a half-precision WMMA
+// GEMM: C(uc x uc) -= L(uc x nc) * U(nc x uc), with the nc(<=16) contraction zero-padded to
+// the 16x16x16 tensor-core tile (K=16). L/U are staged FP16 in shared (padded to UCP =
+// ceil(uc/16)*16); the FP32 accumulate is subtracted back into the working front. The FP16
+// inputs make the trailing ~1e-3 accurate -> recovered by batched iterative refinement. Small
+// fronts (fsz<=48, no full 16x16 tile) keep the FP32 path. One block per (front, batch),
+// blockDim=128 (4 warps cooperate on the output tiles).
+__global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __restrict__ plcols,
+                                            const int* __restrict__ front_off,
+                                            const int* __restrict__ front_ptr,
+                                            const int* __restrict__ ncols,
+                                            const int* __restrict__ panel_parent,
+                                            const int* __restrict__ asm_ptr,
+                                            const int* __restrict__ asm_local, double* masterB,
+                                            float* workingB, long front_total, int* sing,
+                                            int do_extend)
+{
+    namespace wmma = nvcuda::wmma;
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const long boff = (long)blockIdx.y * front_total;
+    double* master = masterB + boff;
+    float* working = workingB + boff;
+    const int p = plcols[idx];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const int nc = ncols[p];
+    double* M = master + front_off[p];
+    float* W = working + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    const long fsz2 = (long)fsz * fsz;
+    for (long e = t; e < fsz2; e += nt) W[e] = (float)M[e];
+    __syncthreads();
+
+    if (fsz <= 48) {  // small front: plain FP32 fused LU (no tensor-core tile)
+        for (int k = 0; k < nc; ++k) {
+            float piv = W[(long)k * fsz + k];
+            if (piv == 0.0f) { if (t == 0) *sing = 1; piv = 1.0f; }
+            for (int i = k + 1 + t; i < fsz; i += nt) W[(long)i * fsz + k] /= piv;
+            __syncthreads();
+            const int m = fsz - k - 1;
+            for (int e = t; e < m * m; e += nt) {
+                const int ii = k + 1 + e / m, jj = k + 1 + e % m;
+                W[(long)ii * fsz + jj] -= W[(long)ii * fsz + k] * W[(long)k * fsz + jj];
+            }
+            __syncthreads();
+        }
+    } else {
+        // Phase 1: factor the nc-wide panel (FP32, full height).
+        for (int k = 0; k < nc; ++k) {
+            float piv = W[(long)k * fsz + k];
+            if (piv == 0.0f) { if (t == 0) *sing = 1; piv = 1.0f; }
+            for (int i = k + 1 + t; i < fsz; i += nt) W[(long)i * fsz + k] /= piv;
+            __syncthreads();
+            const int pc = nc - 1 - k;
+            for (int e = t; e < (fsz - k - 1) * pc; e += nt) {
+                const int ii = k + 1 + e / pc, jj = k + 1 + e % pc;
+                W[(long)ii * fsz + jj] -= W[(long)ii * fsz + k] * W[(long)k * fsz + jj];
+            }
+            if (pc > 0) __syncthreads();
+        }
+        // Phase 2: U panel triangular solve (FP32).
+        for (int k = 1; k < nc; ++k) {
+            for (int e = t; e < uc; e += nt) {
+                const int jj = nc + e;
+                float v = W[(long)k * fsz + jj];
+                for (int i = 0; i < k; ++i) v -= W[(long)k * fsz + i] * W[(long)i * fsz + jj];
+                W[(long)k * fsz + jj] = v;
+            }
+            __syncthreads();
+        }
+        // Phase 3: FP16 tensor-core trailing  C -= L * U.
+        __shared__ __half Lh[256 * 16];   // Lh[i*16 + k], i in [0,UCP), k in [0,16)
+        __shared__ __half Uh[16 * 256];   // Uh[k*256 + j], k in [0,16), j in [0,UCP)
+        __shared__ float Csc[4 * 256];    // per-warp 16x16 store scratch
+        const int UCP = ((uc + 15) / 16) * 16;
+        for (int e = t; e < UCP * 16; e += nt) {
+            const int i = e >> 4, k = e & 15;
+            Lh[e] = (i < uc && k < nc) ? __float2half(W[(long)(nc + i) * fsz + k]) : __float2half(0.0f);
+        }
+        for (int e = t; e < 16 * UCP; e += nt) {
+            const int k = e / UCP, j = e % UCP;
+            Uh[k * 256 + j] = (k < nc && j < uc) ? __float2half(W[(long)k * fsz + (nc + j)])
+                                                 : __float2half(0.0f);
+        }
+        __syncthreads();
+        const int ntj = UCP / 16, ntiles = ntj * ntj;
+        const int warp = t >> 5, nwarp = nt >> 5, lane = t & 31;
+        for (int tile = warp; tile < ntiles; tile += nwarp) {
+            const int ti = tile / ntj, tj = tile % ntj;
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> af;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> bf;
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;
+            wmma::fill_fragment(cf, 0.0f);
+            wmma::load_matrix_sync(af, &Lh[(ti * 16) * 16], 16);
+            wmma::load_matrix_sync(bf, &Uh[tj * 16], 256);
+            wmma::mma_sync(cf, af, bf, cf);
+            wmma::store_matrix_sync(&Csc[warp * 256], cf, 16, wmma::mem_row_major);
+            __syncwarp();
+            for (int e = lane; e < 256; e += 32) {
+                const int r = e >> 4, c = e & 15;
+                const int ii = ti * 16 + r, jj = tj * 16 + c;
+                if (ii < uc && jj < uc) W[(long)(nc + ii) * fsz + (nc + jj)] -= Csc[warp * 256 + e];
+            }
+            __syncwarp();
+        }
+    }
+    __syncthreads();
+    for (long e = t; e < (long)nc * fsz; e += nt) M[e] = (double)W[e];
+    for (int e = t; e < uc * nc; e += nt) {
+        const long id2 = (long)(nc + e / nc) * fsz + (e % nc);
+        M[id2] = (double)W[id2];
+    }
+    const int par = panel_parent[p];
+    if (par < 0 || !do_extend) return;
+    __syncthreads();
+    double* Mp = master + front_off[par];
+    const int pfsz = front_ptr[par + 1] - front_ptr[par];
+    const int abase = asm_ptr[p];
+    for (int e = t; e < uc * uc; e += nt) {
+        const int a = e / uc, b = e % uc;
+        atomicAdd(&Mp[(long)asm_local[abase + a] * pfsz + asm_local[abase + b]],
+                  (double)W[(long)(nc + a) * fsz + (nc + b)]);
+    }
+}
+
 __global__ void mf_invert_pivot_b(int npanels, const int* __restrict__ front_ptr,
                                   const int* __restrict__ front_off, const int* __restrict__ ncols,
                                   double* frontB, long front_total)
@@ -361,6 +491,8 @@ BatchedState::~BatchedState()
 bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState& st)
 {
     if (plan.num_panels == 0 || B <= 0) return false;
+    const bool tc = std::getenv("MF_TC") != nullptr;  // FP16 tensor-core trailing (implies mixed)
+    if (tc) fp32 = true;
     st.B = B;
     st.front_total = plan.front_total;
     st.n = plan.n;
@@ -383,7 +515,12 @@ bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState&
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
         dim3 grid(e - b, B);
-        if (fp32)
+        if (tc)
+            mf_factor_extend_mixed_tc_b<<<grid, 128, 0, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,
+                plan.front_total, st.d_sing, do_extend);
+        else if (fp32)
             mf_factor_extend_mixed_b<<<grid, T, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,

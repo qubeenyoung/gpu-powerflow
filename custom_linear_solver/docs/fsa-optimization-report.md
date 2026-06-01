@@ -156,10 +156,24 @@ compute-bound answer is "yes"):
   (borderline); 1 FP64 IR step recovers it to ~1e-6. The IR step costs ≈ one extra solve, so it
   is worth it only when the mixed-factor margin is needed (e.g. tightening 70k's residual);
   small/medium pass 1e-3 with no IR.
-- **Tensor cores** become applicable to the batched trailing-update GEMM (now compute-bound),
-  but the fronts are rank-nc with nc≤16 (K=16, one FP16 tile deep) and fsz≤256, so utilization
-  is partial; a batched FP16 trailing GEMM + IR is the logical next step beyond the FP32 mixed
-  win already demonstrated.
+- **Tensor cores — implemented and measured: they do NOT help here.** A batched FP16 WMMA
+  trailing-update path was built (`mf_factor_extend_mixed_tc_b`, env `MF_TC`): FP64 master
+  assembly, FP32 panel/U, FP16 16×16×16 tensor-core GEMM for the `C(uc×uc) -= L(uc×nc)·U(nc×uc)`
+  trailing, nc≤16 zero-padded to K=16, L/U staged FP16 in shared. It is correct (relres recovers
+  to <1e-3 with 2 IR steps), but **slower than FP32 mixed** at every batch size:
+
+  | B=64        | FP64 factor | FP32 mixed | FP16-TC | FP16-TC + 2·IR (relres) |
+  |-------------|-------------|------------|---------|--------------------------|
+  | 25k         | 0.368 ms    | **0.303**  | 0.418   | 0.417 (2.5e-6) |
+  | 70k         | 1.380 ms    | **1.066**  | 1.334   | 1.442 (7.7e-5) |
+
+  (70k B=128: mixed 0.999 vs TC 1.258; 9241 B=128: mixed 0.074 vs TC 0.116 — TC worse on the
+  smaller fronts.) Root cause: the multifrontal panels are nc≤16, so the trailing GEMM has
+  **K=16 — one tensor tile deep**. Tensor cores need a tall K to amortize their fragment-load /
+  FP16-staging overhead; at K=16 with fsz≤256 the mandatory FP32→FP16 staging (the K-padding
+  can't be loaded directly from the front) costs more than the plain FP32 FMA trailing saves.
+  **FP32 mixed is the precision sweet spot for this workload; tensor cores would only pay off on
+  much larger / denser fronts than power-grid multifrontal produces.**
 
 Takeaway: **batching is the correct lever for this workload.** It converts the latency-bound
 single-system problem (where precision/tensor-cores are inert) into a compute-bound batched one
