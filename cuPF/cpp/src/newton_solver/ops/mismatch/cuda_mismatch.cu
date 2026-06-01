@@ -70,19 +70,27 @@ void CudaMismatchOp<CudaMixedStorage>::run(CudaMixedStorage& buf, IterationConte
 template <>
 void CudaMismatchNormOp<CudaFp64Storage>::run(CudaFp64Storage& buf, IterationContext& ctx)
 {
-    if (buf.dimF <= 0) {
+    if (buf.dimF <= 0 || buf.batch_size <= 0) {
         throw std::runtime_error("CudaMismatchNormOp::run: buffers are not prepared");
     }
 
     launch_reduce_mismatch_norm(buf);
-    buf.d_normF.copyTo(&ctx.normF, 1);
+
+    // Per-case norms reduced on device; take the worst case as the batch norm.
+    std::vector<double> h_norm(buf.batch_size);
+    buf.d_normF.copyTo(h_norm.data(), h_norm.size());
+
+    ctx.normF = 0.0;
+    for (double v : h_norm) {
+        ctx.normF = std::max(ctx.normF, v);
+    }
 
     if (!std::isfinite(ctx.normF)) {
         throw std::runtime_error("CudaMismatchNormOp::run: mismatch norm is not finite");
     }
 
     if (newton_solver::utils::isDumpEnabled()) {
-        std::vector<double> h_F(buf.dimF);
+        std::vector<double> h_F(static_cast<std::size_t>(buf.batch_size) * buf.dimF);
         buf.d_F.copyTo(h_F.data(), h_F.size());
         newton_solver::utils::dumpVector("residual", ctx.iter, h_F);
         newton_solver::utils::dumpVector("residual_before_update", ctx.iter, h_F);

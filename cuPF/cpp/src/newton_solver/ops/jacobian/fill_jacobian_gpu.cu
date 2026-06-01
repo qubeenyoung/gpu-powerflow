@@ -581,14 +581,13 @@ void dump_cuda_jacobian_if_enabled(const char* name,
 // batch / cached-Ibus / batched-Ybus flags for its storage layout.
 // ===========================================================================
 
-// FP64: single case, recompute Ibus in-kernel, non-batched Ybus values.
+// FP64: all-double inputs and Jacobian, batched (recompute or cached Ibus).
 void CudaJacobianOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
 {
     if (kind == CudaJacobianKind::EdgeAtomic) {
         launch_fill_jacobian_edge_atomic<double, double, double>(
-            static_cast<int32_t>(buf.d_Ybus_row.size()),
-            static_cast<int32_t>(buf.d_J_values.size()),
-            buf.n_bus, 1, false,
+            buf.nnz_ybus, buf.nnz_J, buf.n_bus, buf.batch_size,
+            buf.ybus_values_batched,
             buf.d_Ybus_re, buf.d_Ybus_im,
             buf.d_Ybus_row, buf.d_Ybus_indices,
             buf.d_V_re, buf.d_V_im, buf.d_Vm,
@@ -597,10 +596,8 @@ void CudaJacobianOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
             buf.d_J_values);
     } else if (kind == CudaJacobianKind::VertexWarp) {
         launch_fill_jacobian_vertex_warp<double, double, double>(
-            buf.n_pvpq,
-            static_cast<int32_t>(buf.d_Ybus_row.size()),
-            static_cast<int32_t>(buf.d_J_values.size()),
-            buf.n_bus, 1, false,
+            buf.n_pvpq, buf.nnz_ybus, buf.nnz_J, buf.n_bus, buf.batch_size,
+            buf.ybus_values_batched,
             buf.d_Ybus_re, buf.d_Ybus_im,
             buf.d_Ybus_indices, buf.d_Ybus_indptr,
             buf.d_V_re, buf.d_V_im, buf.d_Vm,
@@ -610,11 +607,8 @@ void CudaJacobianOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
             buf.d_J_values);
     } else {
         launch_fill_jacobian_gpu<double, double, double, double>(
-            static_cast<int32_t>(buf.d_Ybus_row.size()),   // size_t -> int32 edge count
-            static_cast<int32_t>(buf.d_J_values.size()),   // size_t -> int32 nnz_J
-            buf.n_bus,
-            1,
-            false,
+            buf.nnz_ybus, buf.nnz_J, buf.n_bus, buf.batch_size,
+            buf.ybus_values_batched,
             // use_cached_ibus=true: the ibus stage ran just before jacobian in the
             // NR loop (and in prepare_adjoint_cache), so d_Ibus is current. Reusing
             // it avoids recomputing the per-diagonal current injection in-kernel.
@@ -633,7 +627,7 @@ void CudaJacobianOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
                                   buf.d_J_row_ptr,
                                   buf.d_J_col_idx,
                                   buf.d_J_values,
-                                  static_cast<int32_t>(buf.d_J_values.size()));
+                                  buf.nnz_J);
 }
 
 

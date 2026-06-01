@@ -74,12 +74,12 @@ __global__ void compute_mismatch_from_ibus_kernel(
 
 void launch_compute_mismatch_from_ibus(CudaFp64Storage& storage)
 {
-    if (storage.n_bus <= 0 || storage.dimF <= 0) {
+    if (storage.n_bus <= 0 || storage.dimF <= 0 || storage.batch_size <= 0) {
         throw std::runtime_error("launch_compute_mismatch_from_ibus: storage is not prepared");
     }
 
     constexpr int32_t block = 256;
-    const int32_t total_entries = storage.dimF;
+    const int32_t total_entries = storage.batch_size * storage.dimF;
     const int32_t grid = (total_entries + block - 1) / block;
 
     compute_mismatch_from_ibus_kernel<double><<<grid, block, 0, cupf_current_cuda_stream()>>>(

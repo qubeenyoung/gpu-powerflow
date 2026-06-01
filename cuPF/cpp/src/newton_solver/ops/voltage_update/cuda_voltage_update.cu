@@ -22,13 +22,14 @@
 void CudaVoltageUpdateOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
-    if (buf.n_bus <= 0 || buf.dimF <= 0) {
+    if (buf.n_bus <= 0 || buf.dimF <= 0 || buf.batch_size <= 0) {
         throw std::runtime_error("CudaVoltageUpdateOp<double>::run: buffers are not prepared");
     }
 
     const int32_t n_pv = buf.n_pvpq - buf.n_pq;
+    const int32_t total_buses = buf.batch_size * buf.n_bus;
     launch_apply_voltage_update<double, double>(
-        1,
+        buf.batch_size,
         buf.n_bus,
         buf.dimF,
         n_pv,
@@ -40,7 +41,7 @@ void CudaVoltageUpdateOp<double>::run(CudaFp64Storage& buf, IterationContext& ct
         buf.d_pq.data());
 
     launch_reconstruct_voltage<double>(
-        buf.n_bus,
+        total_buses,
         buf.d_Va.data(),
         buf.d_Vm.data(),
         buf.d_V_re.data(),

@@ -6,14 +6,47 @@
 #include "newton_solver/core/solver_contexts.hpp"
 #include "utils/cuda_utils.hpp"
 
+#include <cstddef>
+
 
 // ---------------------------------------------------------------------------
 // CudaFp64Storage: end-to-end FP64 CUDA 경로의 device 버퍼.
+//
+// Batch-major layout: [batch_size * dim] contiguous. batch_size == 1 is the
+// common single-case path; batch_size > 1 shares the same FP64 kernels and the
+// cuDSS uniform-batch solve (same mechanism as the FP32/Mixed pipelines).
 // ---------------------------------------------------------------------------
 struct CudaFp64Storage {
     void prepare(const InitializeContext& ctx);
     void upload(const SolveContext& ctx);
     void download(NRResult& result) const;
+    void download_batch(NRBatchResult& result) const;
+
+    std::size_t bus_offset(int32_t batch, int32_t bus) const
+    {
+        return static_cast<std::size_t>(batch) * static_cast<std::size_t>(n_bus) +
+               static_cast<std::size_t>(bus);
+    }
+
+    std::size_t residual_offset(int32_t batch, int32_t row) const
+    {
+        return static_cast<std::size_t>(batch) * static_cast<std::size_t>(dimF) +
+               static_cast<std::size_t>(row);
+    }
+
+    std::size_t jacobian_offset(int32_t batch, int32_t pos) const
+    {
+        return static_cast<std::size_t>(batch) * static_cast<std::size_t>(nnz_J) +
+               static_cast<std::size_t>(pos);
+    }
+
+    std::size_t ybus_value_offset(int32_t batch, int32_t pos) const
+    {
+        return ybus_values_batched
+            ? static_cast<std::size_t>(batch) * static_cast<std::size_t>(nnz_ybus) +
+                  static_cast<std::size_t>(pos)
+            : static_cast<std::size_t>(pos);
+    }
 
     DeviceBuffer<double>  d_Ybus_re;
     DeviceBuffer<double>  d_Ybus_im;
@@ -47,6 +80,10 @@ struct CudaFp64Storage {
     int32_t n_pvpq = 0;
     int32_t n_pq   = 0;
     int32_t dimF   = 0;
+    int32_t nnz_ybus = 0;
+    int32_t nnz_J    = 0;
+    int32_t batch_size = 1;
+    bool    ybus_values_batched = false;
 };
 
 #endif  // CUPF_WITH_CUDA

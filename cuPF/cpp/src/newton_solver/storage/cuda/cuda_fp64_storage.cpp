@@ -1,14 +1,18 @@
 // ---------------------------------------------------------------------------
 // cuda_fp64_storage.cpp
 //
-// FP64 single-case (batch_size == 1) device storage. Like the FP32/Mixed
-// variants but with no batch dimension and no precision conversion — host
-// FP64 inputs map straight to FP64 device buffers.
+// FP64 batched device storage. Like the FP32/Mixed variants but with no
+// precision conversion — host FP64 inputs map straight to FP64 device buffers.
+// batch_size == 1 is the common single-case path; batch_size > 1 lays the
+// per-case data out batch-major ([batch_size * dim] contiguous) and shares the
+// same FP64 kernels and cuDSS uniform-batch solve as the FP32/Mixed pipelines.
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_fp64_storage.hpp"
+#include "newton_solver/storage/cuda/storage_convert.hpp"
+#include "utils/cuda_utils.hpp"
 
 #include <cmath>
 #include <complex>
@@ -40,17 +44,57 @@ std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
     return rows;
 }
 
-// Split a complex array into separate real/imag FP64 device buffers.
+// Split a batched complex array into separate real/imag FP64 device buffers,
+// honoring the per-case source stride.
 void upload_complex_components(DeviceBuffer<double>& dst_re,
                                DeviceBuffer<double>& dst_im,
                                const std::complex<double>* src,
-                               int32_t count)
+                               int32_t logical_count,
+                               int32_t batch_size,
+                               int64_t stride)
 {
-    std::vector<double> h_re(static_cast<std::size_t>(count));
-    std::vector<double> h_im(static_cast<std::size_t>(count));
-    for (int32_t i = 0; i < count; ++i) {
-        h_re[static_cast<std::size_t>(i)] = src[i].real();
-        h_im[static_cast<std::size_t>(i)] = src[i].imag();
+    const std::size_t total =
+        static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(logical_count);
+    std::vector<double> h_re(total);
+    std::vector<double> h_im(total);
+
+    for (int32_t b = 0; b < batch_size; ++b) {
+        const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(logical_count);
+        const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(stride);
+        for (int32_t i = 0; i < logical_count; ++i) {
+            const auto& val = src[src_base + static_cast<std::size_t>(i)];
+            h_re[dst_base + static_cast<std::size_t>(i)] = val.real();
+            h_im[dst_base + static_cast<std::size_t>(i)] = val.imag();
+        }
+    }
+    dst_re.assign(h_re.data(), h_re.size());
+    dst_im.assign(h_im.data(), h_im.size());
+}
+
+// Same split for Ybus values; a single shared Ybus unless values_batched.
+void upload_ybus_components(DeviceBuffer<double>& dst_re,
+                            DeviceBuffer<double>& dst_im,
+                            const std::complex<double>* src,
+                            int32_t nnz_ybus,
+                            int32_t batch_size,
+                            int64_t stride,
+                            bool values_batched)
+{
+    const int32_t stored = values_batched ? batch_size : 1;
+    const std::size_t total =
+        static_cast<std::size_t>(stored) * static_cast<std::size_t>(nnz_ybus);
+    std::vector<double> h_re(total);
+    std::vector<double> h_im(total);
+
+    for (int32_t b = 0; b < stored; ++b) {
+        const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(nnz_ybus);
+        const std::size_t src_base =
+            values_batched ? static_cast<std::size_t>(b) * static_cast<std::size_t>(stride) : 0;
+        for (int32_t k = 0; k < nnz_ybus; ++k) {
+            const auto& val = src[src_base + static_cast<std::size_t>(k)];
+            h_re[dst_base + static_cast<std::size_t>(k)] = val.real();
+            h_im[dst_base + static_cast<std::size_t>(k)] = val.imag();
+        }
     }
     dst_re.assign(h_re.data(), h_re.size());
     dst_im.assign(h_im.data(), h_im.size());
@@ -72,12 +116,15 @@ void CudaFp64Storage::prepare(const InitializeContext& ctx)
     n_pq   = ctx.maps.n_pq;
     dimF   = n_pvpq + n_pq;
 
-    const int32_t nnz_ybus = ctx.ybus.nnz;
-    const int32_t nnz_J    = ctx.J.nnz;
+    nnz_ybus = ctx.ybus.nnz;
+    nnz_J    = ctx.J.nnz;
+    batch_size = 1;
+    ybus_values_batched = false;
 
     d_Ybus_re.resize(nnz_ybus);
     d_Ybus_im.resize(nnz_ybus);
-    upload_complex_components(d_Ybus_re, d_Ybus_im, ctx.ybus.data, nnz_ybus);
+    upload_ybus_components(d_Ybus_re, d_Ybus_im, ctx.ybus.data,
+                           nnz_ybus, 1, nnz_ybus, false);
     d_Ybus_indptr.assign(ctx.ybus.indptr,  static_cast<std::size_t>(ctx.ybus.rows + 1));
     d_Ybus_indices.assign(ctx.ybus.indices, static_cast<std::size_t>(nnz_ybus));
 
@@ -128,7 +175,8 @@ void CudaFp64Storage::prepare(const InitializeContext& ctx)
 }
 
 
-// Push per-solve inputs (Ybus/Sbus/V0) and seed polar (Va, Vm) from V0.
+// Push per-solve inputs: resize for the batch, upload Ybus/Sbus, and seed
+// V/Va/Vm from the V0 guess.
 void CudaFp64Storage::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
@@ -136,50 +184,136 @@ void CudaFp64Storage::upload(const SolveContext& ctx)
     }
 
     const YbusView& ybus = *ctx.ybus;
-    if (ybus.rows != n_bus || ybus.cols != n_bus ||
-        ybus.nnz != static_cast<int32_t>(d_Ybus_re.size())) {
+    if (ybus.rows != n_bus || ybus.cols != n_bus || ybus.nnz != nnz_ybus) {
         throw std::runtime_error("CudaFp64Storage::upload: Ybus dimensions do not match initialize()");
     }
 
-    require_pointer(ybus.data,  "SolveContext.ybus->data", ybus.nnz);
-    require_pointer(ctx.sbus,   "SolveContext.sbus",       n_bus);
-    require_pointer(ctx.V0,     "SolveContext.V0",         n_bus);
+    require_pointer(ybus.data, "SolveContext.ybus->data", ybus.nnz);
+    require_pointer(ctx.sbus,  "SolveContext.sbus",       n_bus);
+    require_pointer(ctx.V0,    "SolveContext.V0",         n_bus);
 
-    upload_complex_components(d_Ybus_re, d_Ybus_im, ybus.data, ybus.nnz);
-    upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus,  n_bus);
-    upload_complex_components(d_V_re,    d_V_im,    ctx.V0,    n_bus);
-
-    std::vector<double> h_Va(static_cast<std::size_t>(n_bus));
-    std::vector<double> h_Vm(static_cast<std::size_t>(n_bus));
-    for (int32_t bus = 0; bus < n_bus; ++bus) {
-        h_Va[static_cast<std::size_t>(bus)] = std::arg(ctx.V0[bus]);
-        h_Vm[static_cast<std::size_t>(bus)] = std::abs(ctx.V0[bus]);
+    if (ctx.batch_size <= 0) {
+        throw std::invalid_argument("CudaFp64Storage::upload: batch_size must be positive");
     }
-    d_Va.assign(h_Va.data(), h_Va.size());
-    d_Vm.assign(h_Vm.data(), h_Vm.size());
+    if (ctx.sbus_stride < n_bus || ctx.V0_stride < n_bus) {
+        throw std::invalid_argument("CudaFp64Storage::upload: batch strides must be at least n_bus");
+    }
+
+    batch_size = ctx.batch_size;
+    ybus_values_batched = ctx.ybus_values_batched;
+
+    const std::size_t bus_count      = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
+    const std::size_t residual_count = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(dimF);
+    const std::size_t jacobian_count = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(nnz_J);
+
+    const auto ensure_size = [](auto& buf, std::size_t count) {
+        if (buf.size() != count) buf.resize(count);
+    };
+
+    ensure_size(d_J_values,  jacobian_count);
+    ensure_size(d_F,         residual_count);
+    ensure_size(d_normF,     static_cast<std::size_t>(batch_size));
+    ensure_size(d_dx,        residual_count);
+    ensure_size(d_Va,        bus_count);
+    ensure_size(d_Vm,        bus_count);
+    ensure_size(d_V_re,      bus_count);
+    ensure_size(d_V_im,      bus_count);
+    ensure_size(d_Sbus_re,   bus_count);
+    ensure_size(d_Sbus_im,   bus_count);
+    ensure_size(d_Ibus_re,   bus_count);
+    ensure_size(d_Ibus_im,   bus_count);
+
+    upload_ybus_components(d_Ybus_re, d_Ybus_im, ybus.data,
+                           ybus.nnz, batch_size, ctx.ybus_value_stride, ybus_values_batched);
+
+    const int32_t total_bus = batch_size * n_bus;
+
+    // Fast path (contiguous batch): bulk H2D raw FP64 Sbus/V0 once and convert
+    // on device, avoiding per-element host cast + arg/abs loops (O(B*n_bus)).
+    if (ctx.sbus_stride == n_bus && ctx.V0_stride == n_bus) {
+        DeviceBuffer<double> d_raw;
+        d_raw.resize(static_cast<std::size_t>(total_bus) * 2);
+
+        d_raw.assign(reinterpret_cast<const double*>(ctx.sbus),
+                     static_cast<std::size_t>(total_bus) * 2);
+        launch_split_complex<double>(d_raw.data(), d_Sbus_re.data(), d_Sbus_im.data(), total_bus);
+
+        d_raw.assign(reinterpret_cast<const double*>(ctx.V0),
+                     static_cast<std::size_t>(total_bus) * 2);
+        launch_seed_state_from_v0<double>(d_raw.data(), d_V_re.data(), d_V_im.data(),
+                                          d_Va.data(), d_Vm.data(), total_bus);
+    } else {
+        // General (strided) fallback: host conversion.
+        upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
+
+        std::vector<double> h_V_re(bus_count);
+        std::vector<double> h_V_im(bus_count);
+        std::vector<double> h_Va(bus_count);
+        std::vector<double> h_Vm(bus_count);
+        for (int32_t b = 0; b < batch_size; ++b) {
+            const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
+            const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(ctx.V0_stride);
+            for (int32_t bus = 0; bus < n_bus; ++bus) {
+                const auto& v0  = ctx.V0[src_base + static_cast<std::size_t>(bus)];
+                const std::size_t dst = dst_base + static_cast<std::size_t>(bus);
+                h_V_re[dst] = v0.real();
+                h_V_im[dst] = v0.imag();
+                h_Va[dst]   = std::arg(v0);
+                h_Vm[dst]   = std::abs(v0);
+            }
+        }
+        d_V_re.assign(h_V_re.data(), h_V_re.size());
+        d_V_im.assign(h_V_im.data(), h_V_im.size());
+        d_Va.assign(h_Va.data(), h_Va.size());
+        d_Vm.assign(h_Vm.data(), h_Vm.size());
+    }
 
     d_F.memsetZero();
     d_normF.memsetZero();
     d_dx.memsetZero();
+    d_J_values.memsetZero();
     d_Ibus_re.memsetZero();
     d_Ibus_im.memsetZero();
 }
 
 
-// Copy the converged voltage back into the FP64 result.
+// Single-case voltage readback to the FP64 result.
 void CudaFp64Storage::download(NRResult& result) const
 {
-    std::vector<double> h_re(static_cast<std::size_t>(n_bus));
-    std::vector<double> h_im(static_cast<std::size_t>(n_bus));
+    if (batch_size != 1) {
+        throw std::runtime_error("CudaFp64Storage::download: use download_batch for batch_size > 1");
+    }
 
-    d_V_re.copyTo(h_re.data(), h_re.size());
-    d_V_im.copyTo(h_im.data(), h_im.size());
-
+    // d_V_re/d_V_im hold the reconstructed voltage after voltage_update; pack
+    // them on device and do one bulk D2H (no host interleave loop).
     result.V.resize(static_cast<std::size_t>(n_bus));
-    for (int32_t bus = 0; bus < n_bus; ++bus) {
-        result.V[static_cast<std::size_t>(bus)] = std::complex<double>(
-            h_re[static_cast<std::size_t>(bus)],
-            h_im[static_cast<std::size_t>(bus)]);
+    DeviceBuffer<double> d_out;
+    d_out.resize(static_cast<std::size_t>(n_bus) * 2);
+    launch_pack_complex_to_double<double>(d_V_re.data(), d_V_im.data(), d_out.data(), n_bus);
+    d_out.copyTo(reinterpret_cast<double*>(result.V.data()), static_cast<std::size_t>(n_bus) * 2);
+}
+
+
+// Batched voltage readback plus per-case final mismatch norms.
+void CudaFp64Storage::download_batch(NRBatchResult& result) const
+{
+    const std::size_t total = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
+
+    result.n_bus      = n_bus;
+    result.batch_size = batch_size;
+    result.V.resize(total);
+
+    // Pack reconstructed d_V_re/d_V_im to interleaved complex<double> on device,
+    // then one bulk D2H.
+    DeviceBuffer<double> d_out;
+    d_out.resize(total * 2);
+    launch_pack_complex_to_double<double>(d_V_re.data(), d_V_im.data(), d_out.data(),
+                                          static_cast<int32_t>(total));
+    d_out.copyTo(reinterpret_cast<double*>(result.V.data()), total * 2);
+
+    if (!d_normF.empty()) {
+        result.final_mismatch.resize(static_cast<std::size_t>(batch_size));
+        d_normF.copyTo(result.final_mismatch.data(), result.final_mismatch.size());
     }
 }
 

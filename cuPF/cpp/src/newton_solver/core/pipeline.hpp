@@ -155,9 +155,7 @@ struct CudaFp64Pipeline {
     }
 
     void download_batch(NRBatchResult& result) const {
-        NRResult single;
-        buf.download(single);
-        result.V = std::move(single.V);
+        buf.download_batch(result);
     }
 
     void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp64Storage>{}.run(buf, ctx); }
@@ -169,7 +167,7 @@ struct CudaFp64Pipeline {
     void solve(IterationContext& ctx)         { linear_solve.solve(buf, ctx); }
     void voltage_update(IterationContext& ctx){ CudaVoltageUpdateOp<double>{}.run(buf, ctx); }
 
-    static constexpr bool batch_supported = false;
+    static constexpr bool batch_supported = true;
 };
 
 

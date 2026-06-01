@@ -82,12 +82,15 @@ void launch_ibus_scalar(int32_t n_bus, int32_t batch_count,
 
 void launch_compute_ibus(CudaFp64Storage& buf)
 {
-    if (buf.n_bus <= 0 || buf.d_Ybus_re.empty()) {
+    if (buf.n_bus <= 0 || buf.nnz_ybus <= 0 || buf.batch_size <= 0) {
         throw std::runtime_error("launch_compute_ibus: buffers are not prepared");
+    }
+    if (buf.ybus_values_batched) {
+        throw std::runtime_error("launch_compute_ibus: batched Ybus values are not supported by the tiled Ibus kernel");
     }
 
     launch_ibus_scalar<double, double, double>(
-        buf.n_bus, 1,
+        buf.n_bus, buf.batch_size,
         buf.d_Ybus_indptr.data(), buf.d_Ybus_indices.data(),
         buf.d_Ybus_re.data(), buf.d_Ybus_im.data(),
         buf.d_V_re.data(), buf.d_V_im.data(),

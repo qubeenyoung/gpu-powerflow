@@ -107,7 +107,7 @@ void launch_norm(Storage& storage, int32_t batch)
 
 void launch_reduce_mismatch_norm(CudaFp64Storage& storage)
 {
-    launch_norm<double>(storage, 1);
+    launch_norm<double>(storage, storage.batch_size);
 }
 
 

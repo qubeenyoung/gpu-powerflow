@@ -129,18 +129,13 @@ void set_cudss_stream(cudssHandle_t handle)
 }
 #endif
 
-// Batch size per storage layout: FP64 is always single-case (B=1).
-int32_t buf_batch_size(const CudaFp64Storage&)         { return 1; }
+// Batch size per storage layout.
+int32_t buf_batch_size(const CudaFp64Storage& b)       { return b.batch_size; }
 int32_t buf_batch_size(const CudaFp32Storage& b)       { return b.batch_size; }
 int32_t buf_batch_size(const CudaMixedStorage& b)       { return b.batch_size; }
 
-// Non-zero count of J per storage layout.
-int32_t buf_nnz_j(const CudaFp64Storage& b)
-{
-    // FP64 storage tracks nnz only via the value buffer length; narrow the
-    // size_t length to the int32 that cuDSS descriptors use for nnz.
-    return static_cast<int32_t>(b.d_J_values.size());
-}
+// Non-zero count of J per storage layout (per case, not batch-multiplied).
+int32_t buf_nnz_j(const CudaFp64Storage& b)            { return b.nnz_J; }
 int32_t buf_nnz_j(const CudaFp32Storage& b)            { return b.nnz_J; }
 int32_t buf_nnz_j(const CudaMixedStorage& b)            { return b.nnz_J; }
 
