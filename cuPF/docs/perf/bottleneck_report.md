@@ -95,12 +95,17 @@
 - **개선**: per-case 수렴 마스크를 도입해 수렴한 케이스의 stage 연산을 스킵(또는 압축). 최소한
   voltage_update/jacobian/solve에 active-mask를 전달.
 
-### P4. 매 iteration 블로킹 동기화 — 지연
+### P4. 매 iteration 블로킹 동기화 — 지연 → **보류 (구현 안 함)**
 - `CudaMismatchNormOp::run`이 매 iteration `d_normF`를 호스트로 복사(`copyTo(&ctx.normF,1)`)해
-  수렴을 검사한다 → **iteration마다 D2H 블로킹 동기화**. 커널 발사가 직렬화되어 작은 케이스에서
-  launch-latency가 그대로 노출(2장에서 작은 B의 per-case가 큰 이유와 연결).
-- **개선**: device-side 수렴 플래그 + 주기적(예: 2 iteration마다)으로만 동기화하거나, CUDA graph로
-  반복 루프를 캡처해 launch 오버헤드 제거.
+  수렴을 검사한다 → iteration마다 D2H 블로킹 동기화.
+- **재분석 결과 — 이 sync는 제거하면 안 된다.** `run_iteration_stages`(newton_solver.cpp:425–444)
+  구조상 norm 검사(`if (ctx.converged) break;`, line 431)는 **지배적 비용인 factorize 직전**에 있다.
+  즉 이 sync는 "비싼 factorize를 하기 전에 수렴 여부를 확인해 불필요한 마지막 factorize를 건너뛰는"
+  early-exit를 보장한다. sync를 지연/제거(파이프라이닝)하면 수렴 판정이 update 이후로 밀려 **매 solve마다
+  factorize를 1회 더** 하게 되고, factorize가 ~65%이므로 sync 지연(수십 µs)을 아끼려다 factorize 1회
+  (수 ms)를 더 내는 **순손해**가 된다. sync가 의미 있는 소형 문제는 절대 시간이 이미 작다.
+- **결론**: 현재 mid-iteration sync는 합리적 설계. launch 오버헤드를 줄이려면 early-exit를 유지한 채
+  **CUDA graph로 반복을 캡처**하는 별도 작업이 필요(범위 큼). 단순 sync 완화는 권장하지 않음.
 
 ### P5. ibus SpMV — lane 활용도 낭비 (구현)
 - `compute_ibus.cu` 커널은 **row당 32-lane warp**로 누적하는데, 전력망 평균 차수는 **~3.5–4
@@ -123,20 +128,51 @@
 
 ---
 
-## 4. 권고 (효과/난이도)
+## 4. 권고 (효과/난이도/상태)
 
-| 항목 | 기대효과 | 난이도 | 비고 |
+| 항목 | 기대효과 | 난이도 | 상태 |
 |---|---|---|---|
-| **P1 자코비안 지연 갱신(jacobian_age 활용)** | 큰 (factorize 호출 수↓) | 중 | 수렴성 검증 필요, 필드 이미 존재 |
-| P2 전송 디바이스화 + pinned/async | 큰(대배치) | 중 | upload/download 커널화 |
-| P3 per-case 수렴 마스크 | 큰(이종 배치) | 중상 | stage들에 active-mask 전파 |
-| P4 동기화 완화 / CUDA graph | 중(소케이스·소배치) | 중상 | 반복 루프 그래프 캡처 |
-| P5 ibus SpMV lane 축소 | 중(대배치) | 중 | 평균 차수 매칭 |
-| P6 FP64 jacobian 캐시 ibus | 소 | 하 | 1줄 수준(플래그/포인터 전달) |
-| P7 norm 멀티블록 리덕션 | 소 | 하 | |
+| **P1 자코비안 지연 갱신(jacobian_age 활용)** | 큰 (factorize 호출 수↓) | 중 | 보류 (알고리즘 수정, 사용자 요청으로 연기) |
+| P2 전송 디바이스화 | 큰(대배치) | 중 | **적용 완료** (commit 3b955c0) |
+| P3 per-case 수렴 마스크 | 큰(이종 배치) | 중상 | 보류 |
+| P4 동기화 완화 / CUDA graph | 소 (대케이스), 중(소) | 중상 | **보류 (구현 안 함)** — §3 P4 참조: sync가 early-exit를 보장 |
+| P5 ibus SpMV scalar화 | 중(대배치) | 중 | **적용 완료** (commit 90de5fe) |
+| P6 FP64 jacobian 캐시 ibus | 소 | 하 | **적용 완료** (commit 7856063) |
+| P7 norm 멀티블록 리덕션 | 소 | 하 | 미적용 (선택) |
 
-**다음 단계 제안**: P6(즉시·저위험)와 P1(최대 효과)을 먼저 프로토타이핑하고, 본 하니스
-(`cupf_batch_bench`, `cupf_cpp_evaluate` + `aggregate.py`)로 회귀 측정한다.
+---
+
+## 5. 구현 결과 (P2 / P5 / P6 적용)
+
+모두 매 변경마다 **WITH_CUDA=ON 빌드 + 수렴 정확도 + stage timing** 검증. 동작/수치 동일.
+
+### 항목별 측정
+
+| 항목 | 측정 | before | after | 개선 |
+|---|---|---|---|---|
+| P6 | jacobian stage (case9241, FP64) | 213us | 123us | 1.7× |
+| P5 | ibus stage (case2869, Mixed, B=64) | 2,440us | 407us | 6.0× |
+| P5 | ibus stage (case2869, Mixed, B=256) | 9,632us | 1,348us | 7.1× |
+| P5 | ibus stage (case9241, FP64 단일) | 192us | 144us | 1.3× |
+| P2 | upload (case2869, Mixed, B=256) | 20,728us | 2,521us | 8.2× |
+| P2 | download (case2869, Mixed, B=256) | 20,094us | 2,445us | 8.2× |
+
+### 누적 (case2869, Mixed, solve_total)
+
+| B | baseline | P2+P5+P6 | 개선 |
+|---|---|---|---|
+| 16 | 10,845us | 9,283us | 1.17× |
+| 64 | 42,720us | 32,655us | 1.31× |
+| 256 | 168,460us | 121,257us | **1.39×** |
+
+- 대배치일수록 효과 큼: 제거 대상(전송 호스트 루프, ibus lane 낭비)이 배치에 비례해 커졌기 때문.
+- **단일 케이스(case9241, FP64)는 거의 불변**(~8.8ms): 선형계(factorize ~65%)가 지배적이라 P5/P6의
+  비-선형계 절감이 묻힌다. → 단일·대형 케이스의 추가 개선은 P1(선형계) 영역.
+
+### P4 미적용 사유
+§3 P4 참조 — 매 iteration norm sync는 factorize 직전 early-exit를 보장하므로, 제거 시 매 solve마다
+factorize 1회를 추가로 내는 순손해. CUDA graph 기반 접근(early-exit 유지 + launch 오버헤드 제거)은
+범위가 커 별도 과제로 분류.
 
 ---
 
