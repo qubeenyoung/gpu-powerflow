@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "plan/multifrontal_plan.hpp"
+#include "symbolic/supernode.hpp"
 
 // GPU multifrontal factorization (PLAN §M3 dense-panel large-path). Ports the
 // CPU-validated num::multifrontal_factor: relaxed dense panels, one CUDA block
@@ -21,7 +22,8 @@ namespace custom_linear_solver::factorize {
 custom_linear_solver::plan::MultifrontalPlan analyze_multifrontal(
     int n, int nnz_a, const int* d_Ap, const int* d_Ai,
     const std::vector<int>& Lp, const std::vector<int>& Li,
-    const std::vector<int>& parent, int panel_cap = 8, bool fp32 = false);
+    const std::vector<int>& parent, int panel_cap = 8, bool fp32 = false,
+    const custom_linear_solver::symbolic::PanelPartition* forced_panels = nullptr);
 
 bool factorize_multifrontal_device(custom_linear_solver::plan::MultifrontalPlan& plan,
                                    const double* d_csr_values,

@@ -457,7 +457,8 @@ __global__ void mf_invert_pivot(int npanels, const int* __restrict__ front_ptr,
 MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const int* d_Ai,
                                       const std::vector<int>& Lp,
                                       const std::vector<int>& Li,
-                                      const std::vector<int>& parent, int panel_cap, bool fp32)
+                                      const std::vector<int>& parent, int panel_cap, bool fp32,
+                                      const custom_linear_solver::symbolic::PanelPartition* forced_panels)
 {
     namespace sym = custom_linear_solver::symbolic;
     const bool tm = std::getenv("MF_TIME") != nullptr;  // analysis sub-phase profiling
@@ -506,7 +507,8 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
                         : (n >= 80000 ? 16 : (n >= 16000 ? 12 : panel_cap));
     if (eff_cap < 1) eff_cap = 1;
     if (eff_cap > 64) eff_cap = 64;
-    const sym::PanelPartition panels = sym::relaxed_panels(n, parent, colcount, eff_cap);
+    const sym::PanelPartition panels =
+        forced_panels ? *forced_panels : sym::relaxed_panels(n, parent, colcount, eff_cap);
     if (tm) {
         long tf = Lp[n];
         std::fprintf(stderr, "  [amalg] cap=%d panels=%d padded_fill=%ld pad_ratio=%.2fx n/panels=%.1f\n",
@@ -519,6 +521,9 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     lap("multifrontal_symbolic");
     const int P = panels.num_panels;
     plan.num_panels = P;
+    plan.h_front_ptr = mf.front_ptr;   // host copies for batched dispatch / TC shared sizing
+    plan.h_ncols = panels.ncols;
+    // h_plcols filled after plcols is built below.
 
     // Front-size-band profile (env MF_FRONTPROF): where the factor FLOPS live. Dense
     // front work ~ fsz^2 * nc (panel factor) + uc^2 * nc (trailing). Buckets by fsz so
@@ -575,6 +580,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         std::vector<int> next(plan.plptr.begin(), plan.plptr.end());
         for (int p = 0; p < P; ++p) plcols[next[plevel[p]]++] = p;
     }
+    plan.h_plcols = plcols;
     if (tm) {
         // cy171: solve is latency-bound (low BW utilization) -> profile per-level
         // parallelism. A level with < ~82 fronts (RTX3090 SM count) under-fills the GPU.

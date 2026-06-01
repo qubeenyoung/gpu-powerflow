@@ -21,6 +21,9 @@ struct MultifrontalPlan {
     double* d_y = nullptr;
     int front_store = 0;
     std::vector<int> plptr;
+    std::vector<int> h_front_ptr;  // host copy of front_ptr (per-panel front size), for batched dispatch
+    std::vector<int> h_ncols;      // host copy of panel ncols, for batched tensor-core shared sizing
+    std::vector<int> h_plcols;     // host copy of panels-by-level order (indexes into h_front_ptr)
     void* stream = nullptr;
     void* graph_exec = nullptr;
     void* solve_graph_exec = nullptr;

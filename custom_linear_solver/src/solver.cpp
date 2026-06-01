@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <thread>
 #include <utility>
@@ -15,6 +16,7 @@
 #include "factorize/multifrontal.hpp"
 #include "factorize/multifrontal_batched.hpp"
 #include "matrix/pattern_kernels.hpp"
+#include "symbolic/supernode.hpp"
 #include "reordering/metis_nd.hpp"
 #include "solve/multifrontal.hpp"
 #include "symbolic/elimination_tree.hpp"
@@ -70,6 +72,64 @@ void permute_symmetric_pattern(int n, const std::vector<int>& col_ptr,
             }
         }
     });
+}
+
+// Correct etree-respecting amalgamation for deep-K tensor-core fronts. Merges child columns
+// into their parent supernode (a child's contribution block always nests in its parent's
+// front, so the multifrontal stays valid), up to `cap` columns per supernode and gated by a
+// colcount-similarity `ratio` to bound the zero-padding. Emits `order` (final position ->
+// current position) as a postorder of the resulting supernode tree with each supernode's
+// columns contiguous (descendants before ancestors -> a valid elimination order, same fill
+// class as any postorder of this etree); `panel_sizes` are the contiguous panel column counts.
+void amalgamation_reorder(int n, const std::vector<int>& parent, const std::vector<int>& colcount,
+                          int cap, double ratio, std::vector<int>& order,
+                          std::vector<int>& panel_sizes)
+{
+    std::vector<int> root(n), sz(n, 1), mx(colcount), mn(colcount);
+    for (int i = 0; i < n; ++i) root[i] = i;
+    auto find = [&](int x) { while (root[x] != x) { root[x] = root[root[x]]; x = root[x]; } return x; };
+    for (int j = 0; j < n; ++j) {
+        const int p = parent[j];
+        if (p < 0) continue;
+        const int rj = find(j), rp = find(p);
+        if (rj == rp) continue;
+        if (sz[rj] + sz[rp] <= cap &&
+            (double)std::max(mx[rj], mx[rp]) <= ratio * (double)std::min(mn[rj], mn[rp])) {
+            const int keep = std::max(rj, rp), drop = (keep == rj ? rp : rj);
+            root[drop] = keep;
+            sz[keep] += sz[drop];
+            mx[keep] = std::max(mx[rj], mx[rp]);
+            mn[keep] = std::min(mn[rj], mn[rp]);
+        }
+    }
+    std::vector<std::vector<int>> cols(n);
+    for (int j = 0; j < n; ++j) cols[find(j)].push_back(j);  // ascending within a supernode
+    std::vector<std::vector<int>> snch(n);
+    std::vector<int> roots;
+    for (int R = 0; R < n; ++R) {
+        if (find(R) != R) continue;  // R is the top (max-index) column of its supernode
+        const int p = parent[R];
+        if (p < 0) roots.push_back(R);
+        else snch[find(p)].push_back(R);
+    }
+    order.clear();
+    order.reserve(n);
+    panel_sizes.clear();
+    std::vector<std::pair<int, int>> stk;
+    for (int r : roots) {
+        stk.push_back({r, 0});
+        while (!stk.empty()) {
+            auto& top = stk.back();
+            if (top.second < static_cast<int>(snch[top.first].size())) {
+                const int c = snch[top.first][top.second++];
+                stk.push_back({c, 0});
+            } else {
+                for (int col : cols[top.first]) order.push_back(col);
+                panel_sizes.push_back(static_cast<int>(cols[top.first].size()));
+                stk.pop_back();
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -222,13 +282,74 @@ Status Solver::analyze()
         std::vector<int> parent = custom_linear_solver::symbolic::etree(
             n, sym_col_ptr.data(), sym_row_idx.data());
         lap("etree");
+
+        // Optional deep-K amalgamation reorder (env MF_AMALG="cap:ratio"): grow supernodes for
+        // tensor-core fronts by merging child columns into their parent supernode, then reorder
+        // columns so the supernodes are contiguous. Re-derives perm/iperm, the device ordered CSC
+        // (value map), the symmetric pattern and the etree in the new order; the resulting panel
+        // partition is forced into analyze_multifrontal.
+        std::vector<int> amalg_panel_sizes;
+        if (const char* as = std::getenv("MF_AMALG")) {
+            int cap = std::atoi(as);
+            double ratio = 2.0;
+            if (const char* col = std::strchr(as, ':')) ratio = std::atof(col + 1);
+            if (cap < 1) cap = 1;
+            const std::vector<int> post = custom_linear_solver::symbolic::postorder(parent, n);
+            const std::vector<int> cc = custom_linear_solver::symbolic::column_counts(
+                n, sym_col_ptr.data(), sym_row_idx.data(), parent, post);
+            std::vector<int> order;
+            amalgamation_reorder(n, parent, cc, cap, ratio, order, amalg_panel_sizes);
+            std::vector<int> newperm(static_cast<std::size_t>(n));
+            for (int f = 0; f < n; ++f) newperm[f] = impl_->perm[order[f]];
+            impl_->perm = std::move(newperm);
+            for (int k = 0; k < n; ++k) impl_->iperm[impl_->perm[k]] = k;
+            st = impl_->d_perm.upload(impl_->perm);
+            if (st != Status::Success) return st;
+            st = impl_->d_iperm.upload(impl_->iperm);
+            if (st != Status::Success) return st;
+            custom_linear_solver::matrix::DeviceCscPattern ordered2;
+            st = custom_linear_solver::matrix::permute_csc_device(csc_device, impl_->d_iperm.ptr,
+                                                                 ordered2);
+            if (st != Status::Success) return st;
+            ordered_device = std::move(ordered2);
+            impl_->d_ordered_value_to_csr = std::move(ordered_device.source_pos);
+            permute_symmetric_pattern(n, metis_sym_col_ptr, metis_sym_row_idx, impl_->perm,
+                                      impl_->iperm, sym_col_ptr, sym_row_idx);
+            parent = custom_linear_solver::symbolic::etree(n, sym_col_ptr.data(),
+                                                           sym_row_idx.data());
+            lap("amalgamation_reorder");
+        }
+
         std::vector<int> Lp, Li;
         custom_linear_solver::symbolic::fill_pattern(n, sym_col_ptr.data(), sym_row_idx.data(),
                                                      parent, Lp, Li);
         lap("fill_pattern");
+
+        custom_linear_solver::symbolic::PanelPartition amalg_panels;
+        const custom_linear_solver::symbolic::PanelPartition* forced = nullptr;
+        if (!amalg_panel_sizes.empty()) {
+            amalg_panels.panel_of.assign(static_cast<std::size_t>(n), -1);
+            int col = 0;
+            for (int p = 0; p < static_cast<int>(amalg_panel_sizes.size()); ++p) {
+                const int szp = amalg_panel_sizes[p];
+                int w = 0;
+                for (int c = col; c < col + szp; ++c) {
+                    amalg_panels.panel_of[c] = p;
+                    w = std::max(w, Lp[c + 1] - Lp[c]);
+                }
+                amalg_panels.first.push_back(col);
+                amalg_panels.ncols.push_back(szp);
+                amalg_panels.width.push_back(w);
+                amalg_panels.padded_fill += static_cast<long>(szp) * w;
+                col += szp;
+            }
+            amalg_panels.num_panels = static_cast<int>(amalg_panel_sizes.size());
+            forced = &amalg_panels;
+        }
+
         impl_->plan = custom_linear_solver::factorize::analyze_multifrontal(
             n, nnz, ordered_device.col_ptr.ptr, ordered_device.row_idx.ptr, Lp, Li, parent,
-            impl_->config.panel_cap, false);
+            impl_->config.panel_cap, false, forced);
         lap("analyze_multifrontal");
         if (impl_->plan.num_panels == 0) return Status::AnalysisFailed;
         impl_->analyzed = true;

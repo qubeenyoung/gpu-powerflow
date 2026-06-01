@@ -208,7 +208,7 @@ __global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __r
                                             const int* __restrict__ asm_ptr,
                                             const int* __restrict__ asm_local, double* masterB,
                                             float* workingB, long front_total, int* sing,
-                                            int do_extend)
+                                            int do_extend, int ucp_max)
 {
     namespace wmma = nvcuda::wmma;
     const int idx = lbegin + blockIdx.x;
@@ -279,9 +279,13 @@ __global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __r
                 W[(long)ii * fsz + jj] -= acc;
             }
         } else {
-            __shared__ __half Lh[256 * 32];   // Lh[i*KP + k] = L[i][k]
-            __shared__ __half Uh[32 * 256];   // Uh[k*256 + j] = U[k][j]
-            __shared__ float Csc[4 * 256];    // per-warp 16x16 store scratch
+            // Dynamic shared sized per level (by the level's max uc): Lh[ucp_max*32], Uh[32*ucp_max]
+            // halfs, then Csc. Smaller-front levels get far less shared -> the occupancy that the
+            // earlier static 36KB version destroyed (1 block/SM) is restored.
+            extern __shared__ char smem[];
+            __half* Lh = reinterpret_cast<__half*>(smem);
+            __half* Uh = Lh + (long)ucp_max * 32;
+            float* Csc = reinterpret_cast<float*>(Uh + (long)32 * ucp_max);
             const int UCP = ((uc + 15) / 16) * 16;
             const int KP = ((nc + 15) / 16) * 16;
             for (int e = t; e < UCP * KP; e += nt) {
@@ -291,8 +295,8 @@ __global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __r
             }
             for (int e = t; e < KP * UCP; e += nt) {
                 const int k = e / UCP, j = e % UCP;
-                Uh[k * 256 + j] = (k < nc && j < uc) ? __float2half(W[(long)k * fsz + (nc + j)])
-                                                     : __float2half(0.0f);
+                Uh[k * ucp_max + j] = (k < nc && j < uc) ? __float2half(W[(long)k * fsz + (nc + j)])
+                                                         : __float2half(0.0f);
             }
             __syncthreads();
             const int ntj = UCP / 16, nks = KP / 16;
@@ -306,7 +310,7 @@ __global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __r
                     wmma::fill_fragment(cf, 0.0f);
                     for (int kc = 0; kc < nks; ++kc) {
                         wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> bf;
-                        wmma::load_matrix_sync(bf, &Uh[(kc * 16) * 256 + tj * 16], 256);
+                        wmma::load_matrix_sync(bf, &Uh[(kc * 16) * ucp_max + tj * 16], ucp_max);
                         wmma::mma_sync(cf, af[kc], bf, cf);
                     }
                     wmma::store_matrix_sync(&Csc[warp * 256], cf, 16, wmma::mem_row_major);
@@ -536,12 +540,23 @@ bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState&
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
         dim3 grid(e - b, B);
-        if (tc)
-            mf_factor_extend_mixed_tc_b<<<grid, 128, 0, stream>>>(
+        if (tc) {
+            // per-level max uc (= dynamic-shared Uh stride) so small-front levels use little shared.
+            int max_uc = 1;  // only WMMA-eligible fronts (uc<=256, nc<=32) use the shared staging
+            for (int q = b; q < e; ++q) {
+                const int pp = plan.h_plcols[q];
+                const int fsz = plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp];
+                const int nc = plan.h_ncols[pp];
+                const int uc = fsz - nc;
+                if (uc > max_uc && uc <= 256 && nc <= 32) max_uc = uc;
+            }
+            const int ucp_max = ((max_uc + 15) / 16) * 16;
+            const size_t shbytes = (size_t)2 * ucp_max * 32 * sizeof(__half) + 4 * 256 * sizeof(float);
+            mf_factor_extend_mixed_tc_b<<<grid, 128, shbytes, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,
-                plan.front_total, st.d_sing, do_extend);
-        else if (fp32)
+                plan.front_total, st.d_sing, do_extend, ucp_max);
+        } else if (fp32)
             mf_factor_extend_mixed_b<<<grid, T, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,
