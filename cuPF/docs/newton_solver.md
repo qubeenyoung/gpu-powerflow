@@ -41,7 +41,7 @@ void solve_batch(ybus, sbus, sbus_stride, V0, V0_stride, batch_size,
 
 - `solve`는 `solve_batch(batch_size=1)`의 단일-케이스 래퍼다.
 - `solve_batch`: 입력 업로드(정밀도 변환·배치 resize) → NR 루프 → (옵션)adjoint 캐시
-  → 결과 다운로드. 배치 레이아웃은 batch-major([README](README.md) §4).
+  → 결과 다운로드. 배치 레이아웃은 batch-major([system_architecture](system_architecture.md) §4).
 - 입력 `sbus`/`V0`는 호스트 FP64 complex. 케이스별 stride로 더 넓은 텐서의 행을 가리킬
   수 있다(`*_stride ≥ n_bus`).
 - `batch_size > 1`은 CUDA FP32/Mixed/FP64에서 지원(CPU는 B=1, 위반 시 던짐).
@@ -110,4 +110,4 @@ provenance 플래그(어떻게 J^T를 얻었는지 진단용 — [core.md](core.
 `solve_torch`(=forward, alias) / `solve_adjoint_torch`이며 `CUPF_WITH_TORCH=ON`에서만
 노출된다. 입력은 `[batch, n_bus]`(load/출력)와 `[n_bus]`(base power·V0, 배치 공통),
 텐서 dtype은 프로파일과 일치(FP64→float64, FP32/Mixed→float32). FP32/Mixed/FP64 모두
-batch>1 지원. 구현은 [core.md](core.md)의 torch bridge, 바인딩은 `bindings/`.
+batch>1 지원. 구현은 [core.md](core.md)의 torch bridge, 바인딩은 [bindings.md](bindings.md).

@@ -75,7 +75,7 @@ struct CudaMixedStorage : CudaBatchedStorage<double, float>  {};
 
 per-bus `[b*n_bus+bus]`, per-residual `[b*dimF+row]`, per-J-value `[b*nnz_J+pos]`,
 norm `[b]`. Ybus 패턴은 배치 공통, 값은 `ybus_values_batched`가 아니면 공통. cuDSS
-uniform-batch가 기대하는 연속 layout이라 B=1/B>1 동일 경로([README](README.md) §4).
+uniform-batch가 기대하는 연속 layout이라 B=1/B>1 동일 경로([system_architecture](system_architecture.md) §4).
 
 ### host↔device 변환 커널 (`storage_convert.hpp`)
 
