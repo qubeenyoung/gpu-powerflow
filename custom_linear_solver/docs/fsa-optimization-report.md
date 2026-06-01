@@ -170,10 +170,23 @@ compute-bound answer is "yes"):
   (70k B=128: mixed 0.999 vs TC 1.258; 9241 B=128: mixed 0.074 vs TC 0.116 — TC worse on the
   smaller fronts.) Root cause: the multifrontal panels are nc≤16, so the trailing GEMM has
   **K=16 — one tensor tile deep**. Tensor cores need a tall K to amortize their fragment-load /
-  FP16-staging overhead; at K=16 with fsz≤256 the mandatory FP32→FP16 staging (the K-padding
-  can't be loaded directly from the front) costs more than the plain FP32 FMA trailing saves.
+  FP16-staging overhead; at K=16 with fsz≤256 the per-tile overhead exceeds the plain FP32 FMA
+  trailing saving.
+
+  Two staging-overhead reductions were tried and did not change the verdict:
+  1. *In-place WMMA on the front* (seed the accumulator from the current C tile, stage L negated,
+     `acc = C + (−L)·U`, store back) — eliminates the scratch round-trip, but **WMMA
+     `load/store_matrix_sync` requires an aligned leading dimension and the front stride `fsz`
+     (e.g. 49, 113) is not a multiple of 8/4**, so it faults. The output cannot be written to the
+     front directly; it must go through an aligned scratch.
+  2. *A-fragment reuse* (each warp owns a tile-row, loads its A fragment once, reuses it across
+     all `tj`) — no measurable change (25k 0.425, 70k 1.359), confirming the cost is the per-tile
+     `store_matrix_sync`→scratch→subtract output handling, not the A loads. That output round-trip
+     is unavoidable given the alignment constraint above.
+
   **FP32 mixed is the precision sweet spot for this workload; tensor cores would only pay off on
-  much larger / denser fronts than power-grid multifrontal produces.**
+  much larger / denser fronts than power-grid multifrontal produces.** The WMMA path is kept
+  behind `MF_TC` as reproducible evidence.
 
 Takeaway: **batching is the correct lever for this workload.** It converts the latency-bound
 single-system problem (where precision/tensor-cores are inert) into a compute-bound batched one

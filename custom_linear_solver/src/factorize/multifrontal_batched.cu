@@ -265,10 +265,15 @@ __global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __r
             }
             __syncthreads();
         }
-        // Phase 3: FP16 tensor-core trailing  C -= L * U.
-        __shared__ __half Lh[256 * 16];   // Lh[i*16 + k], i in [0,UCP), k in [0,16)
-        __shared__ __half Uh[16 * 256];   // Uh[k*256 + j], k in [0,16), j in [0,UCP)
-        __shared__ float Csc[4 * 256];    // per-warp 16x16 store scratch
+        // Phase 3: FP16 tensor-core trailing  C -= L * U. WMMA fragment loads/stores need an
+        // aligned leading dimension, so the front stride fsz (arbitrary) cannot be used directly;
+        // L/U are staged FP16 in shared (ld 16 / 256) and each warp's output tile is stored to an
+        // aligned scratch, then subtracted into the FP32 front. Overhead cut vs the first version:
+        // each warp owns a ROW of output tiles (fixed ti) and loads its A fragment ONCE, reusing
+        // it across all tj (ntj A-loads instead of ntj^2). nc<=16 zero-pads the K=16 contraction.
+        __shared__ __half Lh[256 * 16];   // Lh[i*16 + k] = L[i][k], padded
+        __shared__ __half Uh[16 * 256];   // Uh[k*256 + j] = U[k][j], padded
+        __shared__ float Csc[4 * 256];    // per-warp 16x16 store scratch (aligned ld=16)
         const int UCP = ((uc + 15) / 16) * 16;
         for (int e = t; e < UCP * 16; e += nt) {
             const int i = e >> 4, k = e & 15;
@@ -280,25 +285,26 @@ __global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __r
                                                  : __float2half(0.0f);
         }
         __syncthreads();
-        const int ntj = UCP / 16, ntiles = ntj * ntj;
+        const int ntj = UCP / 16;
         const int warp = t >> 5, nwarp = nt >> 5, lane = t & 31;
-        for (int tile = warp; tile < ntiles; tile += nwarp) {
-            const int ti = tile / ntj, tj = tile % ntj;
+        for (int ti = warp; ti < ntj; ti += nwarp) {
             wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> af;
-            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> bf;
-            wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;
-            wmma::fill_fragment(cf, 0.0f);
-            wmma::load_matrix_sync(af, &Lh[(ti * 16) * 16], 16);
-            wmma::load_matrix_sync(bf, &Uh[tj * 16], 256);
-            wmma::mma_sync(cf, af, bf, cf);
-            wmma::store_matrix_sync(&Csc[warp * 256], cf, 16, wmma::mem_row_major);
-            __syncwarp();
-            for (int e = lane; e < 256; e += 32) {
-                const int r = e >> 4, c = e & 15;
-                const int ii = ti * 16 + r, jj = tj * 16 + c;
-                if (ii < uc && jj < uc) W[(long)(nc + ii) * fsz + (nc + jj)] -= Csc[warp * 256 + e];
+            wmma::load_matrix_sync(af, &Lh[ti * 256], 16);  // A row-tile loaded ONCE, reused over tj
+            for (int tj = 0; tj < ntj; ++tj) {
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> bf;
+                wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;
+                wmma::fill_fragment(cf, 0.0f);
+                wmma::load_matrix_sync(bf, &Uh[tj * 16], 256);
+                wmma::mma_sync(cf, af, bf, cf);
+                wmma::store_matrix_sync(&Csc[warp * 256], cf, 16, wmma::mem_row_major);
+                __syncwarp();
+                for (int e = lane; e < 256; e += 32) {
+                    const int r = e >> 4, c = e & 15;
+                    const int ii = ti * 16 + r, jj = tj * 16 + c;
+                    if (ii < uc && jj < uc) W[(long)(nc + ii) * fsz + (nc + jj)] -= Csc[warp * 256 + e];
+                }
+                __syncwarp();
             }
-            __syncwarp();
         }
     }
     __syncthreads();
