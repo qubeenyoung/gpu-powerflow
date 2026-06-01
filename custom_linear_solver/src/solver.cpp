@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 
 #include "factorize/multifrontal.hpp"
+#include "factorize/multifrontal_batched.hpp"
 #include "matrix/pattern_kernels.hpp"
 #include "reordering/metis_nd.hpp"
 #include "solve/multifrontal.hpp"
@@ -89,6 +90,7 @@ struct Solver::Impl {
     custom_linear_solver::matrix::IntDeviceBuffer d_perm;
     custom_linear_solver::matrix::IntDeviceBuffer d_iperm;
     custom_linear_solver::plan::MultifrontalPlan plan;
+    custom_linear_solver::factorize::BatchedState batched;
 };
 
 Solver::Solver(const SolverConfig& config) : impl_(new Impl{config}) {}
@@ -269,6 +271,33 @@ Status Solver::solve(double* kernel_ms)
     } catch (const std::exception&) {
         return Status::SolveFailed;
     }
+}
+
+Status Solver::batched_setup(int batch, bool fp32)
+{
+    if (!impl_ || !impl_->analyzed) return Status::InvalidState;
+    if (batch <= 0) return Status::InvalidValue;
+    return custom_linear_solver::factorize::batched_setup(impl_->plan, batch, fp32, impl_->batched)
+               ? Status::Success
+               : Status::AllocationFailed;
+}
+
+Status Solver::batched_factorize(const double* d_valuesB, double* kernel_ms)
+{
+    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
+    return custom_linear_solver::factorize::batched_factorize(
+               impl_->plan, impl_->batched, d_valuesB, impl_->d_ordered_value_to_csr.ptr, kernel_ms)
+               ? Status::Success
+               : Status::FactorizationFailed;
+}
+
+Status Solver::batched_solve(const double* d_rhsB, double* d_solB, double* kernel_ms)
+{
+    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
+    return custom_linear_solver::factorize::batched_solve(impl_->plan, impl_->batched, d_rhsB,
+                                                          d_solB, impl_->d_perm.ptr, kernel_ms)
+               ? Status::Success
+               : Status::SolveFailed;
 }
 
 const char* status_string(Status status)

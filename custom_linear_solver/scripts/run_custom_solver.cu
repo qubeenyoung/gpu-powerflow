@@ -42,6 +42,7 @@ struct Options {
     bool write_solution = false;
     int repeat = 1;
     int ir = 0;  // iterative-refinement steps after the solve (low-precision-solve correction)
+    int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
 };
 
 template <typename T>
@@ -142,6 +143,9 @@ Options parse_args(int argc, char** argv)
         } else if (arg == "--ir") {
             if (++i >= argc) throw std::runtime_error("--ir requires a count");
             options.ir = std::stoi(argv[i]);
+        } else if (arg == "--batch") {
+            if (++i >= argc) throw std::runtime_error("--batch requires a count");
+            options.batch = std::stoi(argv[i]);
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -343,6 +347,69 @@ int main(int argc, char** argv)
         }
         const auto t_done = std::chrono::steady_clock::now();
 
+        // ---- Uniform-batch experiment (B systems, same pattern) -------------------------
+        double batch_factor_per_ms = 0, batch_solve_per_ms = 0, batch_relres = 0, batch_ir_per_ms = 0;
+        if (options.batch > 0) {
+            const int B = options.batch;
+            const int n = matrix.rows, nnz = matrix.nnz();
+            const bool mixed = std::getenv("MF_NO_MIXED") == nullptr &&
+                               (std::getenv("MF_MIXED") != nullptr || n < 24000);
+            // B identical copies (same pattern + values) -> each batch solves the same system,
+            // so the per-batch residual must match the single-system solve (correctness check).
+            std::vector<double> hvalB((std::size_t)B * nnz), hrhsB((std::size_t)B * n);
+            for (int b = 0; b < B; ++b) {
+                std::copy(matrix.values.begin(), matrix.values.end(), hvalB.begin() + (std::size_t)b * nnz);
+                std::copy(rhs.values.begin(), rhs.values.end(), hrhsB.begin() + (std::size_t)b * n);
+            }
+            DeviceBuffer<double> d_valB, d_rhsB, d_solB;
+            d_valB.upload(hvalB);
+            d_rhsB.upload(hrhsB);
+            d_solB.allocate((std::size_t)B * n);
+            require_success(solver.batched_setup(B, mixed), "batched_setup");
+            std::vector<double> bf, bs;
+            for (int r = 0; r < options.repeat; ++r) {
+                double kf = 0, ks = 0;
+                require_success(solver.batched_factorize(d_valB.get(), &kf), "batched_factorize");
+                require_success(solver.batched_solve(d_rhsB.get(), d_solB.get(), &ks), "batched_solve");
+                bf.push_back(kf);
+                bs.push_back(ks);
+            }
+            // optional batched IR (FP64 correction across all B)
+            if (options.ir > 0) {
+                const int T = 256;
+                DeviceBuffer<double> d_rB, d_dxB;
+                d_rB.allocate((std::size_t)B * n);
+                d_dxB.allocate((std::size_t)B * n);
+                cuda_check(cudaDeviceSynchronize(), "sync before batch IR");
+                const auto bir0 = std::chrono::steady_clock::now();
+                for (int step = 0; step < options.ir; ++step) {
+                    for (int b = 0; b < B; ++b)
+                        spmv_residual<<<(n + T - 1) / T, T>>>(
+                            n, d_row_ptr.get(), d_col_idx.get(), d_valB.get() + (std::size_t)b * nnz,
+                            d_solB.get() + (std::size_t)b * n, d_rhsB.get() + (std::size_t)b * n,
+                            d_rB.get() + (std::size_t)b * n);
+                    require_success(solver.batched_solve(d_rB.get(), d_dxB.get(), nullptr),
+                                    "batched_solve(ir)");
+                    axpy_inplace<<<((std::size_t)B * n + T - 1) / T, T>>>((int)((std::size_t)B * n),
+                                                                         d_dxB.get(), d_solB.get());
+                }
+                cuda_check(cudaDeviceSynchronize(), "sync after batch IR");
+                batch_ir_per_ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - bir0).count() / B;
+            }
+            batch_factor_per_ms = median(bf) / B;
+            batch_solve_per_ms = median(bs) / B;
+            std::vector<double> solB((std::size_t)B * n);
+            cuda_check(cudaMemcpy(solB.data(), d_solB.get(), (std::size_t)B * n * sizeof(double),
+                                  cudaMemcpyDeviceToHost), "D2H batch sol");
+            // max relres over ALL B batches (catches per-batch indexing bugs, not just batch 0)
+            for (int b = 0; b < B; ++b) {
+                std::vector<double> xb(solB.begin() + (std::size_t)b * n,
+                                       solB.begin() + (std::size_t)(b + 1) * n);
+                batch_relres = std::max(batch_relres, residual(matrix, rhs.values, xb).rel_l2);
+            }
+        }
+
         const auto ms = [](auto a, auto b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
@@ -365,6 +432,16 @@ int main(int argc, char** argv)
             std::cout << "ir_steps=" << options.ir << '\n'
                       << "ir_total_ms=" << ir_ms << '\n'
                       << "solve_plus_ir_ms=" << (median(solve_ms) + ir_ms) << '\n';
+        }
+        if (options.batch > 0) {
+            std::cout << "batch=" << options.batch << '\n'
+                      << "batch_factor_per_sys_ms=" << batch_factor_per_ms << '\n'
+                      << "batch_solve_per_sys_ms=" << batch_solve_per_ms << '\n'
+                      << "batch_relres=" << batch_relres << '\n';
+            if (options.ir > 0)
+                std::cout << "batch_ir_per_sys_ms=" << batch_ir_per_ms << '\n'
+                          << "batch_solve_plus_ir_per_sys_ms="
+                          << (batch_solve_per_ms + batch_ir_per_ms) << '\n';
         }
         std::cout
                   << "download_check_ms=" << ms(t_solve, t_done) << '\n'
