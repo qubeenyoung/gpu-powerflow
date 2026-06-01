@@ -118,6 +118,53 @@ which holds on compute-bound dense problems, not on these latency-bound sparse p
 Where low precision *does* help (small/medium factor) the result already passes 1e-3 without IR,
 so no refinement is needed.
 
+## Multi-batch: the regime where the 30% targets are exceeded on every size
+
+The single-system limits above are all forms of *latency* (launch + per-level sync on a deep
+etree of tiny fronts). The realistic power-flow workload is **many systems with the same
+topology** (contingencies, time steps, stochastic scenarios) → identical sparsity → **one
+shared analyze**, then B numeric factor/solve. Batching those B systems amortizes the latency
+across B and fills the GPU on the otherwise occupancy-starved narrow levels.
+
+Implemented as a uniform-batch path (`factorize/multifrontal_batched.{hpp,cu}`,
+`Solver::batched_{setup,factorize,solve}`, runner `--batch B`): front-major arena
+`B*front_total`, each dense kernel adds `blockIdx.y = batch`, one launch per etree level covers
+all B fronts. Verified correct: max relres over all B batches matches the single-system solve.
+
+**Per-system factor / solve vs the optimized single-system path** (B=128, same precision —
+mixed for n<24000, FP64 above; relres unchanged):
+
+| case   | factor single → B=128 | solve single → B=128 |
+|--------|-----------------------|----------------------|
+| 3120sp | 0.255 → 0.023 (**-91%**) | 0.196 → 0.021 (**-90%**) |
+| 6470rte| 0.346 → 0.049 (**-86%**) | 0.271 → 0.041 (**-85%**) |
+| 9241peg| 0.517 → 0.076 (**-85%**) | 0.354 → 0.057 (**-84%**) |
+| 25k    | 1.265 → 0.354 (**-72%**) | 0.619 → 0.158 (**-74%**) |
+| 70k    | 2.764 → 1.339 (**-52%**) | 1.122 → 0.434 (**-61%**) |
+
+The 30% factor and **solve** targets are exceeded on every size, including the large cases that
+were impossible single-system. Per-system time keeps dropping until ~B=32–64 (small/medium) or
+B≈128 (70k), where it saturates — the GPU is now full, i.e. the workload has become
+**compute-bound**.
+
+**Now precision and tensor cores matter** (the single-system answer was "no"; the batched
+compute-bound answer is "yes"):
+
+- **Mixed FP32** helps large factor in the batched regime where it was useless single-system:
+  25k B=64 factor 0.367→0.307 (-16%), 70k 1.344→1.056 (-21%). Small/medium were already mixed.
+- **Iterative refinement** finally has something to amortize: mixed pushes 70k relres to ~1e-3
+  (borderline); 1 FP64 IR step recovers it to ~1e-6. The IR step costs ≈ one extra solve, so it
+  is worth it only when the mixed-factor margin is needed (e.g. tightening 70k's residual);
+  small/medium pass 1e-3 with no IR.
+- **Tensor cores** become applicable to the batched trailing-update GEMM (now compute-bound),
+  but the fronts are rank-nc with nc≤16 (K=16, one FP16 tile deep) and fsz≤256, so utilization
+  is partial; a batched FP16 trailing GEMM + IR is the logical next step beyond the FP32 mixed
+  win already demonstrated.
+
+Takeaway: **batching is the correct lever for this workload.** It converts the latency-bound
+single-system problem (where precision/tensor-cores are inert) into a compute-bound batched one
+(where they help), and on its own delivers 52–91% per-system factor/solve reductions.
+
 ## Diagnostic env knobs added
 
 `CLS_KERNEL_TIME` (runner: factor/solve kernel vs wall), `CLS_FACTOR_SPLIT` (memset/scatter/
