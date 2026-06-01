@@ -38,11 +38,6 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end)
 }
 
 #ifdef CUPF_WITH_CUDA
-// Batch size per storage layout (FP64 is single-case).
-int32_t cuda_batch_size(const CudaFp64Storage&) { return 1; }
-int32_t cuda_batch_size(const CudaFp32Storage& b) { return b.batch_size; }
-int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
-
 // Resize every device buffer to match the current case/batch dimensions.
 // FP64 is limited to batch_size==1; FP32/Mixed scale each buffer by batch_size.
 // (All size_t casts widen positive int32 dimensions before multiplying, which
@@ -197,7 +192,7 @@ void fill_common_cuda_adjoint_metadata(PipelineT& p, AdjointResult& result)
     result.jt_refactorized_during_backward = false;
     result.host_roundtrip_for_jt_transpose = p.adjoint_cache.host_roundtrip_for_jt_transpose;
     result.n_bus = p.buf.n_bus;
-    result.batch_size = cuda_batch_size(p.buf);
+    result.batch_size = cuda_storage_batch_size(p.buf);
     result.dimF = p.buf.dimF;
     result.backend = p.adjoint_cache.backend_name.empty()
         ? cuda_pipeline_backend_name<PipelineT>()
@@ -262,7 +257,7 @@ void NewtonSolver::solve_torch_backward(
                     std::string("cupf::torch_api::solve_backward(): dtype must be ") +
                     expected_dtype + " for this cuPF compute policy");
             }
-            if (batch_size != cuda_batch_size(p.buf) || n_bus != p.buf.n_bus) {
+            if (batch_size != cuda_storage_batch_size(p.buf) || n_bus != p.buf.n_bus) {
                 throw std::invalid_argument("cupf::torch_api::solve_backward(): shape does not match cached forward solve");
             }
             const bool cache_ok =

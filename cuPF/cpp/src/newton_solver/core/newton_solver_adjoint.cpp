@@ -37,22 +37,6 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end)
 }
 
 
-#ifdef CUPF_WITH_CUDA
-// Batch size per CUDA storage layout (FP64 is single-case).
-int32_t cuda_batch_size(const CudaFp64Storage&) { return 1; }
-int32_t cuda_batch_size(const CudaFp32Storage& b) { return b.batch_size; }
-int32_t cuda_batch_size(const CudaMixedStorage& b) { return b.batch_size; }
-
-// Non-zero count of J per CUDA storage layout.
-int32_t cuda_nnz_j(const CudaFp64Storage& b)
-{
-    // FP64 tracks nnz via the value buffer length; narrow size_t -> int32.
-    return static_cast<int32_t>(b.d_J_values.size());
-}
-int32_t cuda_nnz_j(const CudaFp32Storage& b) { return b.nnz_J; }
-int32_t cuda_nnz_j(const CudaMixedStorage& b) { return b.nnz_J; }
-#endif  // CUPF_WITH_CUDA
-
 }  // namespace
 
 
@@ -202,7 +186,7 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
                                  const char* backend_name,
                                  AdjointResult& result)
 {
-    validate_adjoint_args(p.buf.n_bus, p.buf.dimF, cuda_batch_size(p.buf),
+    validate_adjoint_args(p.buf.n_bus, p.buf.dimF, cuda_storage_batch_size(p.buf),
                           grad_va, grad_va_stride,
                           grad_vm, grad_vm_stride,
                           batch_size, pv, n_pv, pq, n_pq);
@@ -296,7 +280,7 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
     // the relative residual of the adjoint solution against dL/dx.
     if (options.check_residual) {
         const int32_t dim = p.buf.dimF;
-        const int32_t nnz = cuda_nnz_j(p.buf);
+        const int32_t nnz = cuda_storage_nnz_j(p.buf);
         // Host CSR mirrors of J (size_t casts size the host vectors).
         std::vector<int32_t> row_ptr(static_cast<std::size_t>(dim + 1));
         std::vector<int32_t> col_idx(static_cast<std::size_t>(nnz));
