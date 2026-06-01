@@ -76,7 +76,7 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
     // CPU backend: single FP64 pipeline, no further variants.
     if (options.backend == BackendKind::CPU) {
         pipeline_ = std::make_unique<SolverPipeline>(
-            SolverPipeline{CpuFp64Pipeline{options.cpu_jacobian, options.cpu_linear_solver}});
+            SolverPipeline{CpuFp64Pipeline{options.cpu_linear_solver}});
         return;
     }
 

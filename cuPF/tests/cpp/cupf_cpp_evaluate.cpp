@@ -33,7 +33,6 @@ struct Args {
     std::vector<std::string> cases;
     std::string backend = "cuda";
     std::string compute = "mixed";
-    std::string cpu_jacobian = "native";
     std::string cpu_linear_solver = "klu";
     std::string cuda_jacobian = "edge";
     std::string cuda_linear_solver = "cudss";
@@ -60,7 +59,6 @@ Args parse_args(int argc, char** argv)
         else if (key == "--output-dir") args.output_dir = require_value(i, argc, argv, key);
         else if (key == "--backend") args.backend = require_value(i, argc, argv, key);
         else if (key == "--compute") args.compute = require_value(i, argc, argv, key);
-        else if (key == "--cpu-jacobian") args.cpu_jacobian = require_value(i, argc, argv, key);
         else if (key == "--cpu-linear-solver") args.cpu_linear_solver = require_value(i, argc, argv, key);
         else if (key == "--cuda-jacobian") args.cuda_jacobian = require_value(i, argc, argv, key);
         else if (key == "--cuda-linear-solver") args.cuda_linear_solver = require_value(i, argc, argv, key);
@@ -185,10 +183,6 @@ NewtonOptions make_options(const Args& args)
     else if (args.compute == "fp32") options.compute = ComputePolicy::FP32;
     else if (args.compute == "mixed") options.compute = ComputePolicy::Mixed;
     else throw std::invalid_argument("compute must be fp64, fp32, or mixed");
-
-    if (args.cpu_jacobian == "native") options.cpu_jacobian = CpuJacobianKind::Native;
-    else if (args.cpu_jacobian == "pandapower") options.cpu_jacobian = CpuJacobianKind::Pandapower;
-    else throw std::invalid_argument("cpu-jacobian must be native or pandapower");
 
     if (args.cpu_linear_solver == "klu") options.cpu_linear_solver = CpuLinearSolverKind::KLU;
     else if (args.cpu_linear_solver == "umfpack") options.cpu_linear_solver = CpuLinearSolverKind::UMFPACK;

@@ -82,14 +82,11 @@ struct CpuLinearSolveAny {
 
 struct CpuFp64Pipeline {
     CpuFp64Storage    buf;
-    CpuJacobianKind   jacobian_kind = CpuJacobianKind::Native;
     CpuLinearSolveAny linear_solve;
     AdjointCache      adjoint_cache;
 
-    explicit CpuFp64Pipeline(CpuJacobianKind jacobian = CpuJacobianKind::Native,
-                             CpuLinearSolverKind solver = CpuLinearSolverKind::KLU)
-        : jacobian_kind(jacobian)
-        , linear_solve(solver)
+    explicit CpuFp64Pipeline(CpuLinearSolverKind solver = CpuLinearSolverKind::KLU)
+        : linear_solve(solver)
     {}
 
     void initialize(const InitializeContext& ctx) {
@@ -112,13 +109,7 @@ struct CpuFp64Pipeline {
     void ibus(IterationContext& ctx)          { CpuIbusOp{}.run(buf, ctx); }
     void mismatch(IterationContext& ctx)      { CpuMismatchOp{}.run(buf, ctx); }
     void mismatch_norm(IterationContext& ctx) { CpuMismatchNormOp{}.run(buf, ctx); }
-    void jacobian(IterationContext& ctx) {
-        if (jacobian_kind == CpuJacobianKind::Pandapower) {
-            CpuPandapowerJacobianOpF64{}.run(buf, ctx);
-        } else {
-            CpuJacobianOpF64{}.run(buf, ctx);
-        }
-    }
+    void jacobian(IterationContext& ctx)      { CpuJacobianOpF64{}.run(buf, ctx); }
     void prepare_rhs(IterationContext& ctx)   { linear_solve.prepare_rhs(buf, ctx); }
     void factorize(IterationContext& ctx)     { linear_solve.factorize(buf, ctx); }
     void solve(IterationContext& ctx)         { linear_solve.solve(buf, ctx); }

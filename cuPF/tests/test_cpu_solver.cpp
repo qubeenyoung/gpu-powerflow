@@ -164,7 +164,7 @@ TEST(CpuSolverSmoke, EdgeBasedCase30Converges)
     (void)run_solver(options);
 }
 
-TEST(CpuSolverSmoke, PandapowerJacobianWithKluCase30Converges)
+TEST(CpuSolverSmoke, UmfpackCase30Converges)
 {
     if (!std::filesystem::exists(kCase30IeeePath)) {
         GTEST_SKIP() << "dump case not available at " << kCase30IeeePath;
@@ -173,22 +173,6 @@ TEST(CpuSolverSmoke, PandapowerJacobianWithKluCase30Converges)
     NewtonOptions options;
     options.backend = BackendKind::CPU;
     options.compute = ComputePolicy::FP64;
-    options.cpu_jacobian = CpuJacobianKind::Pandapower;
-    options.cpu_linear_solver = CpuLinearSolverKind::KLU;
-
-    (void)run_solver(options);
-}
-
-TEST(CpuSolverSmoke, PandapowerJacobianWithUmfpackCase30Converges)
-{
-    if (!std::filesystem::exists(kCase30IeeePath)) {
-        GTEST_SKIP() << "dump case not available at " << kCase30IeeePath;
-    }
-
-    NewtonOptions options;
-    options.backend = BackendKind::CPU;
-    options.compute = ComputePolicy::FP64;
-    options.cpu_jacobian = CpuJacobianKind::Pandapower;
     options.cpu_linear_solver = CpuLinearSolverKind::UMFPACK;
 
     (void)run_solver(options);

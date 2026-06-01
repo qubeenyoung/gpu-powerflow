@@ -54,8 +54,6 @@ def _cpp_command(args: argparse.Namespace, variant: dict[str, Any], executable: 
         variant["backend"],
         "--compute",
         variant["compute"],
-        "--cpu-jacobian",
-        variant.get("cpu_jacobian", "native"),
         "--cpu-linear-solver",
         variant.get("cpu_linear_solver", "klu"),
         "--cuda-jacobian",

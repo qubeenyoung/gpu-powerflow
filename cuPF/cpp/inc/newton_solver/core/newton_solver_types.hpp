@@ -87,12 +87,6 @@ enum class CudaLinearSolverKind {
     Custom,
 };
 
-enum class CpuJacobianKind {
-    Native,
-    Pandapower,
-};
-
-
 enum class CpuLinearSolverKind {
     KLU,
     UMFPACK,
@@ -138,7 +132,6 @@ struct CuDSSOptions {
 struct NewtonOptions {
     BackendKind          backend = BackendKind::CPU;
     ComputePolicy        compute = ComputePolicy::FP64;
-    CpuJacobianKind      cpu_jacobian = CpuJacobianKind::Native;
     CpuLinearSolverKind  cpu_linear_solver = CpuLinearSolverKind::KLU;
     CudaJacobianKind     cuda_jacobian = CudaJacobianKind::Edge;
     CudaLinearSolverKind cuda_linear_solver = CudaLinearSolverKind::CuDSS;

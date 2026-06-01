@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import subprocess
+import shlex
 import sys
 import time
 from typing import Any, Iterable
@@ -174,11 +175,66 @@ def command_summary(result: CommandResult, *, tail_lines: int = 24) -> str:
     return f"$ {cmd}\n[{status}] elapsed={result.elapsed_s:.1f}s"
 
 
-def build_eval(kind: str, *, jobs: int | None = None, timeout: int | None = None) -> CommandResult:
+def shell_join(command: list[str]) -> str:
+    """Render a helper-wrapped command so readers can rerun it directly."""
+
+    return shlex.join([str(part) for part in command])
+
+
+def command_plan_table(rows: Iterable[tuple[str, list[str]]]) -> pd.DataFrame:
+    """Display the concrete shell commands before a notebook helper runs them."""
+
+    return pd.DataFrame(
+        [{"step": label, "command": shell_join(command)} for label, command in rows]
+    )
+
+
+def build_eval_command(kind: str, *, jobs: int | None = None) -> list[str]:
     command = ["bash", "benchmark/scripts/build_eval.bash", kind]
     if jobs is not None:
         command += ["--jobs", str(jobs)]
+    return command
+
+
+def build_eval(kind: str, *, jobs: int | None = None, timeout: int | None = None) -> CommandResult:
+    command = build_eval_command(kind, jobs=jobs)
     return run_shell_command(command, timeout=timeout)
+
+
+def tutorial_benchmark_command(
+    *,
+    variants: list[str],
+    run_name: str,
+    cases: list[str] | None = None,
+    repeats: int = 1,
+    warmup: int = 0,
+    output_root: str | Path | None = None,
+    skip_matlab: bool = False,
+    skip_cupf: bool = False,
+) -> list[str]:
+    output = Path(output_root) if output_root is not None else TUTORIAL_RUN_ROOT
+    command = [
+        sys.executable,
+        "-m",
+        "python.tests.run_benchmark",
+        "--output-root",
+        str(output),
+        "--run-name",
+        run_name,
+        "--cases",
+        *(cases or [TUTORIAL_LARGE_CASE]),
+        "--repeats",
+        str(repeats),
+        "--warmup",
+        str(warmup),
+        "--variants",
+        *variants,
+    ]
+    if skip_matlab:
+        command.append("--skip-matlab")
+    if skip_cupf:
+        command.append("--skip-cupf")
+    return command
 
 
 def run_tutorial_benchmark(
@@ -196,27 +252,16 @@ def run_tutorial_benchmark(
     output = Path(output_root) if output_root is not None else tutorial_output_root()
     output.mkdir(parents=True, exist_ok=True)
     name = run_name or timestamp_run_name("tutorial")
-    command = [
-        sys.executable,
-        "-m",
-        "python.tests.run_benchmark",
-        "--output-root",
-        str(output),
-        "--run-name",
-        name,
-        "--cases",
-        *(cases or [TUTORIAL_LARGE_CASE]),
-        "--repeats",
-        str(repeats),
-        "--warmup",
-        str(warmup),
-        "--variants",
-        *variants,
-    ]
-    if skip_matlab:
-        command.append("--skip-matlab")
-    if skip_cupf:
-        command.append("--skip-cupf")
+    command = tutorial_benchmark_command(
+        variants=variants,
+        run_name=name,
+        cases=cases,
+        repeats=repeats,
+        warmup=warmup,
+        output_root=output,
+        skip_matlab=skip_matlab,
+        skip_cupf=skip_cupf,
+    )
     result = run_shell_command(command, timeout=timeout)
     return output / name, result
 
@@ -315,6 +360,45 @@ def successful_variants(summary: pd.DataFrame) -> pd.DataFrame:
     return data[np.isfinite(data["solve_ms"])].copy()
 
 
+def load_native_timing(run_dir: str | Path) -> pd.DataFrame:
+    """Read native evaluator timing.csv files and attach the variant name.
+
+    Native runs expose the Newton loop stages collected inside C++. The
+    tutorial uses this for GPU timing because it separates Jacobian fill,
+    factorization, sparse solve, and voltage update without Python wrapper
+    synchronization overhead.
+    """
+
+    frames = []
+    for path in sorted(Path(run_dir).glob("*/timing.csv")):
+        frame = pd.read_csv(path)
+        frame["variant"] = path.parent.name
+        frame["total_ms"] = pd.to_numeric(frame["total_us"], errors="coerce") / 1000.0
+        frame["avg_ms"] = pd.to_numeric(frame["avg_us"], errors="coerce") / 1000.0
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def native_stage_totals(run_dir: str | Path, timer_names: list[str] | None = None) -> pd.DataFrame:
+    """Return per-variant C++ timer totals in milliseconds."""
+
+    timing = load_native_timing(run_dir)
+    if timing.empty:
+        return timing
+    if timer_names is not None:
+        timing = timing[timing["timer_name"].isin(timer_names)]
+    if timing.empty:
+        return timing
+    out = (
+        timing.groupby(["variant", "timer_name"], as_index=False)["total_ms"]
+        .sum()
+        .sort_values(["variant", "total_ms"], ascending=[True, False])
+    )
+    return out
+
+
 def solve_comparison_table(summary: pd.DataFrame, baseline_variant: str | None = None) -> pd.DataFrame:
     """Create ratios that make result interpretation explicit in notebooks."""
 
@@ -388,16 +472,16 @@ def solver_path_table() -> pd.DataFrame:
                 "Benchmark ID": "matpower-default",
             },
             {
-                "Path": "cuPF CPU comparable path",
-                "Jacobian": "Pandapower-like CPU Jacobian",
+                "Path": "cuPF CPU",
+                "Jacobian": "native fixed-pattern Jacobian fill",
                 "Linear solver": "SuiteSparse UMFPACK or KLU",
-                "Benchmark ID": "cupf-cpu-*-pandapower-jac",
+                "Benchmark ID": "cupf-cpu-klu, cupf-cpu-umfpack",
             },
             {
-                "Path": "cuPF CPU optimized path",
-                "Jacobian": "native fixed-pattern Jacobian fill",
-                "Linear solver": "KLU with symbolic reuse",
-                "Benchmark ID": "cupf-cpu-klu",
+                "Path": "tutorial C++ reference",
+                "Jacobian": "pandapower-style dSbus_dV sparse block assembly",
+                "Linear solver": "not a cuPF production path",
+                "Benchmark ID": "python/tutorial/cpp/pandapower_jacobian_reference.cpp",
             },
             {
                 "Path": "cuPF GPU",
@@ -569,6 +653,46 @@ def plot_ybus(case: matpower_data.PreprocessedCase, ax: Any | None = None) -> An
     ax.set_xlabel("Column bus")
     ax.set_ylabel("Row bus")
     return ax
+
+
+def plot_problem_variables(case: matpower_data.PreprocessedCase, ax: Any | None = None) -> Any:
+    """Show which voltage entries are specified and which Newton solves."""
+
+    ax = ax or plt.gca()
+    types = bus_types(case)
+    buses = np.arange(case.ybus.shape[0]) + 1
+    va_unknown = np.array([1 if types[int(bus - 1)] in {"PV", "PQ"} else 0 for bus in buses])
+    vm_unknown = np.array([1 if types[int(bus - 1)] == "PQ" else 0 for bus in buses])
+    data = np.vstack([va_unknown, vm_unknown])
+    ax.imshow(data, aspect="auto", cmap=plt.cm.Blues, vmin=0, vmax=1)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["Va unknown", "Vm unknown"])
+    ax.set_xticks(np.arange(len(buses)))
+    ax.set_xticklabels(buses)
+    ax.set_xlabel("Bus")
+    ax.set_title("Voltage variables in the reduced Newton state")
+    for row in range(data.shape[0]):
+        for col in range(data.shape[1]):
+            label = "solve" if data[row, col] else "given"
+            ax.text(
+                col,
+                row,
+                label,
+                ha="center",
+                va="center",
+                fontsize=8,
+                color="white" if data[row, col] else "#555555",
+            )
+    return ax
+
+
+def plot_network_to_ybus_story(case: matpower_data.PreprocessedCase, axes: Iterable[Any]) -> None:
+    """Place topology, Ybus, and unknown-state views next to each other."""
+
+    ax_graph, ax_matrix, ax_state = list(axes)
+    plot_case_graph(case, ax_graph)
+    plot_ybus(case, ax_matrix)
+    plot_problem_variables(case, ax_state)
 
 
 def plot_voltage_phasors(voltage: np.ndarray, ax: Any | None = None, title: str = "Voltage phasors") -> Any:
@@ -869,6 +993,134 @@ def plot_stage_timing(stage_ms: pd.Series | dict[str, float], ax: Any | None = N
     return plot_stage_bar(stage_ms, ax, title)
 
 
+def plot_initialize_amortization(
+    initialize_ms: float,
+    solve_ms: float,
+    scenario_counts: Iterable[int] = (1, 2, 4, 8, 16, 32, 64),
+    ax: Any | None = None,
+    title: str = "Initialize amortization across scenarios",
+) -> Any:
+    """Show how one initialize cost is diluted across many operating points."""
+
+    ax = ax or plt.gca()
+    counts = np.array(list(scenario_counts), dtype=float)
+    per_scenario = initialize_ms / counts + solve_ms
+    solve_floor = np.full_like(counts, solve_ms)
+    ax.plot(counts, per_scenario, marker="o", color="#1f77b4", label="initialize / N + solve")
+    ax.plot(counts, solve_floor, linestyle="--", color="#d62728", label="solve-only floor")
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(counts)
+    ax.set_xticklabels([str(int(count)) for count in counts])
+    ax.set_xlabel("scenarios sharing one topology")
+    ax.set_ylabel("ms per scenario")
+    ax.set_title(title)
+    ax.grid(True, which="both", alpha=0.25)
+    ax.legend(frameon=False)
+    return ax
+
+
+def cpu_reference_stage_table(trace: NewtonTrace) -> pd.DataFrame:
+    """Compact stage table for the pandapower-style CPU reference path."""
+
+    totals = trace.stage_totals_ms
+    jacobian = float(totals.get("Jacobian", 0.0))
+    linear = float(totals.get("Linear solve", 0.0))
+    total = float(totals.sum())
+    other = max(0.0, total - jacobian - linear)
+    return pd.DataFrame(
+        [
+            {
+                "path": "CPU reference",
+                "jacobian_ms": jacobian,
+                "linear_solve_ms": linear,
+                "other_ms": other,
+                "solve_total_ms": total,
+                "iterations": trace.iterations,
+                "converged": trace.converged,
+            }
+        ]
+    )
+
+
+def cpu_reference_vs_cupf_table(trace: NewtonTrace, summary: pd.DataFrame) -> pd.DataFrame:
+    """Put reference stage timings and cuPF solve totals in one comparison table."""
+
+    rows = cpu_reference_stage_table(trace).to_dict("records")
+    for _, row in successful_variants(summary).iterrows():
+        rows.append(
+            {
+                "path": str(row["variant"]).replace("-pybind", ""),
+                "jacobian_ms": math.nan,
+                "linear_solve_ms": math.nan,
+                "other_ms": math.nan,
+                "solve_total_ms": float(row["solve_ms"]),
+                "initialize_ms": float(row["initialize_ms"]),
+                "linear_solver": row.get("linear_solver", ""),
+                "jacobian": row.get("jacobian", ""),
+                "iterations": math.nan,
+                "converged": True,
+            }
+        )
+    out = pd.DataFrame(rows)
+    for col in ["initialize_ms", "linear_solver", "jacobian"]:
+        if col not in out:
+            out[col] = math.nan if col == "initialize_ms" else ""
+    return out
+
+
+def plot_cpu_reference_vs_cupf(
+    trace: NewtonTrace,
+    summary: pd.DataFrame,
+    ax: Any | None = None,
+    title: str = "CPU reference stages vs cuPF solve totals",
+) -> Any:
+    """Show what is measured directly and what is only a cuPF total."""
+
+    ax = ax or plt.gca()
+    ref = cpu_reference_stage_table(trace).iloc[0]
+    rows = [
+        {
+            "label": "CPU reference\n(pandapower-style)",
+            "Jacobian": ref["jacobian_ms"],
+            "Linear solve": ref["linear_solve_ms"],
+            "Other": ref["other_ms"],
+            "cuPF solve total": 0.0,
+        }
+    ]
+    for _, row in successful_variants(summary).sort_values("solve_ms", ascending=False).iterrows():
+        rows.append(
+            {
+                "label": str(row["variant"]).replace("-pybind", ""),
+                "Jacobian": 0.0,
+                "Linear solve": 0.0,
+                "Other": 0.0,
+                "cuPF solve total": float(row["solve_ms"]),
+            }
+        )
+
+    data = pd.DataFrame(rows)
+    y = np.arange(len(data))
+    left = np.zeros(len(data))
+    colors = {
+        "Jacobian": STAGE_COLORS["Jacobian"],
+        "Linear solve": STAGE_COLORS["Linear solve"],
+        "Other": STAGE_COLORS["Other"],
+        "cuPF solve total": "#1f77b4",
+    }
+    for col in ["Jacobian", "Linear solve", "Other", "cuPF solve total"]:
+        values = data[col].to_numpy(dtype=float)
+        ax.barh(y, values, left=left, label=col, color=colors[col])
+        left += values
+    ax.set_yticks(y)
+    ax.set_yticklabels(data["label"])
+    ax.set_xlabel("ms")
+    ax.set_title(title)
+    ax.legend(frameon=False, fontsize=8)
+    for idx, total in enumerate(left):
+        ax.text(total, idx, f" {total:.1f}", va="center", fontsize=8)
+    return ax
+
+
 def plot_variant_timing(summary: pd.DataFrame, ax: Any | None = None, title: str = "Variant solve time") -> Any:
     """Compare solver variants using the same solve_ms column used by runs.csv."""
 
@@ -1014,7 +1266,6 @@ def solve_case_with_cupf(
     kind: str = "cpu",
     backend: str = "cpu",
     compute: str = "fp64",
-    cpu_jacobian: str = "native",
     cpu_linear_solver: str = "klu",
     cuda_jacobian: str = "edge",
     cuda_linear_solver: str = "cudss",
@@ -1032,11 +1283,6 @@ def solve_case_with_cupf(
         options.compute = cupf.ComputePolicy.FP32
     else:
         options.compute = cupf.ComputePolicy.FP64
-    if hasattr(cupf, "CpuJacobianKind"):
-        options.cpu_jacobian = {
-            "native": cupf.CpuJacobianKind.Native,
-            "pandapower": cupf.CpuJacobianKind.Pandapower,
-        }[cpu_jacobian]
     if hasattr(cupf, "CpuLinearSolverKind"):
         options.cpu_linear_solver = {
             "klu": cupf.CpuLinearSolverKind.KLU,
@@ -1076,6 +1322,291 @@ def solve_case_with_cupf(
         config,
     )
     return result, message
+
+
+def run_cupf_batch_demo(case_name: str = "case9") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run the smallest useful solve_batch example and return result/status tables.
+
+    The notebook keeps the educational API shape visible while this helper
+    absorbs build/import differences across CPU-only and CUDA environments.
+    """
+
+    try:
+        import torch
+
+        has_cuda = bool(torch.cuda.is_available())
+    except Exception:
+        has_cuda = False
+
+    case = load_case(case_name)
+    kind = "gpu" if has_cuda else "cpu"
+    build = build_eval(kind, jobs=2, timeout=3600 if has_cuda else 2400)
+    cupf, import_msg = import_cupf_from_build(kind)
+    status = {
+        "case": case.case_name,
+        "build_kind": kind,
+        "build_status": "ok" if build.ok else "failed",
+        "import_status": import_msg,
+        "note": "",
+    }
+    if cupf is None:
+        status["note"] = "cuPF Python module is unavailable"
+        return pd.DataFrame(), pd.DataFrame([status])
+    if not build.ok:
+        status["note"] = build.tail(8)
+        return pd.DataFrame(), pd.DataFrame([status])
+
+    options = cupf.NewtonOptions()
+    if has_cuda:
+        options.backend = cupf.BackendKind.CUDA
+        options.compute = cupf.ComputePolicy.Mixed
+        scales = np.array([1.00, 1.01, 0.99, 1.02], dtype=np.float64)
+        tolerance = 1e-6
+        status["note"] = "CUDA Mixed path supports batch_size > 1"
+    else:
+        options.backend = cupf.BackendKind.CPU
+        options.compute = cupf.ComputePolicy.FP64
+        options.cpu_linear_solver = cupf.CpuLinearSolverKind.KLU
+        scales = np.array([1.00], dtype=np.float64)
+        tolerance = 1e-8
+        status["note"] = "CPU path is shown with batch_size = 1"
+
+    solver = cupf.NewtonSolver(options)
+    solver.initialize(
+        case.ybus.indptr,
+        case.ybus.indices,
+        case.ybus.data,
+        case.ybus.shape[0],
+        case.ybus.shape[1],
+        case.pv,
+        case.pq,
+    )
+    sbus_batch = np.stack([case.sbus * scale for scale in scales]).astype(np.complex128)
+    v0_batch = np.stack([case.v0 for _ in scales]).astype(np.complex128)
+    config = cupf.NRConfig()
+    config.tolerance = tolerance
+    config.max_iter = 50
+    result = solver.solve_batch(
+        case.ybus.indptr,
+        case.ybus.indices,
+        case.ybus.data,
+        case.ybus.shape[0],
+        case.ybus.shape[1],
+        sbus_batch,
+        v0_batch,
+        case.pv,
+        case.pq,
+        config,
+    )
+    rows = pd.DataFrame(
+        {
+            "scenario": np.arange(result.batch_size),
+            "load_scale": scales,
+            "backend": kind,
+            "compute": "mixed" if has_cuda else "fp64",
+            "tolerance": tolerance,
+            "converged": result.converged_numpy.astype(bool),
+            "iterations": result.iterations_numpy,
+            "final_mismatch": result.final_mismatch_numpy,
+        }
+    )
+    return rows, pd.DataFrame([status])
+
+
+def run_torch_autograd_demo(case_name: str = "case9") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run a tiny differentiable power-flow example when CUDA/Torch are available."""
+
+    status = {"case": case_name, "status": "not_run", "note": ""}
+    try:
+        import torch
+    except Exception as exc:
+        status.update(status="skipped", note=f"torch import failed: {type(exc).__name__}: {exc}")
+        return pd.DataFrame(), pd.DataFrame([status])
+    if not torch.cuda.is_available():
+        status.update(status="skipped", note="Torch CUDA is unavailable")
+        return pd.DataFrame(), pd.DataFrame([status])
+
+    build = build_eval("gpu", jobs=2, timeout=3600)
+    if not build.ok:
+        status.update(status="skipped", note=build.tail(8))
+        return pd.DataFrame(), pd.DataFrame([status])
+    cupf, import_msg = import_cupf_from_build("gpu")
+    if cupf is None:
+        status.update(status="skipped", note=import_msg)
+        return pd.DataFrame(), pd.DataFrame([status])
+    if getattr(cupf, "solve", None) is None or not hasattr(cupf.NewtonSolver, "solve_with_adjoint_cache_torch"):
+        status.update(status="skipped", note="cuPF was built without Torch extension methods")
+        return pd.DataFrame(), pd.DataFrame([status])
+
+    try:
+        case = load_case(case_name)
+        options = cupf.NewtonOptions()
+        options.backend = cupf.BackendKind.CUDA
+        options.compute = cupf.ComputePolicy.Mixed
+        solver = cupf.NewtonSolver(options)
+        solver.initialize(
+            case.ybus.indptr,
+            case.ybus.indices,
+            case.ybus.data,
+            case.ybus.shape[0],
+            case.ybus.shape[1],
+            case.pv,
+            case.pq,
+        )
+        device = torch.device("cuda")
+        dtype = torch.float32
+        load_p = torch.tensor(
+            np.stack([np.zeros(case.ybus.shape[0]), np.full(case.ybus.shape[0], 0.01)]),
+            device=device,
+            dtype=dtype,
+            requires_grad=True,
+        )
+        load_q = torch.zeros_like(load_p, requires_grad=True)
+        sbus_base_re = torch.tensor(case.sbus.real, device=device, dtype=dtype)
+        sbus_base_im = torch.tensor(case.sbus.imag, device=device, dtype=dtype)
+        v0_complex = torch.tensor(case.v0, device=device, dtype=torch.complex64)
+        v0_va = torch.angle(v0_complex).to(dtype)
+        v0_vm = torch.abs(v0_complex).to(dtype)
+        config = cupf.NRConfig()
+        config.tolerance = 1e-6
+        config.max_iter = 30
+        va, vm = cupf.solve(
+            load_p,
+            load_q,
+            solver,
+            sbus_base_re=sbus_base_re,
+            sbus_base_im=sbus_base_im,
+            v0_va=v0_va,
+            v0_vm=v0_vm,
+            config=config,
+            solve_options=cupf.SolveOptions(),
+        )
+        loss = va[:, 1].sum() + vm[:, 1].sum()
+        loss.backward()
+        rows = pd.DataFrame(
+            [
+                {
+                    "va_shape": tuple(va.shape),
+                    "vm_shape": tuple(vm.shape),
+                    "loss": float(loss.detach().cpu()),
+                    "grad_p_finite": bool(torch.isfinite(load_p.grad).all()),
+                    "grad_q_finite": bool(torch.isfinite(load_q.grad).all()),
+                    "grad_p_norm": float(load_p.grad.norm().detach().cpu()),
+                    "grad_q_norm": float(load_q.grad.norm().detach().cpu()),
+                }
+            ]
+        )
+        status.update(status="ok", note="")
+        return rows, pd.DataFrame([status])
+    except Exception as exc:
+        status.update(status="failed", note=f"{type(exc).__name__}: {exc}")
+        return pd.DataFrame(), pd.DataFrame([status])
+
+
+def pandapower_cpp_reference_path() -> Path:
+    """Location of the tutorial-only C++ Newton-Raphson reference."""
+
+    return Path(__file__).resolve().parent / "cpp" / "pandapower_jacobian_reference.cpp"
+
+
+def pandapower_cpp_reference_binary_path() -> Path:
+    """Build output path for the tutorial-only C++ Newton-Raphson reference."""
+
+    return tutorial_output_root() / "cpp-build" / "pandapower_jacobian_reference"
+
+
+def extract_cpp_symbol(path: str | Path, symbol: str) -> str:
+    """Extract one C++ function/block so notebooks can discuss real source code."""
+
+    text = Path(path).read_text(encoding="utf-8")
+    start = text.find(symbol)
+    if start < 0:
+        raise ValueError(f"{symbol!r} was not found in {path}")
+    brace = text.find("{", start)
+    if brace < 0:
+        raise ValueError(f"{symbol!r} has no opening brace in {path}")
+
+    depth = 0
+    for pos in range(brace, len(text)):
+        if text[pos] == "{":
+            depth += 1
+        elif text[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                end = pos + 1
+                while end < len(text) and text[end] in " \t\r\n;":
+                    end += 1
+                return text[start:end]
+    raise ValueError(f"{symbol!r} has no matching closing brace in {path}")
+
+
+def extract_text_between(path: str | Path, start: str, end: str) -> str:
+    """Extract a short source excerpt bounded by two literal snippets."""
+
+    text = Path(path).read_text(encoding="utf-8")
+    begin = text.find(start)
+    if begin < 0:
+        raise ValueError(f"start marker was not found in {path}: {start!r}")
+    finish = text.find(end, begin)
+    if finish < 0:
+        raise ValueError(f"end marker was not found in {path}: {end!r}")
+    return text[begin:finish].strip()
+
+
+def three_bus_jacobian_mapping_demo() -> pd.DataFrame:
+    """Show how a tiny PV/PQ system maps Ybus entries to reduced J blocks."""
+
+    pv = [1]
+    pq = [2]
+    pvpq = pv + pq
+    pvpq_pos = {bus: pos for pos, bus in enumerate(pvpq)}
+    pq_pos = {bus: pos for pos, bus in enumerate(pq)}
+    entries = [(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (2, 1), (2, 2)]
+    rows: list[dict[str, Any]] = []
+
+    def add(row_bus: int, col_bus: int, block: str, row: int, col: int, meaning: str) -> None:
+        rows.append(
+            {
+                "Ybus entry": f"({row_bus}, {col_bus})",
+                "block": block,
+                "J row": row,
+                "J col": col,
+                "meaning": meaning,
+            }
+        )
+
+    for row_bus, col_bus in entries:
+        if row_bus in pvpq_pos and col_bus in pvpq_pos:
+            add(row_bus, col_bus, "J11", pvpq_pos[row_bus], pvpq_pos[col_bus], "dP/dVa")
+        if row_bus in pvpq_pos and col_bus in pq_pos:
+            add(row_bus, col_bus, "J12", pvpq_pos[row_bus], len(pvpq) + pq_pos[col_bus], "dP/dVm")
+        if row_bus in pq_pos and col_bus in pvpq_pos:
+            add(row_bus, col_bus, "J21", len(pvpq) + pq_pos[row_bus], pvpq_pos[col_bus], "dQ/dVa")
+        if row_bus in pq_pos and col_bus in pq_pos:
+            add(row_bus, col_bus, "J22", len(pvpq) + pq_pos[row_bus], len(pvpq) + pq_pos[col_bus], "dQ/dVm")
+
+    return pd.DataFrame(rows)
+
+
+def build_pandapower_cpp_reference(*, timeout: int | None = 60) -> CommandResult:
+    """Compile the tutorial-only C++ Newton-Raphson reference."""
+
+    source = pandapower_cpp_reference_path()
+    binary = pandapower_cpp_reference_binary_path()
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    return run_shell_command(
+        [
+            "g++",
+            "-std=c++17",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            str(source),
+            "-o",
+            str(binary),
+        ],
+        timeout=timeout,
+    )
 
 
 def print_environment_note() -> str:

@@ -41,10 +41,6 @@ def _cupf_options(cupf: Any, variant: dict[str, Any]) -> Any:
         "fp32": cupf.ComputePolicy.FP32,
         "mixed": cupf.ComputePolicy.Mixed,
     }[variant["compute"]]
-    opts.cpu_jacobian = {
-        "native": cupf.CpuJacobianKind.Native,
-        "pandapower": cupf.CpuJacobianKind.Pandapower,
-    }[variant.get("cpu_jacobian", "native")]
     opts.cpu_linear_solver = {
         "klu": cupf.CpuLinearSolverKind.KLU,
         "umfpack": cupf.CpuLinearSolverKind.UMFPACK,

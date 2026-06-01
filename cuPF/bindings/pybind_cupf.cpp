@@ -161,12 +161,6 @@ PYBIND11_MODULE(_cupf, m)
         .value("Custom", CudaLinearSolverKind::Custom)
         .export_values();
 
-    py::enum_<CpuJacobianKind>(m, "CpuJacobianKind",
-        "CPU Jacobian fill algorithm.")
-        .value("Native", CpuJacobianKind::Native)
-        .value("Pandapower", CpuJacobianKind::Pandapower)
-        .export_values();
-
     py::enum_<CpuLinearSolverKind>(m, "CpuLinearSolverKind",
         "CPU sparse linear solver backend.")
         .value("KLU", CpuLinearSolverKind::KLU)
@@ -230,8 +224,6 @@ PYBIND11_MODULE(_cupf, m)
             "연산 백엔드 (BackendKind.CPU 또는 BackendKind.CUDA)")
         .def_readwrite("compute", &NewtonOptions::compute,
             "내부 계산 정밀도 정책 (ComputePolicy.FP64, ComputePolicy.FP32 또는 ComputePolicy.Mixed)")
-        .def_readwrite("cpu_jacobian", &NewtonOptions::cpu_jacobian,
-            "CPU Jacobian fill algorithm (CpuJacobianKind.Native 또는 Pandapower)")
         .def_readwrite("cpu_linear_solver", &NewtonOptions::cpu_linear_solver,
             "CPU sparse linear solver backend (CpuLinearSolverKind.KLU 또는 UMFPACK)")
         .def_readwrite("cuda_jacobian", &NewtonOptions::cuda_jacobian,
