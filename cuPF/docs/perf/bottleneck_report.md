@@ -107,22 +107,23 @@
 - **결론**: 현재 mid-iteration sync는 합리적 설계. launch 오버헤드를 줄이려면 early-exit를 유지한 채
   **CUDA graph로 반복을 캡처**하는 별도 작업이 필요(범위 큼). 단순 sync 완화는 권장하지 않음.
 
-### P4b. CUDA Graph 반복 캡처 (옵션) — 타당성 검증됨
-- **실험(perf/cudss_capture_probe.cu)**: cuDSS의 `REFACTORIZATION + SOLVE`가 **stream capture
-  가능**함을 확인(노드 19개 캡처, 그래프 재생 결과 정확). 즉 cuDSS를 그래프 밖으로 뺄 필요 없이
-  반복 본체를 통째로 캡처 가능.
-- **설계(옵션, 기본 off, 빌드 플래그 `CUPF_ENABLE_CUDA_GRAPH` + 비-timing 빌드 전제)**: early-exit를
-  유지하기 위해 그래프를 둘로 나눈다 —
-  - `graph_pre` = ibus → mismatch → norm-reduce (수렴 판정 입력 생성), 이후 host에서 norm sync+check.
-  - `graph_post` = jacobian → prepare_rhs → factorize/refactorize → solve → voltage_update (cuDSS 포함).
-  - factorize 위상(첫 iter=FACTORIZATION vs 이후=REFACTORIZATION)이 다르므로 iter0은 eager 실행 후
-    iter1에서 `graph_post`를 lazy 캡처하여 iter2+ 재생.
-- **제약/wrinkle**: (1) 캡처 중 `cudaDeviceSynchronize` 금지 → timing 빌드(ENABLE_TIMING)와 norm의
-  `copyTo` sync는 캡처 구간 밖이어야 함(그래서 pre/post 분리, norm sync는 eager). (2) **non-default
-  stream 필수**(legacy default stream은 캡처 불가) → 기능 on시 전용 스트림 생성. (3) Jacobian 패턴/배치
-  shape 변경 시 그래프 재캡처.
-- **기대효과**: 작은 커널들(ibus/jacobian/voltage 등)의 **launch 오버헤드 제거** → 소형 케이스·소배치에
-  유효. 대형/대배치는 cuDSS 연산이 지배적이라(그래프는 cuDSS 연산 자체를 가속하지 않음) 효과는 작음.
+### P4b. CUDA Graph 반복 캡처 (옵션) — **시도했으나 cuDSS가 막음 (미채택)**
+- **격리 probe(perf/cudss_capture_probe.cu)**: 고정 값의 3x3에서 cuDSS `REFACTORIZATION + SOLVE`가
+  stream capture+재생 성공(노드 19개, 결과 정확) → 처음엔 타당해 보였음.
+- **그러나 실제 NR 루프에 통합하니 실패**: `graph_post`(jacobian→…→factorize→solve→voltage_update)를
+  iter1(REFACTORIZATION 위상)에서 캡처하면 `cudssExecute`가 **CUDSS_STATUS_EXECUTION_FAILED(5)**.
+  (graph off 경로는 동일 케이스 정상 수렴.) 빌드 옵션 `CUPF_ENABLE_CUDA_GRAPH` + 비-timing + 전용
+  스트림 + pre/post 분리 + lazy 캡처까지 구현해 실측한 결과다.
+- **원인 분석**: probe는 값이 고정·사전 설정된 상태였다. 실제 NR은 매 iter `jacobian`이 `d_J_values`를
+  갱신하고 그 직후 cuDSS가 refactorize한다. cuDSS refactorization은 **호출 시점에 행렬 값을 참조**(피벗/
+  스케일 판단)하는데, stream capture는 *기록*만 하고 값은 아직 계산되지 않으므로 capture와 본질적으로
+  충돌 → EXECUTION_FAILED. 즉 **값이 매 스텝 바뀌는 반복 솔버에서 cuDSS factorize를 그래프에 넣는 것은
+  불가**.
+- **cuDSS를 그래프에서 빼면?** 캡처 가능한 건 jacobian·voltage_update 정도(커널 2~3개)뿐이라 절감되는
+  launch가 미미하고(대형/대배치는 어차피 cuDSS 지배), 분할 복잡도 대비 실익이 없다.
+- **결론**: 켜면 크래시하는 미완 기능을 남기지 않도록 **구현은 되돌렸다(미채택)**. probe와 본 분석만
+  유지. 진짜로 하려면 (a) cuDSS 없이 그래프화 가능한 자체 선형솔버이거나, (b) cuDSS가 capture-safe
+  refactorization을 지원해야 한다. 현 시점에선 **권장하지 않음**.
 
 ### P5. ibus SpMV — lane 활용도 낭비 (구현)
 - `compute_ibus.cu` 커널은 **row당 32-lane warp**로 누적하는데, 전력망 평균 차수는 **~3.5–4
@@ -152,14 +153,15 @@
 | **P1 자코비안 지연 갱신(jacobian_age 활용)** | 큰 (factorize 호출 수↓) | 중 | 보류 (알고리즘 수정, 사용자 요청으로 연기) |
 | P2 전송 디바이스화 | 큰(대배치) | 중 | **적용 완료** (commit 3b955c0) |
 | P3 per-case 수렴 마스크 | 큰(이종 배치) | 중상 | 보류 |
-| P4 동기화 완화 / CUDA graph | 소 (대케이스), 중(소) | 중상 | **보류 (구현 안 함)** — §3 P4 참조: sync가 early-exit를 보장 |
+| P4 동기화 완화 | 소 (대케이스), 중(소) | 중상 | **보류** — §3 P4: sync가 early-exit 보장 |
+| P4b CUDA Graph 반복 캡처 | 소(대형은 cuDSS 지배) | 상 | **미채택** — §3 P4b: cuDSS가 capture에서 EXECUTION_FAILED |
 | P5 ibus SpMV scalar화 | 중(대배치) | 중 | **적용 완료** (commit 90de5fe) |
 | P6 FP64 jacobian 캐시 ibus | 소 | 하 | **적용 완료** (commit 7856063) |
-| P7 norm 멀티블록 리덕션 | 소 | 하 | 미적용 (선택) |
+| P7 norm 멀티블록 리덕션 | 소(단일/대형) | 하 | **적용 완료** (commit c711ede) |
 
 ---
 
-## 5. 구현 결과 (P2 / P5 / P6 적용)
+## 5. 구현 결과 (P2 / P5 / P6 / P7 적용)
 
 모두 매 변경마다 **WITH_CUDA=ON 빌드 + 수렴 정확도 + stage timing** 검증. 동작/수치 동일.
 
@@ -173,6 +175,7 @@
 | P5 | ibus stage (case9241, FP64 단일) | 192us | 144us | 1.3× |
 | P2 | upload (case2869, Mixed, B=256) | 20,728us | 2,521us | 8.2× |
 | P2 | download (case2869, Mixed, B=256) | 20,094us | 2,445us | 8.2× |
+| P7 | mismatch_norm (case9241, FP64 단일) | 187us | 102us | 1.8× |
 
 ### 누적 (case2869, Mixed, solve_total)
 
