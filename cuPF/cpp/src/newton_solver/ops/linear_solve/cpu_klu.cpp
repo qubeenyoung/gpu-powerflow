@@ -67,6 +67,8 @@ void CpuLinearSolveKLU::release()
 }
 
 
+// One-time KLU symbolic analysis: ordering + symbolic factorization that
+// depend only on the Jacobian sparsity, so it is reused across iterations.
 void CpuLinearSolveKLU::initialize(CpuFp64Storage& buf, const InitializeContext& ctx)
 {
     (void)ctx;
@@ -81,6 +83,8 @@ void CpuLinearSolveKLU::initialize(CpuFp64Storage& buf, const InitializeContext&
         throw std::runtime_error("CpuLinearSolveKLU::initialize: Jacobian must be compressed CSC");
     }
 
+    // const_cast: KLU's C API takes non-const pointers but only reads the
+    // pattern here; the Eigen-owned arrays are not modified.
     release();
     klu_defaults(&common_);
     symbolic_ = klu_analyze(
@@ -95,6 +99,7 @@ void CpuLinearSolveKLU::initialize(CpuFp64Storage& buf, const InitializeContext&
 }
 
 
+// No-op for KLU: the solve reads buf.F directly, so nothing to stage here.
 void CpuLinearSolveKLU::prepare_rhs(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)buf;
@@ -102,6 +107,8 @@ void CpuLinearSolveKLU::prepare_rhs(CpuFp64Storage& buf, IterationContext& ctx)
 }
 
 
+// Numeric factorization for the current Jacobian values, reusing the symbolic
+// analysis from initialize(). Re-run every iteration as J changes.
 void CpuLinearSolveKLU::factorize(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
@@ -135,6 +142,8 @@ void CpuLinearSolveKLU::factorize(CpuFp64Storage& buf, IterationContext& ctx)
 }
 
 
+// Forward solve J dx = F. klu_solve works in place, so F is copied into dx
+// first and overwritten with the solution.
 void CpuLinearSolveKLU::solve(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
@@ -152,6 +161,9 @@ void CpuLinearSolveKLU::solve(CpuFp64Storage& buf, IterationContext& ctx)
 }
 
 
+// Transpose solve J^T x = rhs via klu_tsolve, reusing the SAME cached LU as the
+// forward solve. This native transpose capability is why the CPU/KLU adjoint
+// path needs no explicit J^T (unlike the cuDSS backend).
 void CpuLinearSolveKLU::solve_transpose(const double* rhs,
                                         double* solution,
                                         int32_t dim,
