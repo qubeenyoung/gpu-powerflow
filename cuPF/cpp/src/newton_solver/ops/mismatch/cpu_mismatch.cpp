@@ -11,6 +11,9 @@
 #include <stdexcept>
 
 
+// Power-flow residual F from the complex power mismatch S(V) - Sbus. Packed in
+// the dimF order [ dP@pv | dP@pq | dQ@pq ]: real parts (active power) for pv+pq
+// buses, then imaginary parts (reactive power) for pq buses.
 void CpuMismatchOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     if (buf.n_bus <= 0 || buf.dimF <= 0) {
@@ -36,12 +39,14 @@ void CpuMismatchOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 }
 
 
+// Infinity-norm of the residual; sets the convergence flag against tolerance.
 void CpuMismatchNormOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     if (buf.dimF <= 0 || buf.F.empty()) {
         throw std::runtime_error("CpuMismatchNormOp::run: buffers are not prepared");
     }
 
+    // max |F_i| over all residual entries.
     ctx.normF = 0.0;
     for (double value : buf.F) {
         ctx.normF = std::max(ctx.normF, std::abs(value));

@@ -35,6 +35,9 @@ __global__ void compute_mismatch_from_ibus_kernel(
     const int32_t* __restrict__ pq,
     Scalar* __restrict__ F)
 {
+    // One thread per residual entry. Map the entry to its (case, bus) and pick
+    // the real (active power) or imaginary (reactive power) part by F's layout:
+    // [ dP@pv | dP@pq | dQ@pq ] (matches the CPU mismatch ordering).
     const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= total_entries) {
         return;
@@ -46,14 +49,15 @@ __global__ void compute_mismatch_from_ibus_kernel(
     int32_t bus = 0;
     bool take_imag = false;
     if (local < n_pv) {
-        bus = pv[local];
+        bus = pv[local];                     // dP at a pv bus
     } else if (local < n_pv + n_pq) {
-        bus = pq[local - n_pv];
+        bus = pq[local - n_pv];              // dP at a pq bus
     } else {
-        bus = pq[local - n_pv - n_pq];
+        bus = pq[local - n_pv - n_pq];       // dQ at a pq bus
         take_imag = true;
     }
 
+    // Complex power mismatch S(V) - Sbus = V * conj(Ibus) - Sbus.
     const int32_t bus_idx = batch * n_bus + bus;
     const Scalar vr = v_re[bus_idx];
     const Scalar vi = v_im[bus_idx];

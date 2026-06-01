@@ -1,3 +1,13 @@
+// ---------------------------------------------------------------------------
+// cuda_mismatch.cu
+//
+// CUDA dispatch for the mismatch and mismatch-norm NR stages. The actual
+// kernels live in compute_mismatch_from_ibus.cu and reduce_mismatch_norm.cu;
+// these Op::run overloads validate state, launch them, and (for the norm) pull
+// the result to host and set the convergence flag. The convergence norm is the
+// infinity-norm of the residual, reduced across the batch.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_mismatch.hpp"
@@ -90,12 +100,13 @@ void CudaMismatchNormOp<CudaFp32Storage>::run(CudaFp32Storage& buf, IterationCon
 
     launch_reduce_mismatch_norm(buf);
 
+    // Per-case norms reduced on device; take the worst case as the batch norm.
     std::vector<float> h_norm(buf.batch_size);
     buf.d_normF.copyTo(h_norm.data(), h_norm.size());
 
     ctx.normF = 0.0;
     for (float v : h_norm) {
-        ctx.normF = std::max(ctx.normF, static_cast<double>(v));
+        ctx.normF = std::max(ctx.normF, static_cast<double>(v));  // widen for the host max
     }
 
     if (!std::isfinite(ctx.normF)) {

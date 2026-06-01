@@ -19,6 +19,10 @@
 
 namespace {
 
+// Ibus = Ybus * V (complex), one Ybus row per block-x. LANES threads cooperate
+// on a row's nonzeros, and BTILE batch cases are tiled along block-y/thread-y.
+// Accumulation runs in AccumScalar; static_cast loads/stores bridge the Ybus,
+// state, and accumulation precisions.
 template <int32_t LANES, int32_t BTILE,
           typename YbusScalar, typename StateScalar, typename AccumScalar>
 __global__ void compute_ibus_kernel(
@@ -39,8 +43,9 @@ __global__ void compute_ibus_kernel(
     const int32_t batch = blockIdx.y * BTILE + tb;
     if (row >= n_bus || batch >= batch_count) return;
 
-    const int32_t base = batch * n_bus;
+    const int32_t base = batch * n_bus;   // start of this case's bus block
 
+    // Each lane strides over the row's nonzeros, accumulating a partial dot.
     AccumScalar acc_re = AccumScalar(0);
     AccumScalar acc_im = AccumScalar(0);
     for (int32_t k = y_row_ptr[row] + lane; k < y_row_ptr[row + 1]; k += LANES) {
@@ -53,7 +58,7 @@ __global__ void compute_ibus_kernel(
         acc_im += yr * vi + yi * vr;
     }
 
-    const int32_t linear_lane = tb * LANES + lane;
+    // Warp-shuffle reduction across the LANES partials; lane 0 holds the sum.
     const uint32_t mask = 0xffffffffu;
     for (int32_t offset = LANES / 2; offset > 0; offset >>= 1) {
         acc_re += __shfl_down_sync(mask, acc_re, offset, LANES);
@@ -64,12 +69,12 @@ __global__ void compute_ibus_kernel(
         ibus_re[base + row] = static_cast<StateScalar>(acc_re);
         ibus_im[base + row] = static_cast<StateScalar>(acc_im);
     }
-    (void)linear_lane;
 }
 
 }  // namespace
 
 
+// FP64: single case (BTILE=1), one warp (32 lanes) per Ybus row.
 void launch_compute_ibus(CudaFp64Storage& buf)
 {
     if (buf.n_bus <= 0 || buf.d_Ybus_re.empty()) {
@@ -97,6 +102,8 @@ void launch_compute_ibus(CudaFp64Storage& buf)
 }
 
 
+// FP32: batched (BTILE=8 cases per block). Requires a single shared Ybus
+// (per-case batched Ybus values are not supported by the tiled kernel).
 void launch_compute_ibus(CudaFp32Storage& buf)
 {
     if (buf.n_bus <= 0 || buf.nnz_ybus <= 0 || buf.batch_size <= 0) {
@@ -127,6 +134,7 @@ void launch_compute_ibus(CudaFp32Storage& buf)
 }
 
 
+// Mixed: like FP32 batching but accumulates in FP64 (double scalars).
 void launch_compute_ibus(CudaMixedStorage& buf)
 {
     if (buf.n_bus <= 0 || buf.nnz_ybus <= 0 || buf.batch_size <= 0) {
