@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case9Q",
+  "n_bus": 9,
+  "n_pq": 6,
+  "n_pv": 2,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 5.5067062021407764e-14,
+  "reference_iterations": 4,
+  "source_path": "/datasets/matpower/raw/case9Q.m",
+  "ybus_nnz": 27
+}

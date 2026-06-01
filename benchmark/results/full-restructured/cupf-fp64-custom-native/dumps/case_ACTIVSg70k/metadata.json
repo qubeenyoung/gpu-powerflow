@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case_ACTIVSg70k",
+  "n_bus": 70000,
+  "n_pq": 62919,
+  "n_pv": 7080,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 4.71467960066872e-11,
+  "reference_iterations": 6,
+  "source_path": "/datasets/matpower/raw/case_ACTIVSg70k.m",
+  "ybus_nnz": 236636
+}

@@ -29,12 +29,12 @@ python3 -m python.converters.convert_m_to_mat \
   --input-root /datasets/matpower \
   --output-root /datasets/matpower_mat
 
-python3 -m python.converters.convert_mat_to_cupf_input \
-  --input-root /datasets/matpower_mat \
-  --output-root /datasets/matpower_cupf
+python3 -m python.tests.prepare \
+  --dataset-root /datasets/matpower \
+  --dump-root /datasets/matpower_cupf
 
-python3 -m python.converters.convert_mat_to_linear_system \
-  --input-root /datasets/matpower_mat \
+python3 -m python.tests.convert_linear_system \
+  --dataset-root /datasets/matpower \
   --output-root /datasets/matpower_linear_systems
 
 cmake -S custom_linear_solver -B build/custom_linear_solver \

@@ -1,0 +1,13 @@
+{
+  "base_mva": 1.0,
+  "case_name": "case34sa",
+  "n_bus": 34,
+  "n_pq": 33,
+  "n_pv": 0,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 6.536854391114844e-13,
+  "reference_iterations": 4,
+  "source_path": "/datasets/matpower/raw/case34sa.m",
+  "ybus_nnz": 100
+}

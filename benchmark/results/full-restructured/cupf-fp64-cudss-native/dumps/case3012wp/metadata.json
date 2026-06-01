@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case3012wp",
+  "n_bus": 3012,
+  "n_pq": 2665,
+  "n_pv": 346,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 8.250117347763097e-12,
+  "reference_iterations": 3,
+  "source_path": "/datasets/matpower/raw/case3012wp.m",
+  "ybus_nnz": 10144
+}

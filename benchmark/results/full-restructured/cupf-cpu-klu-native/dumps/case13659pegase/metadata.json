@@ -1,0 +1,13 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case13659pegase",
+  "n_bus": 13659,
+  "n_pq": 9567,
+  "n_pv": 4091,
+  "n_ref": 1,
+  "reference_converged": true,
+  "reference_final_mismatch": 8.30091551051737e-12,
+  "reference_iterations": 6,
+  "source_path": "/datasets/matpower/raw/case13659pegase.m",
+  "ybus_nnz": 50909
+}

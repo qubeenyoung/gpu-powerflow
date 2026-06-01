@@ -1,0 +1,13 @@
+{
+  "base_mva": 10.0,
+  "case_name": "case141",
+  "n_bus": 141,
+  "n_pq": 140,
+  "n_pv": 0,
+  "n_ref": 1,
+  "reference_converged": false,
+  "reference_final_mismatch": 3.8469571625454613e-10,
+  "reference_iterations": 80,
+  "source_path": "/datasets/matpower/raw/case141.m",
+  "ybus_nnz": 421
+}

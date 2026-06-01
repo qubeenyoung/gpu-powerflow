@@ -2,6 +2,11 @@
 build/
 build_*/
 
+# Local secrets / environment overrides
+.env
+.env.*
+!.env.example
+
 # Datasets (too large for git)
 datasets/
 
@@ -33,7 +38,6 @@ dump_*.txt
 # Profiling
 *.ncu-rep
 *.nsys-rep
-*.csv
 
 # Logs
 *.log
@@ -41,6 +45,7 @@ dump_*.txt
 # Temp
 tmp/
 runs/
+python/tutorial/_runs/
 
 # OS
 .DS_Store
