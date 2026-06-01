@@ -16,6 +16,23 @@ namespace cls = custom_linear_solver;
 namespace scripts = custom_linear_solver::scripts;
 namespace fs = std::filesystem;
 
+// FP64 CSR residual r = rhs - A*x and y += x, for iterative-refinement experiments.
+__global__ void spmv_residual(int n, const int* __restrict__ row_ptr, const int* __restrict__ col,
+                              const double* __restrict__ val, const double* __restrict__ x,
+                              const double* __restrict__ rhs, double* __restrict__ r)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    double ax = 0.0;
+    for (int p = row_ptr[i]; p < row_ptr[i + 1]; ++p) ax += val[p] * x[col[p]];
+    r[i] = rhs[i] - ax;
+}
+__global__ void axpy_inplace(int n, const double* __restrict__ dx, double* __restrict__ x)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] += dx[i];
+}
+
 namespace {
 
 struct Options {
@@ -24,6 +41,7 @@ struct Options {
     fs::path solution_out;
     bool write_solution = false;
     int repeat = 1;
+    int ir = 0;  // iterative-refinement steps after the solve (low-precision-solve correction)
 };
 
 template <typename T>
@@ -121,6 +139,9 @@ Options parse_args(int argc, char** argv)
             if (++i >= argc) throw std::runtime_error("--repeat requires a count");
             options.repeat = std::stoi(argv[i]);
             if (options.repeat <= 0) throw std::runtime_error("--repeat must be positive");
+        } else if (arg == "--ir") {
+            if (++i >= argc) throw std::runtime_error("--ir requires a count");
+            options.ir = std::stoi(argv[i]);
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -284,6 +305,37 @@ int main(int argc, char** argv)
         }
         const auto t_solve = std::chrono::steady_clock::now();
 
+        // Iterative refinement (optional): correct the (possibly low-precision) solve in FP64.
+        // r = rhs - A x  (FP64 spmv); dx = solve(r) (reuses the existing factor); x += dx.
+        double ir_ms = 0.0;
+        if (options.ir > 0) {
+            const int n = matrix.rows;
+            const int T = 256, nb = (n + T - 1) / T;
+            DeviceBuffer<double> d_r, d_dx;
+            d_r.allocate(static_cast<std::size_t>(n));
+            d_dx.allocate(static_cast<std::size_t>(n));
+            cls::DenseVectorView rview;
+            rview.size = n; rview.location = cls::DataLocation::Device; rview.values = d_r.get();
+            cls::DenseVectorView dxview;
+            dxview.size = n; dxview.location = cls::DataLocation::Device; dxview.values = d_dx.get();
+            cuda_check(cudaDeviceSynchronize(), "sync before IR");
+            const auto ir0 = std::chrono::steady_clock::now();
+            for (int step = 0; step < options.ir; ++step) {
+                spmv_residual<<<nb, T>>>(n, d_row_ptr.get(), d_col_idx.get(), d_values.get(),
+                                         d_solution.get(), d_rhs.get(), d_r.get());
+                require_success(solver.set_rhs(rview), "set_rhs(ir)");
+                require_success(solver.set_solution(dxview), "set_solution(ir)");
+                require_success(solver.solve(), "solve(ir)");
+                axpy_inplace<<<nb, T>>>(n, d_dx.get(), d_solution.get());
+            }
+            cuda_check(cudaDeviceSynchronize(), "sync after IR");
+            ir_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - ir0).count();
+            // restore original rhs/solution registration for any later use
+            require_success(solver.set_rhs(rhs_view), "set_rhs(restore)");
+            require_success(solver.set_solution(solution_view), "set_solution(restore)");
+        }
+
         std::vector<double> solution = d_solution.download();
         const ResidualStats stats = residual(matrix, rhs.values, solution);
         if (options.write_solution) {
@@ -308,6 +360,11 @@ int main(int argc, char** argv)
         if (kernel_time) {
             std::cout << "factorize_kernel_ms=" << median(factor_kms) << '\n'
                       << "solve_kernel_ms=" << median(solve_kms) << '\n';
+        }
+        if (options.ir > 0) {
+            std::cout << "ir_steps=" << options.ir << '\n'
+                      << "ir_total_ms=" << ir_ms << '\n'
+                      << "solve_plus_ir_ms=" << (median(solve_ms) + ir_ms) << '\n';
         }
         std::cout
                   << "download_check_ms=" << ms(t_solve, t_done) << '\n'

@@ -91,8 +91,36 @@ level-set) enlarges the separators → more fill → it would *regress* factoriz
 which are the other two targets. Quality-preserving GPU ND with FM refinement is a larger
 effort than the session budget. It is the clear next step for the large-case analyze goal.
 
+## Tensor cores and iterative refinement (requested — measured, do not fit this workload)
+
+**Tensor cores.** GA102 has no FP64 tensor cores, so tensor-core use means FP16/TF32. But the
+factor is not arithmetic-bound: the 70k dense factor work is ~0.08 GFLOP, whose FP64 compute
+floor is ~166 µs — only **~6%** of the 2.76 ms factor wall (FP32 floor ~2 µs, FP16-TC ~0.6 µs).
+The other ~94% is kernel-launch and per-level `__syncthreads`/graph-node latency across the deep
+etree of tiny fronts (96% of fronts are fsz≤16). Tensor cores accelerate only the ~6% that is
+arithmetic, so they cannot approach a 30% factor cut here. (They would matter on dense or
+large-front problems; power-grid multifrontal fronts are too small and too many.)
+
+**Iterative refinement (low-precision solve, then correct).** Implemented in the runner
+(`--ir N`: `r = b − A x` in FP64, `dx = solve(r)`, `x += dx`). Measured FP32-solve + 1 IR step:
+
+| case | FP64 solve | FP32 solve | FP32 + 1·IR (solve+ir = total) | relres after IR |
+|------|-----------|-----------|--------------------------------|-----------------|
+| 9241 | 0.382 ms  | 0.343 ms  | 0.321 + 0.393 = **0.714 ms**   | 2.1e-10 |
+| 25k  | 0.621 ms  | 0.655 ms  | 0.641 + 0.703 = **1.34 ms**    | 5.0e-9  |
+| 70k  | 1.156 ms  | 1.337 ms  | 1.302 + 1.408 = **2.71 ms**    | 1.2e-10 |
+
+IR **recovers accuracy** (relres → 1e-9..1e-10), confirming the technique is correct. But one IR
+step costs ≈ one extra solve + an spmv, and the low-precision solve is **not** faster here (solve
+is latency-bound, not bandwidth-bound), so FP32-solve + IR is ~2× slower than a plain FP64 solve.
+IR pays off when the low-precision factor/solve it enables is much cheaper than high precision —
+which holds on compute-bound dense problems, not on these latency-bound sparse power-grid fronts.
+Where low precision *does* help (small/medium factor) the result already passes 1e-3 without IR,
+so no refinement is needed.
+
 ## Diagnostic env knobs added
 
 `CLS_KERNEL_TIME` (runner: factor/solve kernel vs wall), `CLS_FACTOR_SPLIT` (memset/scatter/
 graph), `FILL_TIME` (postorder/column_counts/merge), `PARND_PROF` (root separator/induce),
-`METIS_NITER`, `MF_MIXED`/`MF_NO_MIXED`.
+`PARND_TOPIND` (top-level parallel-induce cutoff), `METIS_NITER`, `MF_MIXED`/`MF_NO_MIXED`,
+`MF_SOLVE_F32`. Runner `--ir N` runs N FP64 iterative-refinement steps after the solve.
