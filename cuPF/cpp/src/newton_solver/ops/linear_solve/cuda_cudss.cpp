@@ -404,13 +404,15 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
         sync_cuda_for_timing();
         state_->adjoint_analysis_done = true;
     }
+    
     const bool is_refactorization = state_->adjoint_factorized;
     const int phase = is_refactorization ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
     set_cudss_stream(state_->handle);
     CUDSS_CHECK(cudssExecute(
         state_->handle, phase,
         state_->config, state_->data,
-        state_->adjoint_matrix, state_->adjoint_solution_matrix, state_->adjoint_rhs_matrix));
+        state_->adjoint_matrix, state_->adjoint_solution_matrix, state_->adjoint_rhs_matrix
+    ));
     sync_cuda_for_timing();
     state_->adjoint_factorized = true;
     factorization_time_ms = elapsed_ms(start, Clock::now());
