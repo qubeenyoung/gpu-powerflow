@@ -11,7 +11,7 @@ ignored by git.
 
 1. `01_power_system_basics_case9.ipynb`
    Turns the physical grid into `Ybus`, `Sbus`, `V`, and the nonlinear equation
-   `S_spec - S_calc(V) = 0`.
+   `S_calc(V) - S_spec = 0`.
 2. `02_newton_raphson_and_jacobian.ipynb`
    Opens one Newton step on `case9`: mismatch, Jacobian blocks, sparse solve,
    and voltage update.

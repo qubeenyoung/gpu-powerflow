@@ -102,6 +102,7 @@ class NewtonStepSnapshot:
     dx: np.ndarray
     next_voltage: np.ndarray
     pvpq: np.ndarray
+    pq: np.ndarray
 
 
 def repo_root() -> Path:
@@ -579,12 +580,12 @@ def mismatch_vector(case: matpower_data.PreprocessedCase, voltage: np.ndarray) -
 
 
 def power_flow_snapshot(case: matpower_data.PreprocessedCase, voltage: np.ndarray) -> PowerFlowSnapshot:
-    """Evaluate S_calc(V) and the reduced Newton mismatch at one voltage."""
+    """Evaluate S_calc(V) and the MATPOWER-style mismatch at one voltage."""
 
     voltage = np.asarray(voltage, dtype=np.complex128)
     ibus = case.ybus @ voltage
     s_calc = voltage * np.conj(ibus)
-    mismatch_complex = case.sbus - s_calc
+    mismatch_complex = s_calc - case.sbus
     return PowerFlowSnapshot(
         voltage=voltage,
         ibus=np.asarray(ibus).reshape(-1),
@@ -657,7 +658,7 @@ def newton_step_snapshot(case: matpower_data.PreprocessedCase, voltage: np.ndarr
     va[pvpq] += dx[:n_pvpq]
     vm[case.pq] += dx[n_pvpq:]
     next_voltage = vm * np.exp(1j * va)
-    return NewtonStepSnapshot(voltage, mismatch, jac, dx, next_voltage, pvpq)
+    return NewtonStepSnapshot(voltage, mismatch, jac, dx, next_voltage, pvpq, case.pq.copy())
 
 
 def newton_step_table(step: NewtonStepSnapshot, limit: int = 12) -> pd.DataFrame:
@@ -670,7 +671,7 @@ def newton_step_table(step: NewtonStepSnapshot, limit: int = 12) -> pd.DataFrame
             name = f"Va[{int(step.pvpq[idx]) + 1}]"
         else:
             pq_idx = idx - n_angle
-            name = f"Vm(PQ position {int(pq_idx) + 1})"
+            name = f"Vm[{int(step.pq[pq_idx]) + 1}]"
         rows.append({"unknown": name, "dx": value})
     return pd.DataFrame(rows)
 
