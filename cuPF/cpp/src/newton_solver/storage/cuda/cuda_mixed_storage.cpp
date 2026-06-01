@@ -1,6 +1,8 @@
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_mixed_storage.hpp"
+#include "newton_solver/storage/cuda/storage_convert.hpp"
+#include "utils/cuda_utils.hpp"
 
 #include <cmath>
 #include <complex>
@@ -207,28 +209,48 @@ void CudaMixedStorage::upload(const SolveContext& ctx)
 
     upload_ybus_components(d_Ybus_re, d_Ybus_im, ybus.data,
                            ybus.nnz, batch_size, ctx.ybus_value_stride, ybus_values_batched);
-    upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
 
-    std::vector<double> h_V_re(bus_count);
-    std::vector<double> h_V_im(bus_count);
-    std::vector<double> h_Va(bus_count);
-    std::vector<double> h_Vm(bus_count);
-    for (int32_t b = 0; b < batch_size; ++b) {
-        const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
-        const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(ctx.V0_stride);
-        for (int32_t bus = 0; bus < n_bus; ++bus) {
-            const auto& v0  = ctx.V0[src_base + static_cast<std::size_t>(bus)];
-            const std::size_t dst = dst_base + static_cast<std::size_t>(bus);
-            h_V_re[dst] = v0.real();
-            h_V_im[dst] = v0.imag();
-            h_Va[dst]   = std::arg(v0);
-            h_Vm[dst]   = std::abs(v0);
+    const int32_t total_bus = batch_size * n_bus;
+
+    // Fast path (contiguous batch): bulk H2D raw FP64 Sbus/V0 once and convert
+    // on device, avoiding per-element host cast + arg/abs loops (O(B*n_bus)).
+    if (ctx.sbus_stride == n_bus && ctx.V0_stride == n_bus) {
+        DeviceBuffer<double> d_raw;
+        d_raw.resize(static_cast<std::size_t>(total_bus) * 2);
+
+        d_raw.assign(reinterpret_cast<const double*>(ctx.sbus),
+                     static_cast<std::size_t>(total_bus) * 2);
+        launch_split_complex<double>(d_raw.data(), d_Sbus_re.data(), d_Sbus_im.data(), total_bus);
+
+        d_raw.assign(reinterpret_cast<const double*>(ctx.V0),
+                     static_cast<std::size_t>(total_bus) * 2);
+        launch_seed_state_from_v0<double>(d_raw.data(), d_V_re.data(), d_V_im.data(),
+                                          d_Va.data(), d_Vm.data(), total_bus);
+    } else {
+        // General (strided) fallback: host conversion.
+        upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
+
+        std::vector<double> h_V_re(bus_count);
+        std::vector<double> h_V_im(bus_count);
+        std::vector<double> h_Va(bus_count);
+        std::vector<double> h_Vm(bus_count);
+        for (int32_t b = 0; b < batch_size; ++b) {
+            const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
+            const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(ctx.V0_stride);
+            for (int32_t bus = 0; bus < n_bus; ++bus) {
+                const auto& v0  = ctx.V0[src_base + static_cast<std::size_t>(bus)];
+                const std::size_t dst = dst_base + static_cast<std::size_t>(bus);
+                h_V_re[dst] = v0.real();
+                h_V_im[dst] = v0.imag();
+                h_Va[dst]   = std::arg(v0);
+                h_Vm[dst]   = std::abs(v0);
+            }
         }
+        d_V_re.assign(h_V_re.data(), h_V_re.size());
+        d_V_im.assign(h_V_im.data(), h_V_im.size());
+        d_Va.assign(h_Va.data(), h_Va.size());
+        d_Vm.assign(h_Vm.data(), h_Vm.size());
     }
-    d_V_re.assign(h_V_re.data(), h_V_re.size());
-    d_V_im.assign(h_V_im.data(), h_V_im.size());
-    d_Va.assign(h_Va.data(), h_Va.size());
-    d_Vm.assign(h_Vm.data(), h_Vm.size());
 
     d_F.memsetZero();
     d_normF.memsetZero();
@@ -245,44 +267,31 @@ void CudaMixedStorage::download(NRResult& result) const
         throw std::runtime_error("CudaMixedStorage::download: use download_batch for batch_size > 1");
     }
 
-    std::vector<double> h_Va(static_cast<std::size_t>(n_bus));
-    std::vector<double> h_Vm(static_cast<std::size_t>(n_bus));
-
-    d_Va.copyTo(h_Va.data(), h_Va.size());
-    d_Vm.copyTo(h_Vm.data(), h_Vm.size());
-
+    // d_V_re/d_V_im hold the reconstructed voltage after voltage_update; pack
+    // them on device and do one bulk D2H (no host trig/interleave loop).
     result.V.resize(static_cast<std::size_t>(n_bus));
-    for (int32_t bus = 0; bus < n_bus; ++bus) {
-        const double va = h_Va[static_cast<std::size_t>(bus)];
-        const double vm = h_Vm[static_cast<std::size_t>(bus)];
-        result.V[static_cast<std::size_t>(bus)] = std::complex<double>(
-            vm * std::cos(va), vm * std::sin(va));
-    }
+    DeviceBuffer<double> d_out;
+    d_out.resize(static_cast<std::size_t>(n_bus) * 2);
+    launch_pack_complex_to_double<double>(d_V_re.data(), d_V_im.data(), d_out.data(), n_bus);
+    d_out.copyTo(reinterpret_cast<double*>(result.V.data()), static_cast<std::size_t>(n_bus) * 2);
 }
 
 
 void CudaMixedStorage::download_batch(NRBatchResult& result) const
 {
     const std::size_t total = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
-    std::vector<double> h_Va(total);
-    std::vector<double> h_Vm(total);
-
-    d_Va.copyTo(h_Va.data(), h_Va.size());
-    d_Vm.copyTo(h_Vm.data(), h_Vm.size());
 
     result.n_bus      = n_bus;
     result.batch_size = batch_size;
     result.V.resize(total);
 
-    for (int32_t b = 0; b < batch_size; ++b) {
-        const std::size_t base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
-        for (int32_t bus = 0; bus < n_bus; ++bus) {
-            const std::size_t idx = base + static_cast<std::size_t>(bus);
-            result.V[idx] = std::complex<double>(
-                h_Vm[idx] * std::cos(h_Va[idx]),
-                h_Vm[idx] * std::sin(h_Va[idx]));
-        }
-    }
+    // Pack reconstructed d_V_re/d_V_im to interleaved complex<double> on device,
+    // then one bulk D2H (replaces the O(batch*n_bus) host cos/sin loop).
+    DeviceBuffer<double> d_out;
+    d_out.resize(total * 2);
+    launch_pack_complex_to_double<double>(d_V_re.data(), d_V_im.data(), d_out.data(),
+                                          static_cast<int32_t>(total));
+    d_out.copyTo(reinterpret_cast<double*>(result.V.data()), total * 2);
 
     if (!d_normF.empty()) {
         result.final_mismatch.resize(static_cast<std::size_t>(batch_size));

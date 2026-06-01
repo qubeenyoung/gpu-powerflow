@@ -251,6 +251,7 @@ if(WITH_CUDA)
     cpp/src/newton_solver/storage/cuda/cuda_mixed_storage.cpp
     cpp/src/newton_solver/storage/cuda/cuda_fp32_storage.cpp
     cpp/src/newton_solver/storage/cuda/cuda_fp64_storage.cpp
+    cpp/src/newton_solver/storage/cuda/storage_convert.cu
 
     # Ops — CUDA Ibus
     cpp/src/newton_solver/ops/ibus/compute_ibus.cu
