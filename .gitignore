@@ -6,6 +6,7 @@ build_*/
 .env
 .env.*
 !.env.example
+*.yml
 
 # Datasets (too large for git)
 datasets/
