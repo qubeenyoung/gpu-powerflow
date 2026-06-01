@@ -107,6 +107,23 @@
 - **결론**: 현재 mid-iteration sync는 합리적 설계. launch 오버헤드를 줄이려면 early-exit를 유지한 채
   **CUDA graph로 반복을 캡처**하는 별도 작업이 필요(범위 큼). 단순 sync 완화는 권장하지 않음.
 
+### P4b. CUDA Graph 반복 캡처 (옵션) — 타당성 검증됨
+- **실험(perf/cudss_capture_probe.cu)**: cuDSS의 `REFACTORIZATION + SOLVE`가 **stream capture
+  가능**함을 확인(노드 19개 캡처, 그래프 재생 결과 정확). 즉 cuDSS를 그래프 밖으로 뺄 필요 없이
+  반복 본체를 통째로 캡처 가능.
+- **설계(옵션, 기본 off, 빌드 플래그 `CUPF_ENABLE_CUDA_GRAPH` + 비-timing 빌드 전제)**: early-exit를
+  유지하기 위해 그래프를 둘로 나눈다 —
+  - `graph_pre` = ibus → mismatch → norm-reduce (수렴 판정 입력 생성), 이후 host에서 norm sync+check.
+  - `graph_post` = jacobian → prepare_rhs → factorize/refactorize → solve → voltage_update (cuDSS 포함).
+  - factorize 위상(첫 iter=FACTORIZATION vs 이후=REFACTORIZATION)이 다르므로 iter0은 eager 실행 후
+    iter1에서 `graph_post`를 lazy 캡처하여 iter2+ 재생.
+- **제약/wrinkle**: (1) 캡처 중 `cudaDeviceSynchronize` 금지 → timing 빌드(ENABLE_TIMING)와 norm의
+  `copyTo` sync는 캡처 구간 밖이어야 함(그래서 pre/post 분리, norm sync는 eager). (2) **non-default
+  stream 필수**(legacy default stream은 캡처 불가) → 기능 on시 전용 스트림 생성. (3) Jacobian 패턴/배치
+  shape 변경 시 그래프 재캡처.
+- **기대효과**: 작은 커널들(ibus/jacobian/voltage 등)의 **launch 오버헤드 제거** → 소형 케이스·소배치에
+  유효. 대형/대배치는 cuDSS 연산이 지배적이라(그래프는 cuDSS 연산 자체를 가속하지 않음) 효과는 작음.
+
 ### P5. ibus SpMV — lane 활용도 낭비 (구현)
 - `compute_ibus.cu` 커널은 **row당 32-lane warp**로 누적하는데, 전력망 평균 차수는 **~3.5–4
   nnz/row**다. 즉 누적 루프에서 **32 레인 중 약 4개만 일하고 ~88%가 유휴**.
