@@ -1,10 +1,34 @@
 // ---------------------------------------------------------------------------
 // cuda_cudss.cpp
 //
-// cuDSS sparse direct linear solver. T selects precision:
-//   - double: RHS = buf.d_F directly
-//   - float + CudaFp32Storage: RHS = buf.d_F directly
-//   - float + CudaMixedStorage: RHS is a cast copy of FP64 buf.d_F
+// cuDSS-backed sparse *direct* linear solver for the Newton step. Each NR
+// iteration solves  J * dx = F  (J = Jacobian, F = mismatch residual, dx = step)
+// via an LU factorization of J, which cuDSS performs in four phases:
+//
+//   ANALYSIS        symbolic: reordering + symbolic factorization from the
+//                   sparsity pattern only (no values). Done once per pattern.
+//   FACTORIZATION   numeric LU using the current J values. First solve.
+//   REFACTORIZATION cheaper numeric LU reusing the symbolic structure; used on
+//                   later iterations where only J's values changed.
+//   SOLVE           triangular solves L,U against the RHS to produce dx.
+//
+// Two pipelines share one cuDSS handle/config:
+//   * forward  — J dx = F          (the NR step every iteration)
+//   * adjoint  — J^T x = b         (gradient / sensitivity passes). J^T is
+//                materialized explicitly from J via a precomputed value-permu-
+//                tation, then factorized and cached so repeat adjoint solves
+//                only pay the triangular solve.
+//
+// Batching: a whole batch is one cuDSS uniform-batch problem (CUDSS_CONFIG_
+// UBATCH_SIZE in cudss_config.hpp); the batch-major device buffers feed it with
+// no per-case loop, so B == 1 and B > 1 take the same path.
+//
+// Precision (T) / RHS selection:
+//   - double                  : solve against buf.d_F directly
+//   - float + CudaFp32Storage : solve against buf.d_F directly (all-FP32)
+//   - float + CudaMixedStorage: RHS is a down-cast FP32 copy of the FP64 buf.d_F
+// All cuDSS handles/descriptors live in the PIMPL State (below) so the public
+// header stays free of cuDSS types.
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
@@ -129,15 +153,14 @@ void set_cudss_stream(cudssHandle_t handle)
 }
 #endif
 
-// Batch size per storage layout.
-int32_t buf_batch_size(const CudaFp64Storage& b)       { return b.batch_size; }
-int32_t buf_batch_size(const CudaFp32Storage& b)       { return b.batch_size; }
-int32_t buf_batch_size(const CudaMixedStorage& b)       { return b.batch_size; }
+// Batch size / per-case J nnz of any CUDA storage profile. All three profiles
+// (CudaFp32/Fp64/MixedStorage) expose these members, so one template each
+// suffices (they used to be three identical overloads per accessor).
+template <typename Storage>
+int32_t buf_batch_size(const Storage& b) { return b.batch_size; }
 
-// Non-zero count of J per storage layout (per case, not batch-multiplied).
-int32_t buf_nnz_j(const CudaFp64Storage& b)            { return b.nnz_J; }
-int32_t buf_nnz_j(const CudaFp32Storage& b)            { return b.nnz_J; }
-int32_t buf_nnz_j(const CudaMixedStorage& b)            { return b.nnz_J; }
+template <typename Storage>
+int32_t buf_nnz_j(const Storage& b) { return b.nnz_J; }  // per case, not batch-multiplied
 
 }  // namespace
 
@@ -337,6 +360,18 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve(Buffers& buf, IterationContext& ctx
 
 // ===========================================================================
 // Adjoint solve pipeline (J^T x = b), used for gradient / sensitivity passes
+//
+// The implicit-function-theorem backward pass needs J^T solves. cuDSS does not
+// expose a transpose-solve for this configuration (supports_transpose_solve()
+// returns false), so we form J^T *explicitly*: its sparsity is the transpose of
+// J's (computed once in initialize() as a value-permutation map), and each pass
+// scatters the current J values through that map into adjoint_values. J^T is
+// then factorized and the factorization is cached, so repeated adjoint solves
+// against different right-hand sides only pay for the triangular SOLVE.
+//
+// Two solve entry points share the cached factorization:
+//   solve_adjoint_explicit_transpose_host   - RHS/solution cross the host (cast)
+//   solve_adjoint_explicit_transpose_cached  - RHS already staged on device
 // ===========================================================================
 
 // True once the adjoint system has been numerically factorized.
@@ -399,7 +434,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
         sync_cuda_for_timing();
         state_->adjoint_analysis_done = true;
     }
-    
+
     const bool is_refactorization = state_->adjoint_factorized;
     const int phase = is_refactorization ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
     set_cudss_stream(state_->handle);

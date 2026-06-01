@@ -265,7 +265,8 @@ if(WITH_CUDA)
     cpp/src/newton_solver/ops/jacobian/fill_jacobian_gpu.cu
 
     # Ops — CUDA linear solve
-    cpp/src/newton_solver/ops/linear_solve/prepare_rhs.cu
+    cpp/src/newton_solver/ops/linear_solve/linear_solve_kernels.cu
+    cpp/src/newton_solver/ops/linear_solve/torch_bridge_kernels.cu
     cpp/src/newton_solver/ops/linear_solve/cuda_cudss.cpp
 
     # Ops — CUDA voltage update
