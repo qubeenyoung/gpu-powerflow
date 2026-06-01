@@ -133,7 +133,7 @@ for iter in range(max_iter):
 | [math.md](math.md) | Newton-Raphson 전력조류 수학 배경 |
 | [core/README.md](core/README.md) | NewtonSolver, Jacobian analysis, SolverPipeline, Context |
 | [ops/README.md](ops/README.md) | stage Op 구현체 |
-| [storage/README.md](storage/README.md) | Storage struct와 각 backend 버퍼 |
+| [storage/storage_design.md](storage/storage_design.md) | Storage struct와 각 backend 버퍼 |
 | [variants/README.md](variants/README.md) | 실행 프로파일별 구성과 선택 기준 |
 | [gpu_batch_improvement_plan.md](gpu_batch_improvement_plan.md) | CUDA 기본 batch 실행과 kernel 개선 계획 |
 | [implementation/README.md](implementation/README.md) | CUDA batch refactor 단계별 구현 계획 |

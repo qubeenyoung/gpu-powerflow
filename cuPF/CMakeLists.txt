@@ -249,10 +249,8 @@ set(CUPF_CORE_SOURCES
 # ---------------------------------------------------------------------------
 if(WITH_CUDA)
   set(CUPF_CUDA_SOURCES
-    # Storage — CUDA
-    cpp/src/newton_solver/storage/cuda/cuda_mixed_storage.cpp
-    cpp/src/newton_solver/storage/cuda/cuda_fp32_storage.cpp
-    cpp/src/newton_solver/storage/cuda/cuda_fp64_storage.cpp
+    # Storage — CUDA (one templated impl for FP32/FP64/Mixed profiles)
+    cpp/src/newton_solver/storage/cuda/cuda_batched_storage.cpp
     cpp/src/newton_solver/storage/cuda/storage_convert.cu
 
     # Ops — CUDA Ibus

@@ -1,16 +1,23 @@
 // ---------------------------------------------------------------------------
-// cuda_fp64_storage.cpp
+// cuda_batched_storage.cpp
 //
-// FP64 batched device storage. Like the FP32/Mixed variants but with no
-// precision conversion — host FP64 inputs map straight to FP64 device buffers.
-// batch_size == 1 is the common single-case path; batch_size > 1 lays the
-// per-case data out batch-major ([batch_size * dim] contiguous) and shares the
-// same FP64 kernels and cuDSS uniform-batch solve as the FP32/Mixed pipelines.
+// One templated implementation of the CUDA batched device storage, shared by
+// all three precision profiles via explicit instantiation at the bottom:
+//
+//     CudaFp32Storage  = CudaBatchedStorage<float , float >
+//     CudaFp64Storage  = CudaBatchedStorage<double, double>
+//     CudaMixedStorage = CudaBatchedStorage<double, float >
+//
+// StateScalar drives the physical-state buffers (Ybus/V/Va/Vm/Sbus/Ibus/F/
+// normF); JacScalar drives the linear-solve buffers (d_J_values/d_dx). The host
+// inputs are always FP64 (std::complex<double>); upload casts down to
+// StateScalar and download casts back up. See cuda_batched_storage.hpp for the
+// batch-major layout contract.
 // ---------------------------------------------------------------------------
 
 #ifdef CUPF_WITH_CUDA
 
-#include "cuda_fp64_storage.hpp"
+#include "cuda_batched_storage.hpp"
 #include "newton_solver/storage/cuda/storage_convert.hpp"
 #include "utils/cuda_utils.hpp"
 
@@ -44,10 +51,13 @@ std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
     return rows;
 }
 
-// Split a batched complex array into separate real/imag FP64 device buffers,
-// honoring the per-case source stride.
-void upload_complex_components(DeviceBuffer<double>& dst_re,
-                               DeviceBuffer<double>& dst_im,
+// Host-side split of a batched complex array into separate real/imag device
+// buffers at the storage precision (cast double -> StorageScalar), honoring the
+// per-case source stride. Used only by the strided fallback in upload(); the
+// common contiguous path converts on-device (launch_split_complex).
+template <typename StorageScalar>
+void upload_complex_components(DeviceBuffer<StorageScalar>& dst_re,
+                               DeviceBuffer<StorageScalar>& dst_im,
                                const std::complex<double>* src,
                                int32_t logical_count,
                                int32_t batch_size,
@@ -55,25 +65,27 @@ void upload_complex_components(DeviceBuffer<double>& dst_re,
 {
     const std::size_t total =
         static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(logical_count);
-    std::vector<double> h_re(total);
-    std::vector<double> h_im(total);
+    std::vector<StorageScalar> h_re(total);
+    std::vector<StorageScalar> h_im(total);
 
     for (int32_t b = 0; b < batch_size; ++b) {
         const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(logical_count);
         const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(stride);
         for (int32_t i = 0; i < logical_count; ++i) {
             const auto& val = src[src_base + static_cast<std::size_t>(i)];
-            h_re[dst_base + static_cast<std::size_t>(i)] = val.real();
-            h_im[dst_base + static_cast<std::size_t>(i)] = val.imag();
+            h_re[dst_base + static_cast<std::size_t>(i)] = static_cast<StorageScalar>(val.real());
+            h_im[dst_base + static_cast<std::size_t>(i)] = static_cast<StorageScalar>(val.imag());
         }
     }
     dst_re.assign(h_re.data(), h_re.size());
     dst_im.assign(h_im.data(), h_im.size());
 }
 
-// Same split for Ybus values; a single shared Ybus unless values_batched.
-void upload_ybus_components(DeviceBuffer<double>& dst_re,
-                            DeviceBuffer<double>& dst_im,
+// Same split for Ybus values; a single shared Ybus unless values_batched (then
+// one set of values per case).
+template <typename StorageScalar>
+void upload_ybus_components(DeviceBuffer<StorageScalar>& dst_re,
+                            DeviceBuffer<StorageScalar>& dst_im,
                             const std::complex<double>* src,
                             int32_t nnz_ybus,
                             int32_t batch_size,
@@ -83,8 +95,8 @@ void upload_ybus_components(DeviceBuffer<double>& dst_re,
     const int32_t stored = values_batched ? batch_size : 1;
     const std::size_t total =
         static_cast<std::size_t>(stored) * static_cast<std::size_t>(nnz_ybus);
-    std::vector<double> h_re(total);
-    std::vector<double> h_im(total);
+    std::vector<StorageScalar> h_re(total);
+    std::vector<StorageScalar> h_im(total);
 
     for (int32_t b = 0; b < stored; ++b) {
         const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(nnz_ybus);
@@ -92,8 +104,8 @@ void upload_ybus_components(DeviceBuffer<double>& dst_re,
             values_batched ? static_cast<std::size_t>(b) * static_cast<std::size_t>(stride) : 0;
         for (int32_t k = 0; k < nnz_ybus; ++k) {
             const auto& val = src[src_base + static_cast<std::size_t>(k)];
-            h_re[dst_base + static_cast<std::size_t>(k)] = val.real();
-            h_im[dst_base + static_cast<std::size_t>(k)] = val.imag();
+            h_re[dst_base + static_cast<std::size_t>(k)] = static_cast<StorageScalar>(val.real());
+            h_im[dst_base + static_cast<std::size_t>(k)] = static_cast<StorageScalar>(val.imag());
         }
     }
     dst_re.assign(h_re.data(), h_re.size());
@@ -103,8 +115,12 @@ void upload_ybus_components(DeviceBuffer<double>& dst_re,
 }  // namespace
 
 
-// Allocate buffers and upload the static topology (Ybus, J pattern, maps).
-void CudaFp64Storage::prepare(const InitializeContext& ctx)
+// Allocate device buffers and upload the time-invariant topology once: Ybus
+// pattern + values, Jacobian pattern, and the scatter maps. Buffers are sized
+// for a single case here; upload() resizes them for the actual batch. Per-solve
+// values arrive later via upload().
+template <typename StateScalar, typename JacScalar>
+void CudaBatchedStorage<StateScalar, JacScalar>::prepare(const InitializeContext& ctx)
 {
     require_pointer(ctx.ybus.indptr,  "InitializeContext.ybus.indptr",  ctx.ybus.rows + 1);
     require_pointer(ctx.ybus.indices, "InitializeContext.ybus.indices", ctx.ybus.nnz);
@@ -175,17 +191,18 @@ void CudaFp64Storage::prepare(const InitializeContext& ctx)
 }
 
 
-// Push per-solve inputs: resize for the batch, upload Ybus/Sbus, and seed
-// V/Va/Vm from the V0 guess.
-void CudaFp64Storage::upload(const SolveContext& ctx)
+// Push per-solve inputs: resize for the batch, upload Ybus/Sbus (cast to
+// StateScalar), and seed V/Va/Vm from the V0 guess.
+template <typename StateScalar, typename JacScalar>
+void CudaBatchedStorage<StateScalar, JacScalar>::upload(const SolveContext& ctx)
 {
     if (ctx.ybus == nullptr || ctx.sbus == nullptr || ctx.V0 == nullptr) {
-        throw std::invalid_argument("CudaFp64Storage::upload: solve context is incomplete");
+        throw std::invalid_argument("CudaBatchedStorage::upload: solve context is incomplete");
     }
 
     const YbusView& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus || ybus.nnz != nnz_ybus) {
-        throw std::runtime_error("CudaFp64Storage::upload: Ybus dimensions do not match initialize()");
+        throw std::runtime_error("CudaBatchedStorage::upload: Ybus dimensions do not match initialize()");
     }
 
     require_pointer(ybus.data, "SolveContext.ybus->data", ybus.nnz);
@@ -193,10 +210,10 @@ void CudaFp64Storage::upload(const SolveContext& ctx)
     require_pointer(ctx.V0,    "SolveContext.V0",         n_bus);
 
     if (ctx.batch_size <= 0) {
-        throw std::invalid_argument("CudaFp64Storage::upload: batch_size must be positive");
+        throw std::invalid_argument("CudaBatchedStorage::upload: batch_size must be positive");
     }
     if (ctx.sbus_stride < n_bus || ctx.V0_stride < n_bus) {
-        throw std::invalid_argument("CudaFp64Storage::upload: batch strides must be at least n_bus");
+        throw std::invalid_argument("CudaBatchedStorage::upload: batch strides must be at least n_bus");
     }
 
     batch_size = ctx.batch_size;
@@ -228,38 +245,40 @@ void CudaFp64Storage::upload(const SolveContext& ctx)
 
     const int32_t total_bus = batch_size * n_bus;
 
-    // Fast path (contiguous batch): bulk H2D raw FP64 Sbus/V0 once and convert
-    // on device, avoiding per-element host cast + arg/abs loops (O(B*n_bus)).
+    // Fast path (contiguous batch, stride == n_bus): bulk H2D the raw FP64
+    // Sbus/V0 once and convert/cast on device, instead of per-element host
+    // cast + arg/abs loops that scale with batch_size * n_bus. The device
+    // kernels emit StateScalar (float for FP32, double for FP64/Mixed).
     if (ctx.sbus_stride == n_bus && ctx.V0_stride == n_bus) {
         DeviceBuffer<double> d_raw;
         d_raw.resize(static_cast<std::size_t>(total_bus) * 2);
 
         d_raw.assign(reinterpret_cast<const double*>(ctx.sbus),
                      static_cast<std::size_t>(total_bus) * 2);
-        launch_split_complex<double>(d_raw.data(), d_Sbus_re.data(), d_Sbus_im.data(), total_bus);
+        launch_split_complex<StateScalar>(d_raw.data(), d_Sbus_re.data(), d_Sbus_im.data(), total_bus);
 
         d_raw.assign(reinterpret_cast<const double*>(ctx.V0),
                      static_cast<std::size_t>(total_bus) * 2);
-        launch_seed_state_from_v0<double>(d_raw.data(), d_V_re.data(), d_V_im.data(),
-                                          d_Va.data(), d_Vm.data(), total_bus);
+        launch_seed_state_from_v0<StateScalar>(d_raw.data(), d_V_re.data(), d_V_im.data(),
+                                               d_Va.data(), d_Vm.data(), total_bus);
     } else {
         // General (strided) fallback: host conversion.
         upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
 
-        std::vector<double> h_V_re(bus_count);
-        std::vector<double> h_V_im(bus_count);
-        std::vector<double> h_Va(bus_count);
-        std::vector<double> h_Vm(bus_count);
+        std::vector<StateScalar> h_V_re(bus_count);
+        std::vector<StateScalar> h_V_im(bus_count);
+        std::vector<StateScalar> h_Va(bus_count);
+        std::vector<StateScalar> h_Vm(bus_count);
         for (int32_t b = 0; b < batch_size; ++b) {
             const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
             const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(ctx.V0_stride);
             for (int32_t bus = 0; bus < n_bus; ++bus) {
                 const auto& v0  = ctx.V0[src_base + static_cast<std::size_t>(bus)];
                 const std::size_t dst = dst_base + static_cast<std::size_t>(bus);
-                h_V_re[dst] = v0.real();
-                h_V_im[dst] = v0.imag();
-                h_Va[dst]   = std::arg(v0);
-                h_Vm[dst]   = std::abs(v0);
+                h_V_re[dst] = static_cast<StateScalar>(v0.real());
+                h_V_im[dst] = static_cast<StateScalar>(v0.imag());
+                h_Va[dst]   = static_cast<StateScalar>(std::arg(v0));
+                h_Vm[dst]   = static_cast<StateScalar>(std::abs(v0));
             }
         }
         d_V_re.assign(h_V_re.data(), h_V_re.size());
@@ -277,25 +296,27 @@ void CudaFp64Storage::upload(const SolveContext& ctx)
 }
 
 
-// Single-case voltage readback to the FP64 result.
-void CudaFp64Storage::download(NRResult& result) const
+// Single-case voltage readback: pack Re/Im into interleaved complex<double> on
+// device (up-cast from StateScalar), then one bulk D2H.
+template <typename StateScalar, typename JacScalar>
+void CudaBatchedStorage<StateScalar, JacScalar>::download(NRResult& result) const
 {
     if (batch_size != 1) {
-        throw std::runtime_error("CudaFp64Storage::download: use download_batch for batch_size > 1");
+        throw std::runtime_error("CudaBatchedStorage::download: use download_batch for batch_size > 1");
     }
 
-    // d_V_re/d_V_im hold the reconstructed voltage after voltage_update; pack
-    // them on device and do one bulk D2H (no host interleave loop).
     result.V.resize(static_cast<std::size_t>(n_bus));
     DeviceBuffer<double> d_out;
     d_out.resize(static_cast<std::size_t>(n_bus) * 2);
-    launch_pack_complex_to_double<double>(d_V_re.data(), d_V_im.data(), d_out.data(), n_bus);
+    launch_pack_complex_to_double<StateScalar>(d_V_re.data(), d_V_im.data(), d_out.data(), n_bus);
     d_out.copyTo(reinterpret_cast<double*>(result.V.data()), static_cast<std::size_t>(n_bus) * 2);
 }
 
 
-// Batched voltage readback plus per-case final mismatch norms.
-void CudaFp64Storage::download_batch(NRBatchResult& result) const
+// Batched voltage readback (StateScalar -> FP64) plus per-case final mismatch
+// norms. Layout is batch-major: result.V[b * n_bus + bus].
+template <typename StateScalar, typename JacScalar>
+void CudaBatchedStorage<StateScalar, JacScalar>::download_batch(NRBatchResult& result) const
 {
     const std::size_t total = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
 
@@ -304,17 +325,30 @@ void CudaFp64Storage::download_batch(NRBatchResult& result) const
     result.V.resize(total);
 
     // Pack reconstructed d_V_re/d_V_im to interleaved complex<double> on device,
-    // then one bulk D2H.
+    // then one bulk D2H (replaces an O(batch*n_bus) host interleave loop).
     DeviceBuffer<double> d_out;
     d_out.resize(total * 2);
-    launch_pack_complex_to_double<double>(d_V_re.data(), d_V_im.data(), d_out.data(),
-                                          static_cast<int32_t>(total));
+    launch_pack_complex_to_double<StateScalar>(d_V_re.data(), d_V_im.data(), d_out.data(),
+                                               static_cast<int32_t>(total));
     d_out.copyTo(reinterpret_cast<double*>(result.V.data()), total * 2);
 
     if (!d_normF.empty()) {
+        // d_normF holds one StateScalar per case; widen each to the public FP64
+        // result (the cast is the identity when StateScalar == double).
+        std::vector<StateScalar> h_norm(static_cast<std::size_t>(batch_size));
+        d_normF.copyTo(h_norm.data(), h_norm.size());
         result.final_mismatch.resize(static_cast<std::size_t>(batch_size));
-        d_normF.copyTo(result.final_mismatch.data(), result.final_mismatch.size());
+        for (int32_t b = 0; b < batch_size; ++b) {
+            result.final_mismatch[static_cast<std::size_t>(b)] =
+                static_cast<double>(h_norm[static_cast<std::size_t>(b)]);
+        }
     }
 }
+
+
+// --- Explicit instantiations for the three CUDA precision profiles ----------
+template struct CudaBatchedStorage<float,  float>;   // CudaFp32Storage
+template struct CudaBatchedStorage<double, double>;  // CudaFp64Storage
+template struct CudaBatchedStorage<double, float>;   // CudaMixedStorage
 
 #endif  // CUPF_WITH_CUDA

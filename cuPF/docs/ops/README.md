@@ -39,7 +39,7 @@ void voltage_update(IterationContext& ctx);// buf의 Va, Vm과 V cache 갱신
 ```
 
 Storage(`buf`)는 `prepare()`/`upload()`/`download()`(또는 `download_batch()`)로
-초기화·업로드·결과 다운로드를 담당한다(자세한 내용은 [storage/README.md](../storage/README.md)).
+초기화·업로드·결과 다운로드를 담당한다(자세한 내용은 [storage/storage_design.md](../storage/storage_design.md)).
 
 ---
 
