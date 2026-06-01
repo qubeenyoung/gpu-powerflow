@@ -404,6 +404,16 @@ if(BUILD_EVALUATORS)
   target_include_directories(cupf_cpp_evaluate PRIVATE
     ${PROJECT_SOURCE_DIR}/cpp/inc
     ${PROJECT_SOURCE_DIR}/tests)
+
+  # perf/: batch scaling micro-benchmark (analysis only, not shipped)
+  add_executable(cupf_batch_bench
+    perf/batch_bench.cpp
+    tests/dump_case_loader.cpp
+  )
+  target_link_libraries(cupf_batch_bench PRIVATE cupf)
+  target_include_directories(cupf_batch_bench PRIVATE
+    ${PROJECT_SOURCE_DIR}/cpp/inc
+    ${PROJECT_SOURCE_DIR}/tests)
 endif()
 
 # ---------------------------------------------------------------------------
