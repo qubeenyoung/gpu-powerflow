@@ -22,8 +22,11 @@
 
 namespace {
 
+// Short rows are scanned linearly; longer rows use binary search (below).
 constexpr int32_t kLinearCoeffSearchLimit = 16;
 
+// CSR value-slot positions of one bus pair across the four Jacobian sub-blocks
+// (J11=dP/dVa, J21=dQ/dVa, J12=dP/dVm, J22=dQ/dVm); -1 means "not present".
 struct ScatterPositions {
     int32_t p11 = -1;
     int32_t p21 = -1;
@@ -38,6 +41,9 @@ void require_pointer(const int32_t* ptr, const char* name, int32_t count)
     }
 }
 
+// Locate the CSR slot of (row, col) in the Jacobian pattern, or -1 if absent.
+// Columns within a row are sorted, so a short row scans linearly while a long
+// row binary-searches.
 int32_t find_coeff_index(const JacobianPattern& pattern, int32_t row, int32_t col)
 {
     if (row < 0 || col < 0 || row >= pattern.dim || col >= pattern.dim) {
@@ -68,9 +74,11 @@ int32_t find_coeff_index(const JacobianPattern& pattern, int32_t row, int32_t co
     if (it == last || *it != col) {
         return -1;
     }
-    return static_cast<int32_t>(it - cols);
+    return static_cast<int32_t>(it - cols);  // pointer offset -> CSR slot index
 }
 
+// CSR offset of the first Ybus entry in `row` whose column is >= col (or > col
+// when include_equal is false). Used to walk only the strict upper triangle.
 int32_t first_ybus_entry(
     const YbusView& ybus,
     int32_t row,
@@ -87,6 +95,10 @@ int32_t first_ybus_entry(
     return static_cast<int32_t>(begin + (it - first));
 }
 
+// Record that bus pair (row_bus, col_bus) contributes to the Jacobian: emit a
+// column entry into each sub-block row that exists for these buses. A PV bus
+// has only a "pvpq" row/col; a PQ bus also has a "pq" row/col, giving up to the
+// four J11/J21/J12/J22 combinations.
 void append_jacobian_columns(
     std::vector<std::vector<int32_t>>& rows,
     const JacobianIndexing& indexing,
@@ -112,6 +124,8 @@ void append_jacobian_columns(
     }
 }
 
+// Resolve the CSR value slots for bus pair (row_bus, col_bus) in each of the
+// four sub-blocks (the build-time counterpart of append_jacobian_columns).
 ScatterPositions find_directed_scatter_positions(
     const JacobianPattern& pattern,
     const JacobianIndexing& indexing,
@@ -161,11 +175,13 @@ JacobianIndexing make_jacobian_indexing(
     indexing.n_pq = n_pq;
     indexing.pvpq.resize(indexing.n_pvpq);
 
+    // Per-bus lookup tables (bus -> Jacobian row/col index), -1 = "not present".
     indexing.row_pvpq.assign(n_bus, -1);
     indexing.row_pq.assign(n_bus, -1);
     indexing.col_pvpq.assign(n_bus, -1);
     indexing.col_pq.assign(n_bus, -1);
 
+    // PV buses occupy the angle (pvpq) block only.
     for (int32_t i = 0; i < n_pv; ++i) {
         const int32_t bus = pv[i];
         if (bus < 0 || bus >= n_bus) {
@@ -176,6 +192,7 @@ JacobianIndexing make_jacobian_indexing(
         indexing.col_pvpq[bus] = i;
     }
 
+    // PQ buses occupy both the angle (pvpq) and magnitude (pq) blocks.
     for (int32_t i = 0; i < n_pq; ++i) {
         const int32_t bus = pq[i];
         if (bus < 0 || bus >= n_bus) {
@@ -202,8 +219,11 @@ JacobianPattern JacobianPatternGenerator::generate(
         throw std::invalid_argument("JacobianPatternGenerator::generate: indexing/Ybus size mismatch");
     }
 
+    // Accumulate each Jacobian row's column indices in a temporary list.
     const int32_t dim = indexing.n_pvpq + indexing.n_pq;
     std::vector<std::vector<int32_t>> rows(dim);
+
+    // Reserve roughly the expected per-row degree (2 sub-blocks per Ybus entry).
     for (int32_t bus = 0; bus < ybus.rows; ++bus) {
         const int32_t y_degree = ybus.indptr[bus + 1] - ybus.indptr[bus];
         const int32_t reserve_count = 2 * y_degree + 2;
@@ -219,6 +239,8 @@ JacobianPattern JacobianPatternGenerator::generate(
         }
     }
 
+    // Ybus is symmetric in structure: walk the strict upper triangle and emit
+    // both (row,col) and its mirror (col,row), then add the diagonal below.
     for (int32_t row = 0; row < ybus.rows; ++row) {
         const int32_t upper_begin = first_ybus_entry(ybus, row, row, false);
         for (int32_t k = upper_begin; k < ybus.indptr[row + 1]; ++k) {
@@ -231,10 +253,12 @@ JacobianPattern JacobianPatternGenerator::generate(
         }
     }
 
+    // Diagonal bus self-coupling.
     for (int32_t bus = 0; bus < ybus.rows; ++bus) {
         append_jacobian_columns(rows, indexing, bus, bus);
     }
 
+    // Sort + dedup each row into the final CSR pattern, accumulating row_ptr.
     JacobianPattern pattern;
     pattern.dim = dim;
     pattern.row_ptr.assign(dim + 1, 0);
@@ -279,6 +303,9 @@ JacobianScatterMap JacobianMapBuilder::build(
     map.n_pq = indexing.n_pq;
     map.pvpq = indexing.pvpq;
 
+    // For each Ybus entry, where do its four sub-block contributions land in
+    // the Jacobian value array? mapJ* answers that per Ybus nonzero; diagJ*
+    // caches the diagonal slots (used by the fast diagonal-only refresh path).
     map.mapJ11.assign(ybus.nnz, -1);
     map.mapJ12.assign(ybus.nnz, -1);
     map.mapJ21.assign(ybus.nnz, -1);
@@ -295,6 +322,7 @@ JacobianScatterMap JacobianMapBuilder::build(
                 throw std::invalid_argument("JacobianMapBuilder::build: Ybus column index out of range");
             }
 
+            // Resolve this entry's slot in each sub-block, then record it.
             const ScatterPositions positions =
                 find_directed_scatter_positions(pattern, indexing, row, col);
 

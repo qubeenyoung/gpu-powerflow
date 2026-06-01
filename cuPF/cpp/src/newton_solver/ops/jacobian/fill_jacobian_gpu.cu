@@ -1,3 +1,14 @@
+// ---------------------------------------------------------------------------
+// fill_jacobian_gpu.cu
+//
+// CUDA assembly of the power-flow Jacobian — the GPU counterpart of
+// fill_jacobian.cpp. The same complex sensitivities are written out in plain
+// real arithmetic (no std::complex on device). One thread handles one Ybus
+// edge across the batch; diagonal threads (i==j) add the Ibus self-term.
+// Templated on the J / Ybus / voltage / Ibus scalar types so FP64, FP32, and
+// mixed (FP64 inputs -> FP32 J) pipelines share one kernel.
+// ---------------------------------------------------------------------------
+
 #ifdef CUPF_WITH_CUDA
 
 #include "fill_jacobian_gpu.hpp"
@@ -44,8 +55,12 @@ __global__ void fill_jacobian_gpu_kernel(
     const int32_t* __restrict__ diag22,
     JScalar* __restrict__ J_values)
 {
+    // Accumulate in the output precision; static_cast<AccumScalar> below just
+    // loads each input (possibly higher/lower precision) into that type.
     using AccumScalar = JScalar;
 
+    // One thread per (batch case, Ybus edge). Derive the case and the per-case
+    // base offsets into the batched value/voltage/Jacobian arrays.
     const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= total_edges) return;
 
@@ -55,8 +70,8 @@ __global__ void fill_jacobian_gpu_kernel(
     const int32_t v_base = batch * n_bus;
     const int32_t j_base = batch * nnz_J;
 
-    const int32_t i = y_row[k];
-    const int32_t j = y_col[k];
+    const int32_t i = y_row[k];   // edge source bus
+    const int32_t j = y_col[k];   // edge target bus
 
     const AccumScalar yr     = static_cast<AccumScalar>(y_re[y_base + k]);
     const AccumScalar yi     = static_cast<AccumScalar>(y_im[y_base + k]);
@@ -65,14 +80,17 @@ __global__ void fill_jacobian_gpu_kernel(
     const AccumScalar vj_re  = static_cast<AccumScalar>(v_re[v_base + j]);
     const AccumScalar vj_im  = static_cast<AccumScalar>(v_im[v_base + j]);
 
+    // curr = Y_ij * V_j  (complex multiply in real form).
     const AccumScalar curr_re = yr * vj_re - yi * vj_im;
     const AccumScalar curr_im = yr * vj_im + yi * vj_re;
 
+    // Angle (dVa) term: -i*V_i * conj(curr), giving the J11/J21 contributions.
     const AccumScalar neg_j_vi_re = vi_im;
     const AccumScalar neg_j_vi_im = -vi_re;
     const AccumScalar term_va_re  = neg_j_vi_re * curr_re + neg_j_vi_im * curr_im;
     const AccumScalar term_va_im  = neg_j_vi_im * curr_re - neg_j_vi_re * curr_im;
 
+    // Magnitude (dVm) term: V_i * conj(curr / |V_j|); skip when |V_j| ~ 0.
     const AccumScalar vj_abs = static_cast<AccumScalar>(vm[v_base + j]);
     AccumScalar term_vm_re = AccumScalar(0);
     AccumScalar term_vm_im = AccumScalar(0);
@@ -83,13 +101,16 @@ __global__ void fill_jacobian_gpu_kernel(
         term_vm_im = vi_im * scaled_re - vi_re * scaled_im;
     }
 
+    // Scatter the off-diagonal contributions (cast to the J storage type).
     if (map11[k] >= 0) J_values[j_base + map11[k]] = static_cast<JScalar>(term_va_re);
     if (map21[k] >= 0) J_values[j_base + map21[k]] = static_cast<JScalar>(term_va_im);
     if (map12[k] >= 0) J_values[j_base + map12[k]] = static_cast<JScalar>(term_vm_re);
     if (map22[k] >= 0) J_values[j_base + map22[k]] = static_cast<JScalar>(term_vm_im);
 
+    // Only diagonal edges (i == j) add the bus self-term below.
     if (i != j) return;
 
+    // Bus current Ibus_i: use the cached value, or recompute from row i of Ybus.
     AccumScalar ir = AccumScalar(0);
     AccumScalar ii = AccumScalar(0);
     if (use_cached_ibus) {
@@ -107,11 +128,13 @@ __global__ void fill_jacobian_gpu_kernel(
         }
     }
 
+    // Diagonal correction from V_i * conj(Ibus_i): adds to J11/J21 (angle)...
     const AccumScalar vi_conj_i_re = vi_re * ir + vi_im * ii;
     const AccumScalar vi_conj_i_im = vi_im * ir - vi_re * ii;
     const AccumScalar corr_va_re   = -vi_conj_i_im;
     const AccumScalar corr_va_im   =  vi_conj_i_re;
 
+    // ...and to J12/J22 (magnitude) via the normalized voltage; skip if |V_i|~0.
     const AccumScalar vi_abs = static_cast<AccumScalar>(vm[v_base + i]);
     AccumScalar corr_vm_re = AccumScalar(0);
     AccumScalar corr_vm_im = AccumScalar(0);
@@ -122,6 +145,7 @@ __global__ void fill_jacobian_gpu_kernel(
         corr_vm_im = ir * vnorm_im - ii * vnorm_re;
     }
 
+    // Accumulate (+=) onto the diagonal slots already holding the off-diag part.
     if (diag11[i] >= 0) J_values[j_base + diag11[i]] += static_cast<JScalar>(corr_va_re);
     if (diag21[i] >= 0) J_values[j_base + diag21[i]] += static_cast<JScalar>(corr_va_im);
     if (diag12[i] >= 0) J_values[j_base + diag12[i]] += static_cast<JScalar>(corr_vm_re);
@@ -163,6 +187,7 @@ void launch_fill_jacobian_gpu(
 
     J_values.memsetZero();
 
+    // One thread per (case, edge); round the grid up to cover total_edges.
     constexpr int32_t block = 256;
     const int32_t total_edges = batch_size * nnz_ybus;
     const int32_t grid = (total_edges + block - 1) / block;
@@ -179,9 +204,10 @@ void launch_fill_jacobian_gpu(
         diag11.data(), diag21.data(), diag12.data(), diag22.data(),
         J_values.data());
     CUDA_CHECK(cudaGetLastError());
-sync_cuda_for_timing();
+    sync_cuda_for_timing();
 }
 
+// Debug-only: copy the assembled CSR Jacobian back to host and dump it.
 template <typename ValueType>
 void dump_cuda_jacobian_if_enabled(const char* name,
                                    int32_t iteration,
@@ -216,11 +242,17 @@ void dump_cuda_jacobian_if_enabled(const char* name,
 }  // namespace
 
 
+// ===========================================================================
+// Per-pipeline dispatch. Each overload picks the kernel scalar types and the
+// batch / cached-Ibus / batched-Ybus flags for its storage layout.
+// ===========================================================================
+
+// FP64: single case, recompute Ibus in-kernel, non-batched Ybus values.
 void CudaJacobianOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
 {
     launch_fill_jacobian_gpu<double, double, double, double>(
-        static_cast<int32_t>(buf.d_Ybus_row.size()),
-        static_cast<int32_t>(buf.d_J_values.size()),
+        static_cast<int32_t>(buf.d_Ybus_row.size()),   // size_t -> int32 edge count
+        static_cast<int32_t>(buf.d_J_values.size()),   // size_t -> int32 nnz_J
         buf.n_bus,
         1,
         false,
@@ -242,6 +274,7 @@ void CudaJacobianOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
 }
 
 
+// Mixed: FP64 Ybus/voltage/Ibus inputs assembled into an FP32 Jacobian, batched.
 void CudaJacobianOp<float>::run(CudaMixedStorage& buf, IterationContext& ctx)
 {
     launch_fill_jacobian_gpu<float, double, double, double>(
@@ -265,6 +298,7 @@ void CudaJacobianOp<float>::run(CudaMixedStorage& buf, IterationContext& ctx)
 }
 
 
+// FP32: all-float inputs and Jacobian, batched.
 void CudaJacobianOp<float>::run(CudaFp32Storage& buf, IterationContext& ctx)
 {
     launch_fill_jacobian_gpu<float, float, float, float>(

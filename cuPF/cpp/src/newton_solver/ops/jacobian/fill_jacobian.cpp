@@ -18,6 +18,13 @@ static constexpr std::complex<double> kImaginaryUnit(0.0, 1.0);
 }
 
 
+// Assemble the CPU FP64 power-flow Jacobian values in place. The four real
+// sub-blocks (dP/dVa, dQ/dVa, dP/dVm, dQ/dVm) come from the real/imaginary
+// parts of two complex sensitivities per Ybus entry: an angle term (d/dVa,
+// factor i*V) and a magnitude term (d/dVm, via the normalized voltage Vnorm).
+// Scatter maps precomputed in jacobian_analysis place each contribution into
+// the right CSR slot. Off-diagonal entries are assignments; the diagonal adds
+// the self-term involving the bus current injection Ibus.
 void CpuJacobianOpF64::run(CpuFp64Storage& buf, IterationContext& ctx)
 {
     (void)ctx;
@@ -26,6 +33,7 @@ void CpuJacobianOpF64::run(CpuFp64Storage& buf, IterationContext& ctx)
         throw std::runtime_error("CpuJacobianOpF64::run: buffers are not prepared");
     }
 
+    // Reset values; recompute Ibus if the cached injection is stale.
     double* J_values = buf.J.valuePtr();
     std::fill(J_values, J_values + buf.J.nonZeros(), 0.0);
 
