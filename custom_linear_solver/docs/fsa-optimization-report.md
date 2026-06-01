@@ -184,9 +184,45 @@ compute-bound answer is "yes"):
      `store_matrix_sync`→scratch→subtract output handling, not the A loads. That output round-trip
      is unavoidable given the alignment constraint above.
 
-  **FP32 mixed is the precision sweet spot for this workload; tensor cores would only pay off on
-  much larger / denser fronts than power-grid multifrontal produces.** The WMMA path is kept
-  behind `MF_TC` as reproducible evidence.
+  **FP32 mixed is the precision sweet spot for the NATURAL structure.** But see the next section:
+  with bigger fronts (amalgamation) tensor cores DO win.
+
+## Tensor cores DO accelerate — with deep-K amalgamation (achieved)
+
+The blocker above was structural, not fundamental: power-grid supernodes are nc≤16 (K=16, one
+tensor tile), and 96% of fronts are tiny, so WMMA had nothing to amortize. The fix is to GROW the
+supernodes. An isolated microbench (`bench/tc_trailing_microbench.cu`) confirms the upside: the
+batched trailing `C-=L*U` is **1.5-2.7x faster in FP16 WMMA than FP32** for fronts ≥64 (e.g.
+16×128 2.69x, 32×256 2.72x).
+
+Growing nc requires care: a naive merge of postorder-consecutive columns is INVALID (a child's
+contribution block must nest in ONE parent front; merging across subtrees breaks it ->
+asm_idx=-1 -> OOB extend-add, compute-sanitizer-verified). The valid construction (`amalgamation_
+reorder`, env `MF_AMALG=cap:ratio`): merge each child column into its PARENT supernode (the child
+CB always nests in the parent front), then reorder columns so supernodes are contiguous — a
+postorder of the supernode tree, same fill class as any postorder of this etree. analyze re-derives
+perm / device value-map / symmetric pattern / etree in the new order and forces the resulting
+panel partition. relres stays < 1e-3 (verified across cases).
+
+The WMMA trailing then uses **multi-k-step** (K tiled over ceil(nc/16)) and **dynamic per-level
+shared** (sized by the level's max uc — the static 36KB version had collapsed occupancy to 1
+block/SM and lost; dynamic shared restored it).
+
+Result — batched B=64, per-system factor, amalg `32:3` + FP16 WMMA-TC + 2 IR steps:
+
+| case | natural batched FP32 | amalg+TC factor | relres (2 IR) |
+|------|----------------------|-----------------|---------------|
+| 9241 | 0.103 ms | **0.084 ms (-19%)** | 1.0e-6 |
+| 25k  | 0.365 ms | **0.286 ms (-22%)** | 1.2e-5 |
+| 70k  | 1.228 ms | **0.971 ms (-21%)** | 2.8e-4 |
+
+Tensor cores are part of the fastest pipeline (on 70k WMMA-TC 0.962 beats amalg-FP32 1.025).
+Two caveats kept honest: (1) the DOMINANT lever is the amalgamation itself — bigger dense fronts
+use the ALUs far better, since the natural batched FP32 runs at only ~0.2% of FP32 peak; FP16
+tensor cores add ~6% on top on the largest case and tie on smaller ones. (2) Aggressive
+amalgamation (ratio≥8 -> nc~16-20) regresses both because padded fill grows faster than the
+tensor-core gain — the sweet spot is mild (nc~7-10). All gated behind `MF_AMALG`/`MF_TC`; the
+default path is unchanged.
 
 Takeaway: **batching is the correct lever for this workload.** It converts the latency-bound
 single-system problem (where precision/tensor-cores are inert) into a compute-bound batched one
