@@ -90,9 +90,11 @@ static py::array_t<std::complex<double>> batch_voltage_to_numpy(
     const NRBatchResult& result)
 {
     py::array_t<std::complex<double>> out({result.batch_size, result.n_bus});
-    std::memcpy(out.mutable_data(),
-                result.V.data(),
-                result.V.size() * sizeof(std::complex<double>));
+    if (!result.V.empty()) {
+        std::memcpy(out.mutable_data(),
+                    result.V.data(),
+                    result.V.size() * sizeof(std::complex<double>));
+    }
     return out;
 }
 
@@ -321,7 +323,11 @@ PYBIND11_MODULE(_cupf, m)
     py::class_<AdjointResult>(m, "AdjointResult",
         "solve_adjoint() 결과. lambda와 load gradients는 batch-major layout이다.")
         .def_readonly("lambda", &AdjointResult::lambda,
-            "adjoint 변수 lambda [batch_size * dimF]")
+            "adjoint 변수 lambda [batch_size * dimF]. 주의: 'lambda'는 파이썬 예약어라 "
+            "result.lambda 로 직접 접근할 수 없다 — lambda_ / lambda_numpy 또는 "
+            "getattr(result, 'lambda') 를 사용한다.")
+        .def_readonly("lambda_", &AdjointResult::lambda,
+            "lambda의 키워드-안전 별칭 ('lambda'는 파이썬 예약어). 동일한 [batch_size * dimF].")
         .def_property_readonly("lambda_numpy",
             [](const AdjointResult& result) {
                 return double_matrix_to_numpy(result.lambda, result.batch_size, result.dimF);
@@ -449,7 +455,8 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("pq"),
              py::arg("config") = NRConfig{},
              py::arg("solve_options") = SolveOptions{},
-             "단일 scenario Newton-Raphson solve를 실행한다.")
+             "단일 scenario Newton-Raphson solve를 실행한다. "
+             "pv/pq는 initialize()에 전달한 것과 동일해야 한다(분석된 symbolic state와 일치).")
         .def("solve_batch",
              [](NewtonSolver& self,
                 py::array_t<int32_t, py::array::c_style | py::array::forcecast> indptr,
@@ -495,7 +502,9 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("pq"),
              py::arg("config") = NRConfig{},
              py::arg("solve_options") = SolveOptions{},
-             "batch-major scenario 배열 [batch, n_bus]에 대해 solve_batch를 실행한다.")
+             "batch-major scenario 배열 [batch, n_bus]에 대해 solve_batch를 실행한다. "
+             "batch_size>1은 CUDA FP32/Mixed/FP64에서 지원된다(CPU는 단일 케이스). "
+             "pv/pq는 initialize()에 전달한 것과 동일해야 한다.")
         .def("solve_adjoint",
              [](NewtonSolver& self,
                 py::array_t<double, py::array::c_style | py::array::forcecast> grad_va,
@@ -541,7 +550,8 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("pq"),
              py::arg("options") = AdjointOptions{},
              "마지막 forward state에서 native adjoint solve J^T lambda = dL/dx를 실행한다. "
-             "grad_va/grad_vm은 full-bus layout이며 1D 또는 batch-major 2D 배열이다.")
+             "grad_va/grad_vm은 full-bus layout이며 1D 또는 batch-major 2D 배열이다. "
+             "pv/pq는 initialize()/직전 forward와 동일해야 하고, batch_size도 직전 forward와 일치해야 한다.")
 #ifdef CUPF_WITH_TORCH
         .def("solve_with_adjoint_cache_torch",
              &solve_with_adjoint_cache_torch_binding,
@@ -555,7 +565,10 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("vm_out"),
              py::arg("config") = NRConfig{},
              py::arg("solve_options") = SolveOptions{},
-             "torch::Tensor CUDA zero-copy forward path. Dynamic load tensors and output tensors stay on device.")
+             "torch::Tensor CUDA zero-copy forward path. Dynamic load tensors and output tensors stay on device.\n"
+             "모든 텐서 dtype은 compute policy와 일치해야 한다: FP64 -> torch.float64, "
+             "FP32/Mixed -> torch.float32 (Mixed는 비-torch 경로의 FP64 입력과 달리 float32 텐서를 받는다). "
+             "load_p/load_q/va_out/vm_out은 [batch, n_bus], sbus_base_*/v0_*는 [n_bus] (배치 공통).")
         .def("solve_torch",
              &solve_with_adjoint_cache_torch_binding,
              py::arg("sbus_base_re"),
@@ -568,7 +581,8 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("vm_out"),
              py::arg("config") = NRConfig{},
              py::arg("solve_options") = SolveOptions{},
-             "Alias for solve_with_adjoint_cache_torch; set solve_options.prepare_adjoint_cache as needed.")
+             "Alias for solve_with_adjoint_cache_torch; set solve_options.prepare_adjoint_cache as needed.\n"
+             "텐서 dtype 규칙은 solve_with_adjoint_cache_torch와 동일: FP64 -> float64, FP32/Mixed -> float32.")
         .def("solve_adjoint_torch",
              &solve_adjoint_torch_binding,
              py::arg("grad_va"),
@@ -576,7 +590,9 @@ PYBIND11_MODULE(_cupf, m)
              py::arg("grad_load_p_out"),
              py::arg("grad_load_q_out"),
              py::arg("options") = AdjointOptions{},
-             "torch::Tensor CUDA zero-copy cached adjoint path using PyTorch current CUDA stream.")
+             "torch::Tensor CUDA zero-copy cached adjoint path using PyTorch current CUDA stream.\n"
+             "grad_va/grad_vm/grad_load_*_out은 모두 [batch, n_bus]이고 dtype은 forward와 동일해야 한다 "
+             "(FP64 -> float64, FP32/Mixed -> float32). batch는 직전 forward solve와 일치해야 한다.")
 #endif
         ;
 }
