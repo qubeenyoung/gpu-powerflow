@@ -12,6 +12,8 @@
 #ifdef CUPF_WITH_CUDA
 
 #include "cuda_fp32_storage.hpp"
+#include "newton_solver/storage/cuda/storage_convert.hpp"
+#include "utils/cuda_utils.hpp"
 
 #include <cmath>
 #include <complex>
@@ -227,29 +229,49 @@ void CudaFp32Storage::upload(const SolveContext& ctx)
 
     upload_ybus_components(d_Ybus_re, d_Ybus_im, ybus.data,
                            ybus.nnz, batch_size, ctx.ybus_value_stride, ybus_values_batched);
-    upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
 
-    // Seed rectangular V plus polar (Va, Vm) from the FP64 V0 guess.
-    std::vector<float> h_V_re(bus_count);
-    std::vector<float> h_V_im(bus_count);
-    std::vector<float> h_Va(bus_count);
-    std::vector<float> h_Vm(bus_count);
-    for (int32_t b = 0; b < batch_size; ++b) {
-        const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
-        const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(ctx.V0_stride);
-        for (int32_t bus = 0; bus < n_bus; ++bus) {
-            const auto& v0  = ctx.V0[src_base + static_cast<std::size_t>(bus)];
-            const std::size_t dst = dst_base + static_cast<std::size_t>(bus);
-            h_V_re[dst] = static_cast<float>(v0.real());
-            h_V_im[dst] = static_cast<float>(v0.imag());
-            h_Va[dst]   = static_cast<float>(std::arg(v0));
-            h_Vm[dst]   = static_cast<float>(std::abs(v0));
+    const int32_t total_bus = batch_size * n_bus;
+
+    // Fast path (contiguous batch, stride == n_bus): bulk H2D the raw FP64
+    // Sbus/V0 once and convert/cast on device, instead of per-element host
+    // cast + arg/abs loops that scale with batch_size * n_bus.
+    if (ctx.sbus_stride == n_bus && ctx.V0_stride == n_bus) {
+        DeviceBuffer<double> d_raw;
+        d_raw.resize(static_cast<std::size_t>(total_bus) * 2);
+
+        d_raw.assign(reinterpret_cast<const double*>(ctx.sbus),
+                     static_cast<std::size_t>(total_bus) * 2);
+        launch_split_complex<float>(d_raw.data(), d_Sbus_re.data(), d_Sbus_im.data(), total_bus);
+
+        d_raw.assign(reinterpret_cast<const double*>(ctx.V0),
+                     static_cast<std::size_t>(total_bus) * 2);
+        launch_seed_state_from_v0<float>(d_raw.data(), d_V_re.data(), d_V_im.data(),
+                                         d_Va.data(), d_Vm.data(), total_bus);
+    } else {
+        // General (strided) fallback: host conversion.
+        upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
+
+        std::vector<float> h_V_re(bus_count);
+        std::vector<float> h_V_im(bus_count);
+        std::vector<float> h_Va(bus_count);
+        std::vector<float> h_Vm(bus_count);
+        for (int32_t b = 0; b < batch_size; ++b) {
+            const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
+            const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(ctx.V0_stride);
+            for (int32_t bus = 0; bus < n_bus; ++bus) {
+                const auto& v0  = ctx.V0[src_base + static_cast<std::size_t>(bus)];
+                const std::size_t dst = dst_base + static_cast<std::size_t>(bus);
+                h_V_re[dst] = static_cast<float>(v0.real());
+                h_V_im[dst] = static_cast<float>(v0.imag());
+                h_Va[dst]   = static_cast<float>(std::arg(v0));
+                h_Vm[dst]   = static_cast<float>(std::abs(v0));
+            }
         }
+        d_V_re.assign(h_V_re.data(), h_V_re.size());
+        d_V_im.assign(h_V_im.data(), h_V_im.size());
+        d_Va.assign(h_Va.data(), h_Va.size());
+        d_Vm.assign(h_Vm.data(), h_Vm.size());
     }
-    d_V_re.assign(h_V_re.data(), h_V_re.size());
-    d_V_im.assign(h_V_im.data(), h_V_im.size());
-    d_Va.assign(h_Va.data(), h_Va.size());
-    d_Vm.assign(h_Vm.data(), h_Vm.size());
 
     d_F.memsetZero();
     d_normF.memsetZero();
@@ -267,18 +289,12 @@ void CudaFp32Storage::download(NRResult& result) const
         throw std::runtime_error("CudaFp32Storage::download: use download_batch for batch_size > 1");
     }
 
-    std::vector<float> h_re(static_cast<std::size_t>(n_bus));
-    std::vector<float> h_im(static_cast<std::size_t>(n_bus));
-
-    d_V_re.copyTo(h_re.data(), h_re.size());
-    d_V_im.copyTo(h_im.data(), h_im.size());
-
+    // Pack Re/Im into interleaved complex<double> on device, then one bulk D2H.
     result.V.resize(static_cast<std::size_t>(n_bus));
-    for (int32_t bus = 0; bus < n_bus; ++bus) {
-        result.V[static_cast<std::size_t>(bus)] = std::complex<double>(
-            static_cast<double>(h_re[static_cast<std::size_t>(bus)]),
-            static_cast<double>(h_im[static_cast<std::size_t>(bus)]));
-    }
+    DeviceBuffer<double> d_out;
+    d_out.resize(static_cast<std::size_t>(n_bus) * 2);
+    launch_pack_complex_to_double<float>(d_V_re.data(), d_V_im.data(), d_out.data(), n_bus);
+    d_out.copyTo(reinterpret_cast<double*>(result.V.data()), static_cast<std::size_t>(n_bus) * 2);
 }
 
 
@@ -286,25 +302,18 @@ void CudaFp32Storage::download(NRResult& result) const
 void CudaFp32Storage::download_batch(NRBatchResult& result) const
 {
     const std::size_t total = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
-    std::vector<float> h_re(total);
-    std::vector<float> h_im(total);
-
-    d_V_re.copyTo(h_re.data(), h_re.size());
-    d_V_im.copyTo(h_im.data(), h_im.size());
 
     result.n_bus      = n_bus;
     result.batch_size = batch_size;
     result.V.resize(total);
 
-    for (int32_t b = 0; b < batch_size; ++b) {
-        const std::size_t base = static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
-        for (int32_t bus = 0; bus < n_bus; ++bus) {
-            const std::size_t idx = base + static_cast<std::size_t>(bus);
-            result.V[idx] = std::complex<double>(
-                static_cast<double>(h_re[idx]),
-                static_cast<double>(h_im[idx]));
-        }
-    }
+    // Pack Re/Im into interleaved complex<double> on device, then one bulk D2H,
+    // instead of two copies + an O(batch*n_bus) host interleave loop.
+    DeviceBuffer<double> d_out;
+    d_out.resize(total * 2);
+    launch_pack_complex_to_double<float>(d_V_re.data(), d_V_im.data(), d_out.data(),
+                                         static_cast<int32_t>(total));
+    d_out.copyTo(reinterpret_cast<double*>(result.V.data()), total * 2);
 
     if (!d_normF.empty()) {
         std::vector<float> h_norm(static_cast<std::size_t>(batch_size));

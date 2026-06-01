@@ -1,0 +1,3 @@
+# generated benchmark data (reproduce via dump_cases.py / evaluator)
+cases/
+out_*/

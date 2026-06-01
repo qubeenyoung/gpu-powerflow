@@ -19,15 +19,15 @@
 
 namespace {
 
-// Ibus = Ybus * V (complex), one Ybus row per block-x. LANES threads cooperate
-// on a row's nonzeros, and BTILE batch cases are tiled along block-y/thread-y.
-// Accumulation runs in AccumScalar; static_cast loads/stores bridge the Ybus,
-// state, and accumulation precisions.
-template <int32_t LANES, int32_t BTILE,
-          typename YbusScalar, typename StateScalar, typename AccumScalar>
-__global__ void compute_ibus_kernel(
+// Scalar SpMV: one thread per (row, batch case), looping the row's nonzeros
+// sequentially. For low average degree (~4 nnz/row in power grids) this uses
+// every thread productively and avoids the warp-shuffle reduction and idle
+// lanes of the vectorized kernel above. Ybus values are shared across the
+// batch (y_re[k]); only V is per-case (v_re[base + col]).
+template <typename YbusScalar, typename StateScalar, typename AccumScalar>
+__global__ void compute_ibus_scalar_kernel(
     int32_t n_bus,
-    int32_t batch_count,
+    int32_t total_entries,
     const int32_t* __restrict__ y_row_ptr,
     const int32_t* __restrict__ y_col,
     const YbusScalar* __restrict__ y_re,
@@ -37,18 +37,16 @@ __global__ void compute_ibus_kernel(
     StateScalar* __restrict__ ibus_re,
     StateScalar* __restrict__ ibus_im)
 {
-    const int32_t row = blockIdx.x;
-    const int32_t lane = threadIdx.x;
-    const int32_t tb = threadIdx.y;
-    const int32_t batch = blockIdx.y * BTILE + tb;
-    if (row >= n_bus || batch >= batch_count) return;
+    const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= total_entries) return;
 
-    const int32_t base = batch * n_bus;   // start of this case's bus block
+    const int32_t batch = tid / n_bus;
+    const int32_t row   = tid - batch * n_bus;
+    const int32_t base  = batch * n_bus;
 
-    // Each lane strides over the row's nonzeros, accumulating a partial dot.
     AccumScalar acc_re = AccumScalar(0);
     AccumScalar acc_im = AccumScalar(0);
-    for (int32_t k = y_row_ptr[row] + lane; k < y_row_ptr[row + 1]; k += LANES) {
+    for (int32_t k = y_row_ptr[row]; k < y_row_ptr[row + 1]; ++k) {
         const int32_t col = y_col[k];
         const AccumScalar yr = static_cast<AccumScalar>(y_re[k]);
         const AccumScalar yi = static_cast<AccumScalar>(y_im[k]);
@@ -57,53 +55,46 @@ __global__ void compute_ibus_kernel(
         acc_re += yr * vr - yi * vi;
         acc_im += yr * vi + yi * vr;
     }
+    ibus_re[base + row] = static_cast<StateScalar>(acc_re);
+    ibus_im[base + row] = static_cast<StateScalar>(acc_im);
+}
 
-    // Warp-shuffle reduction across the LANES partials; lane 0 holds the sum.
-    const uint32_t mask = 0xffffffffu;
-    for (int32_t offset = LANES / 2; offset > 0; offset >>= 1) {
-        acc_re += __shfl_down_sync(mask, acc_re, offset, LANES);
-        acc_im += __shfl_down_sync(mask, acc_im, offset, LANES);
-    }
-
-    if (lane == 0) {
-        ibus_re[base + row] = static_cast<StateScalar>(acc_re);
-        ibus_im[base + row] = static_cast<StateScalar>(acc_im);
-    }
+// Launch helper for the scalar kernel (1 thread per row*batch).
+template <typename YbusScalar, typename StateScalar, typename AccumScalar>
+void launch_ibus_scalar(int32_t n_bus, int32_t batch_count,
+                        const int32_t* y_row_ptr, const int32_t* y_col,
+                        const YbusScalar* y_re, const YbusScalar* y_im,
+                        const StateScalar* v_re, const StateScalar* v_im,
+                        StateScalar* ibus_re, StateScalar* ibus_im)
+{
+    constexpr int32_t block = 256;
+    const int32_t total = n_bus * batch_count;
+    const int32_t grid = (total + block - 1) / block;
+    compute_ibus_scalar_kernel<YbusScalar, StateScalar, AccumScalar>
+        <<<grid, block, 0, cupf_current_cuda_stream()>>>(
+            n_bus, total, y_row_ptr, y_col, y_re, y_im, v_re, v_im, ibus_re, ibus_im);
+    CUDA_CHECK(cudaGetLastError());
+    sync_cuda_for_timing();
 }
 
 }  // namespace
 
 
-// FP64: single case (BTILE=1), one warp (32 lanes) per Ybus row.
 void launch_compute_ibus(CudaFp64Storage& buf)
 {
     if (buf.n_bus <= 0 || buf.d_Ybus_re.empty()) {
         throw std::runtime_error("launch_compute_ibus: buffers are not prepared");
     }
 
-    constexpr int32_t lanes = 32;
-    constexpr int32_t btile = 1;
-    const dim3 block(lanes, btile);
-    const dim3 grid(buf.n_bus, 1);
-
-    compute_ibus_kernel<lanes, btile, double, double, double><<<grid, block, 0, cupf_current_cuda_stream()>>>(
-        buf.n_bus,
-        1,
-        buf.d_Ybus_indptr.data(),
-        buf.d_Ybus_indices.data(),
-        buf.d_Ybus_re.data(),
-        buf.d_Ybus_im.data(),
-        buf.d_V_re.data(),
-        buf.d_V_im.data(),
-        buf.d_Ibus_re.data(),
-        buf.d_Ibus_im.data());
-    CUDA_CHECK(cudaGetLastError());
-    sync_cuda_for_timing();
+    launch_ibus_scalar<double, double, double>(
+        buf.n_bus, 1,
+        buf.d_Ybus_indptr.data(), buf.d_Ybus_indices.data(),
+        buf.d_Ybus_re.data(), buf.d_Ybus_im.data(),
+        buf.d_V_re.data(), buf.d_V_im.data(),
+        buf.d_Ibus_re.data(), buf.d_Ibus_im.data());
 }
 
 
-// FP32: batched (BTILE=8 cases per block). Requires a single shared Ybus
-// (per-case batched Ybus values are not supported by the tiled kernel).
 void launch_compute_ibus(CudaFp32Storage& buf)
 {
     if (buf.n_bus <= 0 || buf.nnz_ybus <= 0 || buf.batch_size <= 0) {
@@ -113,28 +104,15 @@ void launch_compute_ibus(CudaFp32Storage& buf)
         throw std::runtime_error("launch_compute_ibus: batched Ybus values are not supported by the tiled Ibus kernel");
     }
 
-    constexpr int32_t lanes = 32;
-    constexpr int32_t btile = 8;
-    const dim3 block(lanes, btile);
-    const dim3 grid(buf.n_bus, (buf.batch_size + btile - 1) / btile);
-
-    compute_ibus_kernel<lanes, btile, float, float, float><<<grid, block, 0, cupf_current_cuda_stream()>>>(
-        buf.n_bus,
-        buf.batch_size,
-        buf.d_Ybus_indptr.data(),
-        buf.d_Ybus_indices.data(),
-        buf.d_Ybus_re.data(),
-        buf.d_Ybus_im.data(),
-        buf.d_V_re.data(),
-        buf.d_V_im.data(),
-        buf.d_Ibus_re.data(),
-        buf.d_Ibus_im.data());
-    CUDA_CHECK(cudaGetLastError());
-    sync_cuda_for_timing();
+    launch_ibus_scalar<float, float, float>(
+        buf.n_bus, buf.batch_size,
+        buf.d_Ybus_indptr.data(), buf.d_Ybus_indices.data(),
+        buf.d_Ybus_re.data(), buf.d_Ybus_im.data(),
+        buf.d_V_re.data(), buf.d_V_im.data(),
+        buf.d_Ibus_re.data(), buf.d_Ibus_im.data());
 }
 
 
-// Mixed: like FP32 batching but accumulates in FP64 (double scalars).
 void launch_compute_ibus(CudaMixedStorage& buf)
 {
     if (buf.n_bus <= 0 || buf.nnz_ybus <= 0 || buf.batch_size <= 0) {
@@ -144,24 +122,12 @@ void launch_compute_ibus(CudaMixedStorage& buf)
         throw std::runtime_error("launch_compute_ibus: batched Ybus values are not supported by the tiled Ibus kernel");
     }
 
-    constexpr int32_t lanes = 32;
-    constexpr int32_t btile = 8;
-    const dim3 block(lanes, btile);
-    const dim3 grid(buf.n_bus, (buf.batch_size + btile - 1) / btile);
-
-    compute_ibus_kernel<lanes, btile, double, double, double><<<grid, block, 0, cupf_current_cuda_stream()>>>(
-        buf.n_bus,
-        buf.batch_size,
-        buf.d_Ybus_indptr.data(),
-        buf.d_Ybus_indices.data(),
-        buf.d_Ybus_re.data(),
-        buf.d_Ybus_im.data(),
-        buf.d_V_re.data(),
-        buf.d_V_im.data(),
-        buf.d_Ibus_re.data(),
-        buf.d_Ibus_im.data());
-    CUDA_CHECK(cudaGetLastError());
-    sync_cuda_for_timing();
+    launch_ibus_scalar<double, double, double>(
+        buf.n_bus, buf.batch_size,
+        buf.d_Ybus_indptr.data(), buf.d_Ybus_indices.data(),
+        buf.d_Ybus_re.data(), buf.d_Ybus_im.data(),
+        buf.d_V_re.data(), buf.d_V_im.data(),
+        buf.d_Ibus_re.data(), buf.d_Ibus_im.data());
 }
 
 

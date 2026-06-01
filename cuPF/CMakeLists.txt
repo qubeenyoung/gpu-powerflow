@@ -251,6 +251,7 @@ if(WITH_CUDA)
     cpp/src/newton_solver/storage/cuda/cuda_mixed_storage.cpp
     cpp/src/newton_solver/storage/cuda/cuda_fp32_storage.cpp
     cpp/src/newton_solver/storage/cuda/cuda_fp64_storage.cpp
+    cpp/src/newton_solver/storage/cuda/storage_convert.cu
 
     # Ops — CUDA Ibus
     cpp/src/newton_solver/ops/ibus/compute_ibus.cu
@@ -402,6 +403,16 @@ if(BUILD_EVALUATORS)
   )
   target_link_libraries(cupf_cpp_evaluate PRIVATE cupf)
   target_include_directories(cupf_cpp_evaluate PRIVATE
+    ${PROJECT_SOURCE_DIR}/cpp/inc
+    ${PROJECT_SOURCE_DIR}/tests)
+
+  # perf/: batch scaling micro-benchmark (analysis only, not shipped)
+  add_executable(cupf_batch_bench
+    perf/batch_bench.cpp
+    tests/dump_case_loader.cpp
+  )
+  target_link_libraries(cupf_batch_bench PRIVATE cupf)
+  target_include_directories(cupf_batch_bench PRIVATE
     ${PROJECT_SOURCE_DIR}/cpp/inc
     ${PROJECT_SOURCE_DIR}/tests)
 endif()

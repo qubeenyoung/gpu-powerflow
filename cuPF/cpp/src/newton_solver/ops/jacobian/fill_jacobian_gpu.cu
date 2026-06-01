@@ -256,11 +256,14 @@ void CudaJacobianOp<double>::run(CudaFp64Storage& buf, IterationContext& ctx)
         buf.n_bus,
         1,
         false,
-        false,
+        // use_cached_ibus=true: the ibus stage ran just before jacobian in the
+        // NR loop (and in prepare_adjoint_cache), so d_Ibus is current. Reusing
+        // it avoids recomputing the per-diagonal current injection in-kernel.
+        true,
         buf.d_Ybus_re, buf.d_Ybus_im,
         buf.d_Ybus_row, buf.d_Ybus_indices, buf.d_Ybus_indptr,
         buf.d_V_re, buf.d_V_im, buf.d_Vm,
-        nullptr, nullptr,
+        &buf.d_Ibus_re, &buf.d_Ibus_im,
         buf.d_mapJ11, buf.d_mapJ21, buf.d_mapJ12, buf.d_mapJ22,
         buf.d_diagJ11, buf.d_diagJ21, buf.d_diagJ12, buf.d_diagJ22,
         buf.d_J_values);
