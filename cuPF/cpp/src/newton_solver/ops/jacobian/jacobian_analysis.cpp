@@ -1,14 +1,27 @@
 // ---------------------------------------------------------------------------
 // jacobian_analysis.cpp
 //
-// One-time Jacobian analysis for Newton-Raphson power flow.
+// One-time *symbolic* analysis for the Newton-Raphson power-flow Jacobian. This
+// runs once per initialize() on the HOST; it produces only structure (indices,
+// CSR pattern, scatter maps), no floating-point values, and is not on the NR
+// per-iteration hot path. The per-iteration value fill is the GPU/CPU
+// fill_jacobian stage, which consumes the maps built here.
 //
+// Three steps:
 //   1. make_jacobian_indexing()
-//      Builds PV/PQ indexing tables.
+//      Builds the bus <-> Jacobian row/col index tables for the PV/PQ blocks.
 //   2. JacobianPatternGenerator::generate()
-//      Builds the CSR sparsity pattern of the 2x2 Jacobian.
+//      Builds the CSR sparsity pattern of the 2x2 (angle/magnitude) Jacobian.
 //   3. JacobianMapBuilder::build()
-//      Builds scatter maps from Ybus entries/buses into Jacobian value slots.
+//      Builds the scatter maps: for each Ybus entry, the CSR value slot its four
+//      sub-block contributions land in (so the fill stage is a pure scatter).
+//
+// The Jacobian has a 2x2 block structure over the unknowns (Va angles, Vm
+// magnitudes) and equations (P, Q):
+//     [ J11 = dP/dVa   J12 = dP/dVm ]
+//     [ J21 = dQ/dVa   J22 = dQ/dVm ]
+// PV buses contribute only the "pvpq" (angle/P) row & column; PQ buses also
+// contribute the "pq" (magnitude/Q) row & column.
 // ---------------------------------------------------------------------------
 
 #include "newton_solver/ops/jacobian/jacobian_analysis.hpp"
@@ -219,7 +232,11 @@ JacobianPattern JacobianPatternGenerator::generate(
         throw std::invalid_argument("JacobianPatternGenerator::generate: indexing/Ybus size mismatch");
     }
 
-    // Accumulate each Jacobian row's column indices in a temporary list.
+    // Build the pattern row-by-row in scratch lists, then compress to CSR. Each
+    // Ybus edge expands into up to four (row,col) entries (the 2x2 sub-blocks)
+    // and the same Jacobian column can be hit from several sources, so the
+    // per-row lists may contain duplicates / be unordered; they are sorted and
+    // de-duplicated below before the final CSR is emitted.
     const int32_t dim = indexing.n_pvpq + indexing.n_pq;
     std::vector<std::vector<int32_t>> rows(dim);
 

@@ -30,7 +30,10 @@
 
 namespace {
 
-// Throw if a required input pointer is null for a non-empty array.
+// Validate that a caller-supplied array pointer is non-null whenever it is
+// expected to point at `count` elements. A null pointer with count == 0 is
+// allowed (empty array), so we only throw when count > 0. `name` is echoed in
+// the message so the caller can tell which input was missing.
 template <typename T>
 void require_pointer(const T* ptr, const char* name, int32_t count)
 {
@@ -39,11 +42,17 @@ void require_pointer(const T* ptr, const char* name, int32_t count)
     }
 }
 
-// Per-nonzero row index of the CSR Ybus (the kernels need the row of each nz).
+// Ybus is stored CSR: indptr[row] gives the row's first nonzero and indices[k]
+// gives each nonzero's *column*, but the row is implicit (you only know it from
+// which indptr bucket k falls in). The edge-parallel kernels (Ibus, Jacobian)
+// launch one thread per nonzero `k` and need that nonzero's *row* in O(1), so
+// here we materialize the inverse: rows[k] = source row of nonzero k. Built once
+// in prepare() and uploaded to d_Ybus_row.
 std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
 {
     std::vector<int32_t> rows(static_cast<std::size_t>(ybus.nnz), 0);
     for (int32_t row = 0; row < ybus.rows; ++row) {
+        // Every nonzero in [indptr[row], indptr[row+1]) belongs to this row.
         for (int32_t k = ybus.indptr[row]; k < ybus.indptr[row + 1]; ++k) {
             rows[static_cast<std::size_t>(k)] = row;
         }
@@ -51,10 +60,15 @@ std::vector<int32_t> build_ybus_row_index(const YbusView& ybus)
     return rows;
 }
 
-// Host-side split of a batched complex array into separate real/imag device
-// buffers at the storage precision (cast double -> StorageScalar), honoring the
-// per-case source stride. Used only by the strided fallback in upload(); the
-// common contiguous path converts on-device (launch_split_complex).
+// Host-side split of a batched complex array (e.g. Sbus) into separate real/imag
+// device buffers at the storage precision (cast double -> StorageScalar).
+//
+// Only the strided fallback in upload() uses this; the common contiguous path
+// converts on-device via launch_split_complex (no host copy). `logical_count`
+// is the element count per case (n_bus); `stride` is the caller's per-case step
+// in `src` (>= logical_count, may exceed it if the source is a sub-view of a
+// wider buffer). Output is packed batch-major with stride == logical_count
+// (no gaps), which is what the kernels assume.
 template <typename StorageScalar>
 void upload_complex_components(DeviceBuffer<StorageScalar>& dst_re,
                                DeviceBuffer<StorageScalar>& dst_im,
@@ -69,6 +83,7 @@ void upload_complex_components(DeviceBuffer<StorageScalar>& dst_re,
     std::vector<StorageScalar> h_im(total);
 
     for (int32_t b = 0; b < batch_size; ++b) {
+        // Destination is gap-free (logical_count); source may be strided.
         const std::size_t dst_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(logical_count);
         const std::size_t src_base = static_cast<std::size_t>(b) * static_cast<std::size_t>(stride);
         for (int32_t i = 0; i < logical_count; ++i) {
@@ -77,12 +92,17 @@ void upload_complex_components(DeviceBuffer<StorageScalar>& dst_re,
             h_im[dst_base + static_cast<std::size_t>(i)] = static_cast<StorageScalar>(val.imag());
         }
     }
+    // Single bulk H2D per component (DeviceBuffer::assign = cudaMemcpy).
     dst_re.assign(h_re.data(), h_re.size());
     dst_im.assign(h_im.data(), h_im.size());
 }
 
-// Same split for Ybus values; a single shared Ybus unless values_batched (then
-// one set of values per case).
+// Same re/im split for the Ybus *values*. Unlike Sbus/V0, Ybus is usually
+// identical across the batch (same network, different injections), so by
+// default we store a single shared copy (`stored == 1`) and every case's kernel
+// reads slot k. Only when values_batched is set (per-case admittances, e.g. a
+// contingency sweep that perturbs lines) do we store one full copy per case.
+// The Ybus *sparsity pattern* is always shared and lives in the index buffers.
 template <typename StorageScalar>
 void upload_ybus_components(DeviceBuffer<StorageScalar>& dst_re,
                             DeviceBuffer<StorageScalar>& dst_im,
@@ -92,6 +112,7 @@ void upload_ybus_components(DeviceBuffer<StorageScalar>& dst_re,
                             int64_t stride,
                             bool values_batched)
 {
+    // How many copies of the nnz values we actually store.
     const int32_t stored = values_batched ? batch_size : 1;
     const std::size_t total =
         static_cast<std::size_t>(stored) * static_cast<std::size_t>(nnz_ybus);
@@ -122,21 +143,30 @@ void upload_ybus_components(DeviceBuffer<StorageScalar>& dst_re,
 template <typename StateScalar, typename JacScalar>
 void CudaBatchedStorage<StateScalar, JacScalar>::prepare(const InitializeContext& ctx)
 {
+    // Inputs are caller-owned raw pointers; fail fast (with the field name) if a
+    // required one is missing before we start allocating device memory.
     require_pointer(ctx.ybus.indptr,  "InitializeContext.ybus.indptr",  ctx.ybus.rows + 1);
     require_pointer(ctx.ybus.indices, "InitializeContext.ybus.indices", ctx.ybus.nnz);
     require_pointer(ctx.pv, "InitializeContext.pv", ctx.n_pv);
     require_pointer(ctx.pq, "InitializeContext.pq", ctx.n_pq);
 
+    // Problem dimensions. dimF = n_pvpq + n_pq is the Newton system size:
+    // n_pvpq angle equations (PV+PQ buses) plus n_pq magnitude equations.
     n_bus  = ctx.n_bus;
     n_pvpq = ctx.maps.n_pvpq;
     n_pq   = ctx.maps.n_pq;
     dimF   = n_pvpq + n_pq;
 
+    // nnz counts are fixed by the sparsity pattern (constant across the solve).
+    // Default to a single case; upload() promotes batch_size when B > 1.
     nnz_ybus = ctx.ybus.nnz;
     nnz_J    = ctx.J.nnz;
     batch_size = 1;
     ybus_values_batched = false;
 
+    // --- Ybus: values (re/im) + CSR structure + per-nz row index -------------
+    // Pattern and (by default) values are shared across the batch, so they are
+    // uploaded once here and never touched again in upload() unless batched.
     d_Ybus_re.resize(nnz_ybus);
     d_Ybus_im.resize(nnz_ybus);
     upload_ybus_components(d_Ybus_re, d_Ybus_im, ctx.ybus.data,
@@ -144,44 +174,55 @@ void CudaBatchedStorage<StateScalar, JacScalar>::prepare(const InitializeContext
     d_Ybus_indptr.assign(ctx.ybus.indptr,  static_cast<std::size_t>(ctx.ybus.rows + 1));
     d_Ybus_indices.assign(ctx.ybus.indices, static_cast<std::size_t>(nnz_ybus));
 
+    // Inverse of the CSR pattern (nz -> row) for the edge-parallel kernels.
     const std::vector<int32_t> h_y_row = build_ybus_row_index(ctx.ybus);
     d_Ybus_row.assign(h_y_row.data(), h_y_row.size());
 
+    // --- Jacobian: values buffer (filled each NR iter) + CSR structure -------
+    // Only the structure is known now; d_J_values is sized to one case here and
+    // resized to B*nnz_J in upload(). row_ptr/col_idx are shared across batch.
     d_J_values.resize(nnz_J);
     d_J_row_ptr.assign(ctx.J.row_ptr.data(), static_cast<std::size_t>(ctx.J.dim + 1));
     d_J_col_idx.assign(ctx.J.col_idx.data(), static_cast<std::size_t>(nnz_J));
 
+    // --- Newton residual / norm / step (single-case sizing for now) ----------
     d_F.resize(dimF);
     d_normF.resize(1);
     d_dx.resize(dimF);
 
+    // --- Voltage state: polar (Va, Vm) is authoritative, (V_re, V_im) cached --
     d_Va.resize(n_bus);
     d_Vm.resize(n_bus);
     d_V_re.resize(n_bus);
     d_V_im.resize(n_bus);
 
+    // --- Power injection (Sbus) and bus current (Ibus = Ybus*V) cache --------
     d_Sbus_re.resize(n_bus);
     d_Sbus_im.resize(n_bus);
     d_Ibus_re.resize(n_bus);
     d_Ibus_im.resize(n_bus);
 
+    // Scatter maps and bus-type index lists are pure topology (precision- and
+    // batch-independent), so upload them once here and never again.
     const auto upload_map = [](DeviceBuffer<int32_t>& dst, const std::vector<int32_t>& src) {
         dst.assign(src.data(), src.size());
     };
 
-    upload_map(d_mapJ11,  ctx.maps.mapJ11);
+    upload_map(d_mapJ11,  ctx.maps.mapJ11);   // off-diagonal J value positions
     upload_map(d_mapJ12,  ctx.maps.mapJ12);
     upload_map(d_mapJ21,  ctx.maps.mapJ21);
     upload_map(d_mapJ22,  ctx.maps.mapJ22);
-    upload_map(d_diagJ11, ctx.maps.diagJ11);
+    upload_map(d_diagJ11, ctx.maps.diagJ11);  // diagonal J value positions
     upload_map(d_diagJ12, ctx.maps.diagJ12);
     upload_map(d_diagJ21, ctx.maps.diagJ21);
     upload_map(d_diagJ22, ctx.maps.diagJ22);
-    upload_map(d_pvpq,    ctx.maps.pvpq);
+    upload_map(d_pvpq,    ctx.maps.pvpq);      // PV+PQ bus order (Jacobian rows)
 
     d_pv.assign(ctx.pv, static_cast<std::size_t>(ctx.n_pv));
     d_pq.assign(ctx.pq, static_cast<std::size_t>(ctx.n_pq));
 
+    // Zero the accumulators/outputs so a solve that reads before the first write
+    // (or a dump on iteration 0) sees defined memory rather than malloc garbage.
     d_F.memsetZero();
     d_normF.memsetZero();
     d_dx.memsetZero();
@@ -200,6 +241,9 @@ void CudaBatchedStorage<StateScalar, JacScalar>::upload(const SolveContext& ctx)
         throw std::invalid_argument("CudaBatchedStorage::upload: solve context is incomplete");
     }
 
+    // The sparsity pattern was baked into the device buffers (and the cuDSS
+    // symbolic analysis) in prepare(); a different shape now would corrupt every
+    // index buffer, so reject it rather than silently misbehave.
     const YbusView& ybus = *ctx.ybus;
     if (ybus.rows != n_bus || ybus.cols != n_bus || ybus.nnz != nnz_ybus) {
         throw std::runtime_error("CudaBatchedStorage::upload: Ybus dimensions do not match initialize()");
@@ -212,6 +256,8 @@ void CudaBatchedStorage<StateScalar, JacScalar>::upload(const SolveContext& ctx)
     if (ctx.batch_size <= 0) {
         throw std::invalid_argument("CudaBatchedStorage::upload: batch_size must be positive");
     }
+    // Each case must span at least n_bus elements in the source; a smaller
+    // stride would make case b overlap case b-1.
     if (ctx.sbus_stride < n_bus || ctx.V0_stride < n_bus) {
         throw std::invalid_argument("CudaBatchedStorage::upload: batch strides must be at least n_bus");
     }
@@ -219,19 +265,23 @@ void CudaBatchedStorage<StateScalar, JacScalar>::upload(const SolveContext& ctx)
     batch_size = ctx.batch_size;
     ybus_values_batched = ctx.ybus_values_batched;
 
+    // Per-solve buffer sizes (batch-major totals). nnz_J/dimF/n_bus are fixed;
+    // only batch_size varies between solves on the same initialized solver.
     const std::size_t bus_count      = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
     const std::size_t residual_count = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(dimF);
     const std::size_t jacobian_count = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(nnz_J);
 
+    // Grow (or shrink) only when the batch size actually changed — repeated
+    // solves at the same B reuse the existing device allocations (no churn).
     const auto ensure_size = [](auto& buf, std::size_t count) {
         if (buf.size() != count) buf.resize(count);
     };
 
-    ensure_size(d_J_values,  jacobian_count);
-    ensure_size(d_F,         residual_count);
-    ensure_size(d_normF,     static_cast<std::size_t>(batch_size));
-    ensure_size(d_dx,        residual_count);
-    ensure_size(d_Va,        bus_count);
+    ensure_size(d_J_values,  jacobian_count);   // [B * nnz_J]
+    ensure_size(d_F,         residual_count);   // [B * dimF]
+    ensure_size(d_normF,     static_cast<std::size_t>(batch_size));  // [B]
+    ensure_size(d_dx,        residual_count);   // [B * dimF]
+    ensure_size(d_Va,        bus_count);        // [B * n_bus] (and the rest)
     ensure_size(d_Vm,        bus_count);
     ensure_size(d_V_re,      bus_count);
     ensure_size(d_V_im,      bus_count);
@@ -240,6 +290,8 @@ void CudaBatchedStorage<StateScalar, JacScalar>::upload(const SolveContext& ctx)
     ensure_size(d_Ibus_re,   bus_count);
     ensure_size(d_Ibus_im,   bus_count);
 
+    // Refresh Ybus values (pattern is unchanged from prepare()). Shared across
+    // the batch unless ybus_values_batched.
     upload_ybus_components(d_Ybus_re, d_Ybus_im, ybus.data,
                            ybus.nnz, batch_size, ctx.ybus_value_stride, ybus_values_batched);
 
@@ -250,19 +302,28 @@ void CudaBatchedStorage<StateScalar, JacScalar>::upload(const SolveContext& ctx)
     // cast + arg/abs loops that scale with batch_size * n_bus. The device
     // kernels emit StateScalar (float for FP32, double for FP64/Mixed).
     if (ctx.sbus_stride == n_bus && ctx.V0_stride == n_bus) {
+        // std::complex<double> is layout-compatible with two contiguous doubles
+        // (re, im), so a B*n_bus complex array reinterprets as 2*B*n_bus doubles
+        // with no copy. We H2D that raw block once into a scratch buffer and let
+        // the device kernels do the re/im split and the polar conversion.
         DeviceBuffer<double> d_raw;
         d_raw.resize(static_cast<std::size_t>(total_bus) * 2);
 
+        // Sbus: just split interleaved (re,im) into d_Sbus_re / d_Sbus_im.
         d_raw.assign(reinterpret_cast<const double*>(ctx.sbus),
                      static_cast<std::size_t>(total_bus) * 2);
         launch_split_complex<StateScalar>(d_raw.data(), d_Sbus_re.data(), d_Sbus_im.data(), total_bus);
 
+        // V0: split into rectangular (V_re,V_im) AND seed polar state
+        // (Va = atan2(im,re), Vm = hypot(re,im)) in one kernel pass.
         d_raw.assign(reinterpret_cast<const double*>(ctx.V0),
                      static_cast<std::size_t>(total_bus) * 2);
         launch_seed_state_from_v0<StateScalar>(d_raw.data(), d_V_re.data(), d_V_im.data(),
                                                d_Va.data(), d_Vm.data(), total_bus);
     } else {
-        // General (strided) fallback: host conversion.
+        // General (strided) fallback: the source isn't a clean contiguous block
+        // (each case is sub-strided), so we can't reinterpret-and-bulk-copy.
+        // Convert on the host instead, packing into gap-free batch-major order.
         upload_complex_components(d_Sbus_re, d_Sbus_im, ctx.sbus, n_bus, batch_size, ctx.sbus_stride);
 
         std::vector<StateScalar> h_V_re(bus_count);
@@ -275,10 +336,12 @@ void CudaBatchedStorage<StateScalar, JacScalar>::upload(const SolveContext& ctx)
             for (int32_t bus = 0; bus < n_bus; ++bus) {
                 const auto& v0  = ctx.V0[src_base + static_cast<std::size_t>(bus)];
                 const std::size_t dst = dst_base + static_cast<std::size_t>(bus);
+                // Keep both representations: rectangular for the mismatch/Ibus
+                // kernels, polar for the Newton angle/magnitude state.
                 h_V_re[dst] = static_cast<StateScalar>(v0.real());
                 h_V_im[dst] = static_cast<StateScalar>(v0.imag());
-                h_Va[dst]   = static_cast<StateScalar>(std::arg(v0));
-                h_Vm[dst]   = static_cast<StateScalar>(std::abs(v0));
+                h_Va[dst]   = static_cast<StateScalar>(std::arg(v0));   // angle
+                h_Vm[dst]   = static_cast<StateScalar>(std::abs(v0));   // magnitude
             }
         }
         d_V_re.assign(h_V_re.data(), h_V_re.size());
@@ -287,6 +350,8 @@ void CudaBatchedStorage<StateScalar, JacScalar>::upload(const SolveContext& ctx)
         d_Vm.assign(h_Vm.data(), h_Vm.size());
     }
 
+    // Reset per-iteration accumulators for this fresh solve: residual, its norm,
+    // the step, the Jacobian values, and the cached Ibus (recomputed each iter).
     d_F.memsetZero();
     d_normF.memsetZero();
     d_dx.memsetZero();
