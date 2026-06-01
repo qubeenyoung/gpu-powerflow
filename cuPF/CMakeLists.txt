@@ -229,7 +229,7 @@ set(CUPF_CORE_SOURCES
   cpp/src/newton_solver/core/newton_solver.cpp
   cpp/src/newton_solver/core/newton_solver_adjoint.cpp
   cpp/src/newton_solver/core/newton_solver_adjoint_math.cpp
-  cpp/src/newton_solver/core/newton_solver_torch_bridge.cpp
+  cpp/src/newton_solver/core/torch_bridge.cpp
 
   # Storage — CPU
   cpp/src/newton_solver/storage/cpu/cpu_fp64_storage.cpp
