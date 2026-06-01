@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 #include "newton_solver/core/newton_solver_adjoint.hpp"
-#include "newton_solver/core/newton_solver_adjoint_math.hpp"
+#include "newton_solver/core/adjoint_math.hpp"
 #include "newton_solver/core/csr_transpose.hpp"
 #include "newton_solver/core/solver_contexts.hpp"
 #include "newton_solver/ops/ibus/compute_ibus.hpp"

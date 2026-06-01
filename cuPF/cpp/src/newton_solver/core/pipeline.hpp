@@ -25,8 +25,21 @@
 #endif
 
 
+// ===========================================================================
+// Solver pipelines
+//
+// Each pipeline is a "profile" that bundles a storage layout, a linear solver,
+// and an adjoint cache, and exposes the same fixed set of Newton-Raphson stage
+// methods (ibus -> mismatch -> mismatch_norm -> jacobian -> prepare_rhs ->
+// factorize -> solve -> voltage_update) plus initialize/upload/download_batch.
+// NewtonSolver holds them in the SolverPipeline variant and drives whichever
+// is active via std::visit, so the variants are structurally interchangeable
+// and differ only in precision / storage / linear-solver backend.
+// batch_supported marks the profiles that accept batch_size > 1.
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
-// CpuFp64Pipeline
+// CpuFp64Pipeline — reference profile (CPU FP64, KLU direct solver)
 // ---------------------------------------------------------------------------
 struct CpuFp64Pipeline {
     CpuFp64Storage    buf;
@@ -48,6 +61,8 @@ struct CpuFp64Pipeline {
         result.V = std::move(single.V);
     }
 
+    // One NR iteration stage each; the CUDA profiles below mirror this set
+    // with CUDA ops and the matching precision.
     void ibus(IterationContext& ctx)          { CpuIbusOp{}.run(buf, ctx); }
     void mismatch(IterationContext& ctx)      { CpuMismatchOp{}.run(buf, ctx); }
     void mismatch_norm(IterationContext& ctx) { CpuMismatchNormOp{}.run(buf, ctx); }

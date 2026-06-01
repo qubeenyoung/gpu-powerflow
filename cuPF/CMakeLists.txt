@@ -228,7 +228,7 @@ set(CUPF_CORE_SOURCES
   cpp/src/newton_solver/ops/jacobian/jacobian_analysis.cpp
   cpp/src/newton_solver/core/newton_solver.cpp
   cpp/src/newton_solver/core/newton_solver_adjoint.cpp
-  cpp/src/newton_solver/core/newton_solver_adjoint_math.cpp
+  cpp/src/newton_solver/core/adjoint_math.cpp
   cpp/src/newton_solver/core/torch_bridge.cpp
 
   # Storage — CPU
