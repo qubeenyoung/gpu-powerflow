@@ -457,11 +457,18 @@ __global__ void mf_invert_pivot(int npanels, const int* __restrict__ front_ptr,
 MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const int* d_Ai,
                                       const std::vector<int>& Lp,
                                       const std::vector<int>& Li,
-                                      const std::vector<int>& parent, int panel_cap, bool fp32)
+                                      const std::vector<int>& parent, int panel_cap, bool fp32,
+                                      const custom_linear_solver::symbolic::PanelPartition* forced_panels)
 {
     namespace sym = custom_linear_solver::symbolic;
     const bool tm = std::getenv("MF_TIME") != nullptr;  // analysis sub-phase profiling
     const bool solve_f32 = std::getenv("MF_SOLVE_F32") != nullptr;  // cy170: FP32 solve A/B
+    // Single-system mixed factor (FP64-master / FP32-working LU). Default OFF: this single-system
+    // path is the FP64 reference; MF_MIXED opts into the mixed LU (the batched path selects
+    // precision explicitly via BatchPrecision, see multifrontal_batched). On consumer Ampere FP64
+    // is 1/64 FP32, so the mixed LU bulk is far cheaper while the FP64 master keeps the assembly
+    // precise; it helps small/medium fronts (large factor is launch-bound, not compute-bound).
+    if (std::getenv("MF_MIXED") != nullptr && std::getenv("MF_NO_MIXED") == nullptr) fp32 = true;
     auto tclk = std::chrono::steady_clock::now();
     auto lap = [&](const char* nm) {
         if (tm) {
@@ -496,7 +503,8 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
                         : (n >= 80000 ? 16 : (n >= 16000 ? 12 : panel_cap));
     if (eff_cap < 1) eff_cap = 1;
     if (eff_cap > 64) eff_cap = 64;
-    const sym::PanelPartition panels = sym::relaxed_panels(n, parent, colcount, eff_cap);
+    const sym::PanelPartition panels =
+        forced_panels ? *forced_panels : sym::relaxed_panels(n, parent, colcount, eff_cap);
     if (tm) {
         long tf = Lp[n];
         std::fprintf(stderr, "  [amalg] cap=%d panels=%d padded_fill=%ld pad_ratio=%.2fx n/panels=%.1f\n",
@@ -509,6 +517,9 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     lap("multifrontal_symbolic");
     const int P = panels.num_panels;
     plan.num_panels = P;
+    plan.h_front_ptr = mf.front_ptr;   // host copies for batched dispatch / TC shared sizing
+    plan.h_ncols = panels.ncols;
+    // h_plcols filled after plcols is built below.
 
     // Front-size-band profile (env MF_FRONTPROF): where the factor FLOPS live. Dense
     // front work ~ fsz^2 * nc (panel factor) + uc^2 * nc (trailing). Buckets by fsz so
@@ -565,6 +576,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         std::vector<int> next(plan.plptr.begin(), plan.plptr.end());
         for (int p = 0; p < P; ++p) plcols[next[plevel[p]]++] = p;
     }
+    plan.h_plcols = plcols;
     if (tm) {
         // cy171: solve is latency-bound (low BW utilization) -> profile per-level
         // parallelism. A level with < ~82 fronts (RTX3090 SM count) under-fills the GPU.
@@ -845,16 +857,16 @@ bool factorize_multifrontal_device(MultifrontalPlan& plan, const double* d_csr_v
         return false;
 
     cudaStream_t stream = static_cast<cudaStream_t>(plan.stream);
-    // FP64 master holds the assembly (both modes); the FP32 working arena is overwritten
-    // per front by the mixed kernel's narrow, so it needs no memset.
-    cudaMemsetAsync(plan.d_front, 0, plan.front_total * sizeof(double), stream);
-    cudaMemsetAsync(plan.d_sing, 0, sizeof(int), stream);
 
     const int T = 128;
     cudaEvent_t k0, k1;
     cudaEventCreate(&k0);
     cudaEventCreate(&k1);
     cudaEventRecord(k0, stream);
+    // FP64 master holds the assembly (both modes); the FP32 working arena is overwritten
+    // per front by the mixed kernel's narrow, so it needs no memset.
+    cudaMemsetAsync(plan.d_front, 0, plan.front_total * sizeof(double), stream);
+    cudaMemsetAsync(plan.d_sing, 0, sizeof(int), stream);
     const int sb = (plan.nnz_a + T - 1) / T;  // scatter A into the FP64 master (both modes)
     mf_scatter_csr_values<<<sb, T, 0, stream>>>(plan.nnz_a, d_ordered_value_to_csr,
                                                 plan.d_a_pos, d_csr_values, plan.d_front);

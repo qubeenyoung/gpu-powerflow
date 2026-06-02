@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "factorize/multifrontal_batched.hpp"
 #include "io.hpp"
 #include "solver.hpp"
 
@@ -24,6 +25,8 @@ struct Options {
     fs::path solution_out;
     bool write_solution = false;
     int repeat = 1;
+    int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
+    bool batch_only = false;  // skip the single-system factor/solve (e.g. nc>16 amalgamation)
 };
 
 template <typename T>
@@ -121,6 +124,11 @@ Options parse_args(int argc, char** argv)
             if (++i >= argc) throw std::runtime_error("--repeat requires a count");
             options.repeat = std::stoi(argv[i]);
             if (options.repeat <= 0) throw std::runtime_error("--repeat must be positive");
+        } else if (arg == "--batch") {
+            if (++i >= argc) throw std::runtime_error("--batch requires a count");
+            options.batch = std::stoi(argv[i]);
+        } else if (arg == "--batch-only") {
+            options.batch_only = true;
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -259,21 +267,29 @@ int main(int argc, char** argv)
 
         std::vector<double> factor_ms;
         std::vector<double> solve_ms;
+        std::vector<double> factor_kms;
+        std::vector<double> solve_kms;
         factor_ms.reserve(static_cast<std::size_t>(options.repeat));
         solve_ms.reserve(static_cast<std::size_t>(options.repeat));
+        const bool kernel_time = std::getenv("CLS_KERNEL_TIME") != nullptr;
+        if (options.batch_only) { factor_ms.push_back(0); solve_ms.push_back(0); }
 
-        for (int r = 0; r < options.repeat; ++r) {
+        for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
+            double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
-            require_success(solver.factorize(), "factorize");
+            require_success(solver.factorize(kernel_time ? &kms : nullptr), "factorize");
             const auto stop = std::chrono::steady_clock::now();
             factor_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
+            if (kernel_time) factor_kms.push_back(kms);
         }
 
-        for (int r = 0; r < options.repeat; ++r) {
+        for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
+            double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
-            require_success(solver.solve(), "solve");
+            require_success(solver.solve(kernel_time ? &kms : nullptr), "solve");
             const auto stop = std::chrono::steady_clock::now();
             solve_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
+            if (kernel_time) solve_kms.push_back(kms);
         }
         const auto t_solve = std::chrono::steady_clock::now();
 
@@ -283,6 +299,52 @@ int main(int argc, char** argv)
             scripts::write_matrix_market_vector(options.solution_out, solution);
         }
         const auto t_done = std::chrono::steady_clock::now();
+
+        // ---- Uniform-batch experiment (B systems, same pattern) -------------------------
+        double batch_factor_per_ms = 0, batch_solve_per_ms = 0, batch_relres = 0;
+        if (options.batch > 0) {
+            const int B = options.batch;
+            const int n = matrix.rows, nnz = matrix.nnz();
+            // Map env knobs to the batch precision mode. Default: Mixed for small/medium (it passes
+            // 1e-3 without refinement), FP64 for large. MF_TC / MF_FP32 / MF_MIXED / MF_NO_MIXED force.
+            using cls::factorize::BatchPrecision;
+            BatchPrecision prec = (n < 24000) ? BatchPrecision::Mixed : BatchPrecision::FP64;
+            if (std::getenv("MF_NO_MIXED")) prec = BatchPrecision::FP64;
+            if (std::getenv("MF_FP32")) prec = BatchPrecision::FP32;
+            if (std::getenv("MF_MIXED")) prec = BatchPrecision::Mixed;
+            if (std::getenv("MF_TC")) prec = BatchPrecision::TC;
+            // B identical copies (same pattern + values) -> each batch solves the same system,
+            // so the per-batch residual must match the single-system solve (correctness check).
+            std::vector<double> hvalB((std::size_t)B * nnz), hrhsB((std::size_t)B * n);
+            for (int b = 0; b < B; ++b) {
+                std::copy(matrix.values.begin(), matrix.values.end(), hvalB.begin() + (std::size_t)b * nnz);
+                std::copy(rhs.values.begin(), rhs.values.end(), hrhsB.begin() + (std::size_t)b * n);
+            }
+            DeviceBuffer<double> d_valB, d_rhsB, d_solB;
+            d_valB.upload(hvalB);
+            d_rhsB.upload(hrhsB);
+            d_solB.allocate((std::size_t)B * n);
+            require_success(solver.batched_setup(B, prec), "batched_setup");
+            std::vector<double> bf, bs;
+            for (int r = 0; r < options.repeat; ++r) {
+                double kf = 0, ks = 0;
+                require_success(solver.batched_factorize(d_valB.get(), &kf), "batched_factorize");
+                require_success(solver.batched_solve(d_rhsB.get(), d_solB.get(), &ks), "batched_solve");
+                bf.push_back(kf);
+                bs.push_back(ks);
+            }
+            batch_factor_per_ms = median(bf) / B;
+            batch_solve_per_ms = median(bs) / B;
+            std::vector<double> solB((std::size_t)B * n);
+            cuda_check(cudaMemcpy(solB.data(), d_solB.get(), (std::size_t)B * n * sizeof(double),
+                                  cudaMemcpyDeviceToHost), "D2H batch sol");
+            // max relres over ALL B batches (catches per-batch indexing bugs, not just batch 0)
+            for (int b = 0; b < B; ++b) {
+                std::vector<double> xb(solB.begin() + (std::size_t)b * n,
+                                       solB.begin() + (std::size_t)(b + 1) * n);
+                batch_relres = std::max(batch_relres, residual(matrix, rhs.values, xb).rel_l2);
+            }
+        }
 
         const auto ms = [](auto a, auto b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
@@ -297,7 +359,18 @@ int main(int argc, char** argv)
                   << "set_ms=" << ms(t_upload, t_set) << '\n'
                   << "analyze_ms=" << ms(t_set, t_analyze) << '\n'
                   << "factorize_ms=" << median(factor_ms) << '\n'
-                  << "solve_ms=" << median(solve_ms) << '\n'
+                  << "solve_ms=" << median(solve_ms) << '\n';
+        if (kernel_time) {
+            std::cout << "factorize_kernel_ms=" << median(factor_kms) << '\n'
+                      << "solve_kernel_ms=" << median(solve_kms) << '\n';
+        }
+        if (options.batch > 0) {
+            std::cout << "batch=" << options.batch << '\n'
+                      << "batch_factor_per_sys_ms=" << batch_factor_per_ms << '\n'
+                      << "batch_solve_per_sys_ms=" << batch_solve_per_ms << '\n'
+                      << "batch_relres=" << batch_relres << '\n';
+        }
+        std::cout
                   << "download_check_ms=" << ms(t_solve, t_done) << '\n'
                   << "residual_l2=" << stats.abs_l2 << '\n'
                   << "relative_residual_l2=" << stats.rel_l2 << '\n'

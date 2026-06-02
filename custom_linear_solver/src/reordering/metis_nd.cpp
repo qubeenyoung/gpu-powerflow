@@ -45,6 +45,14 @@ void induce(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     }
 }
 
+// Parallel induced-subgraph extraction (same output as induce(), multi-core). Used at the
+// root recursion level where only one thread is otherwise active; the inner par_for self-
+// limits to serial for small subgraphs, so deeper (already thread-saturated) levels keep the
+// serial induce().
+void induce_par(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
+                const std::vector<idx_t>& part, idx_t which, std::vector<idx_t>& sx,
+                std::vector<idx_t>& sa, std::vector<int>& map);
+
 void base_nodend(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
                  std::vector<int>& perm)
 {
@@ -74,6 +82,8 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
 {
     const int n = static_cast<int>(xadj.size()) - 1;
     if (depth <= 0 || n < base_thr || adj.empty()) { base_nodend(xadj, adj, perm); return; }
+    const bool rtm = is_root && std::getenv("PARND_PROF") != nullptr;
+    auto rt_start = std::chrono::steady_clock::now();
     idx_t nv = n, sepsize = 0;
     // cy263: no xx/aa graph copy. METIS_ComputeVertexSeparator treats the input graph as
     // read-only (it copies into its own internal graph_t), and induce() below reads the
@@ -97,10 +107,28 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     }
     std::vector<idx_t> x0, a0, x1, a1;
     std::vector<int> m0, m1;
-    induce(xadj, adj, part, 0, x0, a0, m0);
-    induce(xadj, adj, part, 1, x1, a1, m1);
+    // Use the multi-core induce on the few TOP levels (large subgraphs, few active recursion
+    // threads), where the single-threaded induce sits on the critical path. The inner par_for
+    // self-limits to serial below 32768, so deeper/smaller subgraphs keep serial induce and the
+    // oversubscription from concurrent branches stays bounded. PARND_TOPIND overrides the cutoff.
+    const char* ti_s = std::getenv("PARND_TOPIND");
+    const int topind = ti_s ? std::atoi(ti_s) : 49152;
+    if (is_root || n >= topind) {
+        std::thread ti([&] { induce_par(xadj, adj, part, 0, x0, a0, m0); });
+        induce_par(xadj, adj, part, 1, x1, a1, m1);
+        ti.join();
+    } else {
+        induce(xadj, adj, part, 0, x0, a0, m0);
+        induce(xadj, adj, part, 1, x1, a1, m1);
+    }
     const int n0 = static_cast<int>(m0.size()), n1 = static_cast<int>(m1.size());
     if (n0 == 0 || n1 == 0) { base_nodend(xadj, adj, perm); return; }  // degenerate split
+    if (rtm) {
+        auto rt1 = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "  [parnd-prof] root n=%d sep+induce=%.1fms sepsize=%d -> halves %d/%d\n",
+                     n, std::chrono::duration<double, std::milli>(rt1 - rt_start).count(),
+                     (int)sepsize, n0, n1);
+    }
     std::vector<int> p0, p1;
     std::thread th([&] { par_nd_rec(x0, a0, p0, depth - 1, base_thr, false); });
     par_nd_rec(x1, a1, p1, depth - 1, base_thr, false);  // cy219: recursion uses METIS (is_root=false)
@@ -132,6 +160,41 @@ void par_for(int lo, int hi, Fn&& fn)
         if (a < b) th.emplace_back([&fn, a, b] { fn(a, b); });
     }
     for (auto& x : th) x.join();
+}
+
+void induce_par(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
+                const std::vector<idx_t>& part, idx_t which, std::vector<idx_t>& sx,
+                std::vector<idx_t>& sa, std::vector<int>& map)
+{
+    const int n = static_cast<int>(xadj.size()) - 1;
+    // Local relabel: keep vertices with part[v]==which in ascending vertex order. The scan
+    // that assigns local indices is serial (O(n), ~0.1ms) but the count/fill passes are
+    // multi-core. Output is byte-identical to serial induce().
+    std::vector<int> g2l(n, -1);
+    map.clear();
+    for (int v = 0; v < n; ++v)
+        if (part[v] == which) { g2l[v] = static_cast<int>(map.size()); map.push_back(v); }
+    const int sn = static_cast<int>(map.size());
+    sx.assign(sn + 1, 0);
+    par_for(0, sn, [&](int lo, int hi) {
+        for (int li = lo; li < hi; ++li) {
+            const int v = map[li];
+            int cnt = 0;
+            for (idx_t p = xadj[v]; p < xadj[v + 1]; ++p)
+                if (part[adj[p]] == which) ++cnt;
+            sx[li + 1] = cnt;
+        }
+    });
+    for (int i = 0; i < sn; ++i) sx[i + 1] += sx[i];
+    sa.resize(static_cast<std::size_t>(sx[sn]));
+    par_for(0, sn, [&](int lo, int hi) {
+        for (int li = lo; li < hi; ++li) {
+            const int v = map[li];
+            idx_t w = sx[li];
+            for (idx_t p = xadj[v]; p < xadj[v + 1]; ++p)
+                if (part[adj[p]] == which) sa[w++] = g2l[adj[p]];
+        }
+    });
 }
 
 void build_symmetric_adjacency(int n, const int* col_ptr, const int* row_idx,
@@ -200,7 +263,79 @@ void build_symmetric_adjacency(int n, const int* col_ptr, const int* row_idx,
     });
 }
 
+// Run the ND ordering (parallel nested dissection or serial METIS NodeND) on an already-built
+// symmetric idx_t graph. Fills perm in METIS convention (perm[new_pos] = old_vertex). Shared by
+// metis_nd (CPU graph build) and metis_nd_from_graph (GPU graph build).
+bool run_nd_on_graph(int n, std::vector<idx_t>& xadj, std::vector<idx_t>& adjncy,
+                     std::vector<int>& perm, bool parallel, double t_build_ms)
+{
+    const bool tm = std::getenv("METIS_TIME") != nullptr;
+    auto t1 = std::chrono::steady_clock::now();
+
+    if (adjncy.empty()) {  // no edges: natural order is optimal
+        for (int i = 0; i < n; ++i) perm[i] = i;
+        return true;
+    }
+
+    idx_t options[METIS_NOPTIONS];
+    METIS_SetDefaultOptions(options);
+    options[METIS_OPTION_NUMBERING] = 0;
+
+    const char* pd = std::getenv("PAR_ND");
+    if (parallel || pd) {
+        const int depth = (pd && std::atoi(pd) > 0) ? std::atoi(pd) : 4;
+        const char* bs = std::getenv("PAR_ND_BASE");
+        const int base_thr = bs ? std::atoi(bs) : (n < 20000 ? 4000 : 20000);
+        std::vector<int> pp;
+        par_nd_rec(xadj, adjncy, pp, depth, base_thr);
+        for (int i = 0; i < n; ++i) perm[i] = pp[i];
+        if (tm) {
+            auto t2 = std::chrono::steady_clock::now();
+            std::fprintf(stderr, "  [metis-PAR] n=%d adj_build=%.1fms parND(d=%d)=%.1fms\n", n,
+                         t_build_ms, depth,
+                         std::chrono::duration<double, std::milli>(t2 - t1).count());
+        }
+        return true;
+    }
+    idx_t nvtxs = n;
+    std::vector<idx_t> mperm(n);
+    std::vector<idx_t> miperm(n);
+    const int rc = METIS_NodeND(&nvtxs, xadj.data(), adjncy.data(), nullptr, options,
+                                mperm.data(), miperm.data());
+    if (tm) {
+        auto t2 = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "  [metis] n=%d adj_build=%.1fms NodeND=%.1fms\n", n, t_build_ms,
+                     std::chrono::duration<double, std::milli>(t2 - t1).count());
+    }
+    if (rc != METIS_OK) {
+        for (int i = 0; i < n; ++i) perm[i] = i;
+        return true;
+    }
+    for (int i = 0; i < n; ++i) perm[i] = static_cast<int>(mperm[i]);
+    return true;
+}
+
 }  // namespace
+
+bool metis_nd_from_graph(int n, std::vector<int>& xadj_in, std::vector<int>& adjncy_in,
+                         std::vector<int>& perm, bool parallel)
+{
+    if (n < 0) return false;
+    perm.assign(static_cast<std::size_t>(n), 0);
+    if (n <= 1) { if (n == 1) perm[0] = 0; return true; }
+
+    // Adopt the prebuilt (GPU-produced) symmetric graph as idx_t. When idx_t == int the
+    // host arrays are moved in with no copy; otherwise widen element-wise.
+    std::vector<idx_t> xadj, adjncy;
+    if constexpr (std::is_same_v<idx_t, int>) {
+        xadj = std::move(xadj_in);
+        adjncy = std::move(adjncy_in);
+    } else {
+        xadj.assign(xadj_in.begin(), xadj_in.end());
+        adjncy.assign(adjncy_in.begin(), adjncy_in.end());
+    }
+    return run_nd_on_graph(n, xadj, adjncy, perm, parallel, 0.0);
+}
 
 bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& perm,
               bool parallel, std::vector<int>* sym_col_ptr, std::vector<int>* sym_row_idx)

@@ -1,11 +1,15 @@
 #include "matrix/pattern_kernels.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 
 #include <cuda_runtime.h>
+#include <thrust/binary_search.h>
 #include <thrust/execution_policy.h>
 #include <thrust/scan.h>
+#include <thrust/sort.h>
+#include <thrust/unique.h>
 
 namespace custom_linear_solver::matrix {
 namespace {
@@ -69,7 +73,113 @@ __global__ void fill_permuted_csc(int n, const int* __restrict__ in_col_ptr,
     }
 }
 
+// Emit both directed edge keys (row*N+col and col*N+row) for every off-diagonal CSC
+// entry; diagonal/invalid entries get a sentinel that sorts to the very end. One block
+// per column. keys size = 2*nnz, indexed by 2*p / 2*p+1 (p = global CSC entry index).
+__global__ void emit_edge_keys(int n, long long N, const int* __restrict__ col_ptr,
+                               const int* __restrict__ row_idx,
+                               unsigned long long* __restrict__ keys)
+{
+    const int col = blockIdx.x;
+    if (col >= n) return;
+    const int b = col_ptr[col], e = col_ptr[col + 1];
+    const unsigned long long SENT = ~0ull;
+    for (int p = b + threadIdx.x; p < e; p += blockDim.x) {
+        const int row = row_idx[p];
+        const long pp = static_cast<long>(p);
+        if (row == col || row < 0 || row >= n) {
+            keys[2 * pp] = SENT;
+            keys[2 * pp + 1] = SENT;
+        } else {
+            keys[2 * pp] = static_cast<unsigned long long>(row) * N + col;
+            keys[2 * pp + 1] = static_cast<unsigned long long>(col) * N + row;
+        }
+    }
+}
+
+// Decode sorted-unique edge keys into adjncy (= key % N) and tally per-source degree.
+__global__ void decode_edges(long m, long long N, const unsigned long long* __restrict__ keys,
+                             int* __restrict__ adjncy, int* __restrict__ deg)
+{
+    const long i = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= m) return;
+    const unsigned long long k = keys[i];
+    const int src = static_cast<int>(k / N);
+    adjncy[i] = static_cast<int>(k % N);
+    atomicAdd(&deg[src], 1);
+}
+
 }  // namespace
+
+Status build_symmetric_graph_device(const DeviceCscPattern& csc, std::vector<int>& xadj,
+                                    std::vector<int>& adjncy)
+{
+    const int n = csc.n;
+    const int nnz = csc.nnz;
+    if (n <= 0 || nnz < 0 || csc.col_ptr.ptr == nullptr ||
+        (nnz > 0 && csc.row_idx.ptr == nullptr))
+        return Status::InvalidValue;
+
+    xadj.assign(static_cast<std::size_t>(n) + 1, 0);
+    adjncy.clear();
+    if (nnz == 0) return Status::Success;
+
+    const long long N = n;
+    const long total = 2L * nnz;
+
+    unsigned long long* d_keys = nullptr;
+    if (cudaMalloc(&d_keys, static_cast<std::size_t>(total) * sizeof(unsigned long long)) !=
+        cudaSuccess)
+        return Status::AllocationFailed;
+
+    emit_edge_keys<<<n, 128>>>(n, N, csc.col_ptr.ptr, csc.row_idx.ptr, d_keys);
+    if (cudaGetLastError() != cudaSuccess) { cudaFree(d_keys); return Status::AnalysisFailed; }
+
+    // Sort all directed edge keys, collapse duplicate edges, and locate the sentinel block
+    // (diagonal/invalid entries) that sorts to the high end -> m = real directed edges.
+    thrust::sort(thrust::device, d_keys, d_keys + total);
+    unsigned long long* uend = thrust::unique(thrust::device, d_keys, d_keys + total);
+    const long uniq = static_cast<long>(uend - d_keys);
+    const unsigned long long SENT = ~0ull;
+    unsigned long long* sent_it =
+        thrust::lower_bound(thrust::device, d_keys, d_keys + uniq, SENT);
+    const long m = static_cast<long>(sent_it - d_keys);
+
+    int* d_adjncy = nullptr;
+    int* d_deg = nullptr;
+    if (cudaMalloc(&d_adjncy, static_cast<std::size_t>(std::max(1L, m)) * sizeof(int)) !=
+            cudaSuccess ||
+        cudaMalloc(&d_deg, (static_cast<std::size_t>(n) + 1) * sizeof(int)) != cudaSuccess) {
+        cudaFree(d_keys); cudaFree(d_adjncy); cudaFree(d_deg);
+        return Status::AllocationFailed;
+    }
+    cudaMemset(d_deg, 0, (static_cast<std::size_t>(n) + 1) * sizeof(int));
+    if (m > 0) {
+        constexpr int threads = 256;
+        decode_edges<<<static_cast<int>((m + threads - 1) / threads), threads>>>(
+            m, N, d_keys, d_adjncy, d_deg);
+        if (cudaGetLastError() != cudaSuccess) {
+            cudaFree(d_keys); cudaFree(d_adjncy); cudaFree(d_deg);
+            return Status::AnalysisFailed;
+        }
+    }
+    cudaFree(d_keys);
+
+    // xadj = exclusive scan of per-vertex degree. deg[src] was tallied at slot src; build
+    // the (n+1) offset array by shifting the inclusive scan of deg[0..n).
+    std::vector<int> deg(static_cast<std::size_t>(n) + 1, 0);
+    cudaMemcpy(deg.data(), d_deg, (static_cast<std::size_t>(n) + 1) * sizeof(int),
+               cudaMemcpyDeviceToHost);
+    cudaFree(d_deg);
+    for (int v = 0; v < n; ++v) xadj[v + 1] = xadj[v] + deg[v];
+
+    adjncy.resize(static_cast<std::size_t>(m));
+    if (m > 0)
+        cudaMemcpy(adjncy.data(), d_adjncy, static_cast<std::size_t>(m) * sizeof(int),
+                   cudaMemcpyDeviceToHost);
+    cudaFree(d_adjncy);
+    return Status::Success;
+}
 
 IntDeviceBuffer::~IntDeviceBuffer()
 {

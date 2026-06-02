@@ -41,6 +41,7 @@ if(CLS_BUILD_CUDA_OPS)
     src/matrix/pattern_kernels.cu
     src/plan/multifrontal_plan.cu
     src/factorize/multifrontal.cu
+    src/factorize/multifrontal_batched.cu
     src/solve/multifrontal.cu
     src/symbolic/elimination_tree.cpp
     src/symbolic/supernode.cpp
