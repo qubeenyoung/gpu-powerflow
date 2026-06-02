@@ -273,18 +273,31 @@ clearly on the largest case (70k WMMA-TC 0.962 vs amalg-FP32 1.025).
 - IR is only needed if the residual must be < the FP16 factor error; each step ≈ one solve.
 - Everything is gated behind `MF_AMALG` / `MF_TC`; the default path is unchanged.
 
-### 3.6 Reproduce
+### 3.6 Code structure & reproduce
+
+The batched precision is an explicit enum `BatchPrecision { FP64, FP32, Mixed, TC }`
+(`factorize/multifrontal_batched.hpp`); `Solver::batched_setup(B, prec)` picks the path. The
+front-type kernels (scatter, dense factor, invert, fwd/bwd solve) are templated on the front
+element type, so FP64 and pure-FP32 are `double`/`float` instantiations; Mixed/TC use the
+FP64-master kernels (`mf_factor_extend_mixed_b`, `mf_factor_extend_mixed_tc_b`). The deep-K
+amalgamation lives in `Solver::analyze` (`amalgamation_reorder`, env `MF_AMALG="cap:ratio"`).
 
 ```bash
 cmake -S custom_linear_solver -B build/cls -DCLS_BUILD_CUDA_OPS=ON -DCLS_BUILD_SCRIPTS=ON
 cmake --build build/cls -j
-# TC+amalg batched factor+solve, B=64:
+# TC+amalg batched factor+solve, B=64 (runner maps env -> BatchPrecision):
 MF_TC=1 MF_AMALG=32:3 MF_NO_SELINV=1 \
   build/cls/custom_linear_solver_run /datasets/.../case_ACTIVSg70k --batch 64 --batch-only --repeat 8
 # isolated trailing-GEMM tensor-core microbench:
 nvcc -O3 -arch=sm_86 custom_linear_solver/bench/tc_trailing_microbench.cu -o /tmp/tcb && /tmp/tcb
 ```
 
-Env knobs: `MF_AMALG=cap:ratio`, `MF_TC`, `MF_NO_SELINV`, `MF_BSOLVE_TS`,
-`MF_BSKIP_FWD/BWD`, runner `--batch B`, `--batch-only`, `--ir N`. See
-`fsa-optimization-report.md` for the full measurement log.
+Runner precision env (maps to BatchPrecision; default Mixed for n<24000 else FP64):
+`MF_NO_MIXED` → FP64, `MF_FP32` → pure-FP32, `MF_MIXED` → Mixed, `MF_TC` → TC.
+Other knobs: `MF_AMALG=cap:ratio`, `MF_NO_SELINV`; runner `--batch B`, `--batch-only`.
+
+**Iterative refinement** was evaluated (FP64 residual → low-precision correction solve) and
+**removed from the code**: each step costs ≈ one solve and the low-precision solve is not faster
+(latency-bound), so it never paid off end-to-end; where low precision helps (the factor) the
+small/medium result already passes 1e-3 without it. Only this note and the measurements in
+`fsa-optimization-report.md` remain. See that report for the full measurement log.
