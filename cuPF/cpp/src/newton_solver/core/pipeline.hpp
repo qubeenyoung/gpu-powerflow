@@ -286,6 +286,49 @@ struct CudaMixedPipeline {
     static constexpr bool batch_supported = true;
 };
 
+
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+// ---------------------------------------------------------------------------
+// CudaMixedCustomPipeline — Mixed storage (FP32 Jacobian/step, FP64 state) driving the custom
+// direct solver instead of cuDSS. The custom solver consumes the FP32 Jacobian directly via its
+// float batched entry; factor precision defaults to FP32 (CUPF_CUSTOM_PRECISION overrides).
+// ---------------------------------------------------------------------------
+struct CudaMixedCustomPipeline {
+    CudaMixedStorage             buf;
+    CudaJacobianKind             jacobian_kind = CudaJacobianKind::Edge;
+    CudaLinearSolveCustomMixed   linear_solve;
+    AdjointCache                 adjoint_cache;
+
+    explicit CudaMixedCustomPipeline(CudaJacobianKind jacobian = CudaJacobianKind::Edge)
+        : jacobian_kind(jacobian)
+    {}
+
+    void initialize(const InitializeContext& ctx) {
+        buf.prepare(ctx);
+        linear_solve.initialize(buf, ctx);
+    }
+
+    void upload(const SolveContext& ctx) {
+        buf.upload(ctx);
+    }
+
+    void download_batch(NRBatchResult& result) const {
+        buf.download_batch(result);
+    }
+
+    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaMixedStorage>{}.run(buf, ctx); }
+    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaMixedStorage>{}.run(buf, ctx); }
+    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaMixedStorage>{}.run(buf, ctx); }
+    void jacobian(IterationContext& ctx)      { CudaJacobianOp<float>{jacobian_kind}.run(buf, ctx); }
+    void prepare_rhs(IterationContext& ctx)   { linear_solve.prepare_rhs(buf, ctx); }
+    void factorize(IterationContext& ctx)     { linear_solve.factorize(buf, ctx); }
+    void solve(IterationContext& ctx)         { linear_solve.solve(buf, ctx); }
+    void voltage_update(IterationContext& ctx){ CudaVoltageUpdateOp<float>{}.run(buf, ctx); }
+
+    static constexpr bool batch_supported = true;
+};
+#endif  // CUPF_ENABLE_CUSTOM_SOLVER
+
 #endif  // CUPF_WITH_CUDA
 
 
@@ -303,6 +346,9 @@ struct SolverPipeline {
 #endif
         , CudaFp32Pipeline
         , CudaMixedPipeline
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+        , CudaMixedCustomPipeline
+#endif
 #endif
     > v;
 };

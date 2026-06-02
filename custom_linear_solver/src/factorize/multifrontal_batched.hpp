@@ -32,7 +32,8 @@ struct BatchedState {
     bool selinv = false;
     double* d_frontB = nullptr;   // B * front_total FP64 front (FP64 mode) or FP64 master (Mixed/TC)
     float* d_frontBf = nullptr;   // B * front_total FP32 front (FP32 mode) or FP32 working (Mixed/TC)
-    double* d_yB = nullptr;       // B * n (solve working vector)
+    double* d_yB = nullptr;       // B * n FP64 solve working vector (FP64/Mixed/TC modes)
+    float* d_yBf = nullptr;       // B * n FP32 solve working vector (pure-FP32 mode)
     int* d_sing = nullptr;
     void* stream = nullptr;
     void* factor_graph_exec = nullptr;
@@ -55,6 +56,16 @@ bool batched_factorize(const custom_linear_solver::plan::MultifrontalPlan& plan,
 // Solve all B systems. d_rhsB / d_solB are B*n (batch b at b*n). d_perm is shared.
 bool batched_solve(const custom_linear_solver::plan::MultifrontalPlan& plan, BatchedState& state,
                    const double* d_rhsB, double* d_solB, const int* d_perm,
+                   double* kernel_ms = nullptr);
+
+// FP32-input overloads. The factor reads an FP32 CSR value array (b*nnz_a) straight into the
+// front working buffers; the solve reads an FP64 RHS but writes an FP32 step (cuPF's Mixed
+// profile: float Jacobian + step, double residual). The internal solve vector stays FP64.
+bool batched_factorize(const custom_linear_solver::plan::MultifrontalPlan& plan,
+                       BatchedState& state, const float* d_valuesB,
+                       const int* d_ordered_value_to_csr, double* kernel_ms = nullptr);
+bool batched_solve(const custom_linear_solver::plan::MultifrontalPlan& plan, BatchedState& state,
+                   const double* d_rhsB, float* d_solB, const int* d_perm,
                    double* kernel_ms = nullptr);
 
 }  // namespace custom_linear_solver::factorize

@@ -13,6 +13,7 @@
 
 #include "newton_solver/core/solver_contexts.hpp"
 #include "newton_solver/storage/cuda/cuda_fp64_storage.hpp"
+#include "newton_solver/storage/cuda/cuda_mixed_storage.hpp"
 #include "utils/cuda_utils.hpp"
 
 #include <solver.hpp>
@@ -44,6 +45,20 @@ cls::factorize::BatchPrecision batch_precision_from_env()
         if (std::strcmp(s, "tc") == 0) return cls::factorize::BatchPrecision::TC;
     }
     return cls::factorize::BatchPrecision::Mixed;
+}
+
+// Factor precision for the Mixed profile. The Jacobian arrives already in FP32, so pure-FP32 is
+// the natural default (no FP64 master to gain accuracy from); CUPF_CUSTOM_PRECISION still
+// overrides (e.g. tc for the FP16 trailing GEMM, which also needs MF_AMALG).
+cls::factorize::BatchPrecision mixed_batch_precision_from_env()
+{
+    const char* s = std::getenv("CUPF_CUSTOM_PRECISION");
+    if (s != nullptr) {
+        if (std::strcmp(s, "fp64") == 0) return cls::factorize::BatchPrecision::FP64;
+        if (std::strcmp(s, "mixed") == 0) return cls::factorize::BatchPrecision::Mixed;
+        if (std::strcmp(s, "tc") == 0) return cls::factorize::BatchPrecision::TC;
+    }
+    return cls::factorize::BatchPrecision::FP32;
 }
 
 // Translate a library status into an exception (no-op on success).
@@ -233,6 +248,154 @@ double* CudaLinearSolveCustomFp64::adjoint_solution_data()
 
 
 void CudaLinearSolveCustomFp64::solve_adjoint_explicit_transpose_cached(double& solve_time_ms)
+{
+    (void)solve_time_ms;
+    throw_adjoint_unsupported();
+}
+
+
+// ===========================================================================
+// CudaLinearSolveCustomMixed — FP32-input (cuPF Mixed profile) adapter
+// ===========================================================================
+
+struct CudaLinearSolveCustomMixed::State {
+    cls::Solver solver;
+    bool analyzed = false;
+    bool factorized = false;
+    int batch = 0;          // last batched_setup B (0 = not set up yet)
+};
+
+
+CudaLinearSolveCustomMixed::CudaLinearSolveCustomMixed() = default;
+
+
+CudaLinearSolveCustomMixed::~CudaLinearSolveCustomMixed()
+{
+    delete state_;
+}
+
+
+CudaLinearSolveCustomMixed::CudaLinearSolveCustomMixed(CudaLinearSolveCustomMixed&& other) noexcept
+    : state_(std::exchange(other.state_, nullptr))
+{}
+
+
+void CudaLinearSolveCustomMixed::initialize(CudaMixedStorage& buf, const InitializeContext& ctx)
+{
+    if (buf.dimF <= 0 || buf.d_J_row_ptr.empty() || buf.d_J_col_idx.empty() ||
+        buf.d_J_values.empty() || buf.d_F.empty() || buf.d_dx.empty()) {
+        throw std::runtime_error("CudaLinearSolveCustomMixed::initialize: buffers are not prepared");
+    }
+    if (ctx.J.dim != buf.dimF || ctx.J.nnz != buf.nnz_J) {
+        throw std::runtime_error("CudaLinearSolveCustomMixed::initialize: Jacobian pattern mismatch");
+    }
+
+    // The Jacobian values are FP32, so only the pattern is bound here (values = nullptr); the
+    // numeric values are supplied per factorize via the float batched_factorize entry. analyze
+    // (symbolic) reads only the pattern.
+    cls::CsrMatrixView matrix;
+    matrix.nrows = buf.dimF;
+    matrix.ncols = buf.dimF;
+    matrix.nnz = buf.nnz_J;  // per-case nnz (pattern shared across the batch)
+    matrix.index_type = cls::IndexType::Int32;
+    matrix.location = cls::DataLocation::Device;
+    matrix.row_offsets = buf.d_J_row_ptr.data();
+    matrix.col_indices = buf.d_J_col_idx.data();
+    matrix.values = nullptr;
+
+    auto state = std::make_unique<State>();
+    check_status(state->solver.set_data(matrix), "set_data");
+    check_status(state->solver.analyze(), "analyze");
+    sync_cuda_for_timing();
+    state->analyzed = true;
+
+    delete state_;
+    state_ = state.release();
+}
+
+
+void CudaLinearSolveCustomMixed::prepare_rhs(CudaMixedStorage& buf, IterationContext& ctx)
+{
+    (void)buf;
+    (void)ctx;
+    if (state_ == nullptr || !state_->analyzed) {
+        throw std::runtime_error("CudaLinearSolveCustomMixed::prepare_rhs: initialize() must be called first");
+    }
+}
+
+
+void CudaLinearSolveCustomMixed::factorize(CudaMixedStorage& buf, IterationContext& ctx)
+{
+    (void)ctx;
+    if (state_ == nullptr || !state_->analyzed) {
+        throw std::runtime_error("CudaLinearSolveCustomMixed::factorize: initialize() must be called first");
+    }
+    state_->factorized = false;
+    // Always use the library's uniform-batch path (B>=1). The batch size is known at upload(); set
+    // up the batched arenas lazily and rebuild when B changes.
+    const int batch = buf.batch_size;
+    if (state_->batch != batch) {
+        check_status(state_->solver.batched_setup(batch, mixed_batch_precision_from_env()),
+                     "batched_setup");
+        state_->batch = batch;
+    }
+    // FP32 Jacobian values straight into the factor (no FP64 staging).
+    check_status(state_->solver.batched_factorize(buf.d_J_values.data()), "batched_factorize");
+    sync_cuda_for_timing();
+    state_->factorized = true;
+}
+
+
+void CudaLinearSolveCustomMixed::solve(CudaMixedStorage& buf, IterationContext& ctx)
+{
+    (void)ctx;
+    if (state_ == nullptr || !state_->analyzed) {
+        throw std::runtime_error("CudaLinearSolveCustomMixed::solve: initialize() must be called first");
+    }
+    if (!state_->factorized) {
+        throw std::runtime_error("CudaLinearSolveCustomMixed::solve: factorize() must be called first");
+    }
+    // FP64 residual in, FP32 step out (matches cuPF's Mixed storage).
+    check_status(state_->solver.batched_solve(buf.d_F.data(), buf.d_dx.data()), "batched_solve");
+    sync_cuda_for_timing();
+}
+
+// --- Adjoint / transpose-solve surface: not implemented for this backend ---
+
+void CudaLinearSolveCustomMixed::prepare_adjoint_explicit_transpose_cache(
+    CudaMixedStorage& buf, IterationContext& ctx, double& factorization_time_ms)
+{
+    (void)buf;
+    (void)ctx;
+    (void)factorization_time_ms;
+    throw_adjoint_unsupported();
+}
+
+
+void CudaLinearSolveCustomMixed::solve_adjoint_explicit_transpose_host(
+    const double* rhs, double* solution, int32_t batch_size, double& solve_time_ms)
+{
+    (void)rhs;
+    (void)solution;
+    (void)batch_size;
+    (void)solve_time_ms;
+    throw_adjoint_unsupported();
+}
+
+
+float* CudaLinearSolveCustomMixed::adjoint_rhs_data()
+{
+    throw_adjoint_unsupported();
+}
+
+
+float* CudaLinearSolveCustomMixed::adjoint_solution_data()
+{
+    throw_adjoint_unsupported();
+}
+
+
+void CudaLinearSolveCustomMixed::solve_adjoint_explicit_transpose_cached(double& solve_time_ms)
 {
     (void)solve_time_ms;
     throw_adjoint_unsupported();

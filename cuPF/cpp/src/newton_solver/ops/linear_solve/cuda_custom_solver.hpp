@@ -5,6 +5,7 @@
 #include <cstdint>
 
 struct CudaFp64Storage;
+struct CudaMixedStorage;
 struct InitializeContext;
 struct IterationContext;
 
@@ -32,6 +33,47 @@ struct CudaLinearSolveCustomFp64 {
                                                double& solve_time_ms);
     double* adjoint_rhs_data();
     double* adjoint_solution_data();
+    void solve_adjoint_explicit_transpose_cached(double& solve_time_ms);
+    bool supports_transpose_solve() const { return false; }
+    bool has_adjoint_cache() const { return false; }
+    bool has_adjoint_symbolic_analysis() const { return false; }
+
+private:
+    struct State;
+    State* state_ = nullptr;
+};
+
+
+// Mixed-profile adapter: drives the custom solver from cuPF's CudaMixedStorage (FP32 Jacobian +
+// step, FP64 residual). Always uses the library's uniform-batch path (B>=1) so it never needs the
+// FP64 single-case entry; the factor precision defaults to FP32 (the input is already single
+// precision) and is overridable via CUPF_CUSTOM_PRECISION. Adjoint/transpose is unsupported, and
+// the Mixed pipeline never calls it.
+struct CudaLinearSolveCustomMixed {
+    CudaLinearSolveCustomMixed();
+    ~CudaLinearSolveCustomMixed();
+
+    CudaLinearSolveCustomMixed(CudaLinearSolveCustomMixed&& other) noexcept;
+    CudaLinearSolveCustomMixed& operator=(CudaLinearSolveCustomMixed&&) = delete;
+    CudaLinearSolveCustomMixed(const CudaLinearSolveCustomMixed&) = delete;
+    CudaLinearSolveCustomMixed& operator=(const CudaLinearSolveCustomMixed&) = delete;
+
+    void initialize(CudaMixedStorage& buf, const InitializeContext& ctx);
+    void prepare_rhs(CudaMixedStorage& buf, IterationContext& ctx);
+    void factorize(CudaMixedStorage& buf, IterationContext& ctx);
+    void solve(CudaMixedStorage& buf, IterationContext& ctx);
+
+    // Adjoint/transpose surface: unsupported (throws). Present only so the pipeline variant
+    // visitors compile; signatures mirror the Mixed cuDSS adapter (FP32 step buffers).
+    void prepare_adjoint_explicit_transpose_cache(CudaMixedStorage& buf,
+                                                  IterationContext& ctx,
+                                                  double& factorization_time_ms);
+    void solve_adjoint_explicit_transpose_host(const double* rhs,
+                                               double* solution,
+                                               int32_t batch_size,
+                                               double& solve_time_ms);
+    float* adjoint_rhs_data();
+    float* adjoint_solution_data();
     void solve_adjoint_explicit_transpose_cached(double& solve_time_ms);
     bool supports_transpose_solve() const { return false; }
     bool has_adjoint_cache() const { return false; }

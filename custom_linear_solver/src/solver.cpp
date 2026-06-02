@@ -180,7 +180,10 @@ Status Solver::set_data(const CsrMatrixView& matrix)
         return Status::InvalidValue;
     if (matrix.index_type != IndexType::Int32 || matrix.location != DataLocation::Device)
         return Status::InvalidValue;
-    if (matrix.row_offsets == nullptr || matrix.col_indices == nullptr || matrix.values == nullptr)
+    // values may be null: the batched float-input path (set via batched_factorize(const float*))
+    // supplies numeric values separately and only needs the pattern here. The single-case
+    // factorize() rechecks values != nullptr at the point it actually reads them.
+    if (matrix.row_offsets == nullptr || matrix.col_indices == nullptr)
         return Status::InvalidValue;
     impl_->matrix = matrix;
     impl_->has_matrix = true;
@@ -396,6 +399,7 @@ Status Solver::analyze()
 Status Solver::factorize(double* kernel_ms)
 {
     if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::InvalidState;
+    if (impl_->matrix.values == nullptr) return Status::InvalidState;  // single-case needs values
     try {
         if (!custom_linear_solver::factorize::factorize_multifrontal_device(
                 impl_->plan, impl_->matrix.values, impl_->d_ordered_value_to_csr.ptr, kernel_ms))
@@ -445,6 +449,24 @@ Status Solver::batched_factorize(const double* d_valuesB, double* kernel_ms)
 }
 
 Status Solver::batched_solve(const double* d_rhsB, double* d_solB, double* kernel_ms)
+{
+    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
+    return custom_linear_solver::factorize::batched_solve(impl_->plan, impl_->batched, d_rhsB,
+                                                          d_solB, impl_->d_perm.ptr, kernel_ms)
+               ? Status::Success
+               : Status::SolveFailed;
+}
+
+Status Solver::batched_factorize(const float* d_valuesB, double* kernel_ms)
+{
+    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
+    return custom_linear_solver::factorize::batched_factorize(
+               impl_->plan, impl_->batched, d_valuesB, impl_->d_ordered_value_to_csr.ptr, kernel_ms)
+               ? Status::Success
+               : Status::FactorizationFailed;
+}
+
+Status Solver::batched_solve(const double* d_rhsB, float* d_solB, double* kernel_ms)
 {
     if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
     return custom_linear_solver::factorize::batched_solve(impl_->plan, impl_->batched, d_rhsB,

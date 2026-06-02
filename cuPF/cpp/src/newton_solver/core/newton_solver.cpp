@@ -79,10 +79,13 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
 #ifdef CUPF_WITH_CUDA
     // CUDA backend: pick the pipeline variant from compute policy + solver kind.
     if (options.backend == BackendKind::CUDA) {
+        // The custom solver supports FP64 (FP64 Jacobian) and Mixed (FP32 Jacobian/step) profiles;
+        // a pure-FP32 profile (FP32 residual) is not wired to the custom backend.
         if (options.cuda_linear_solver == CudaLinearSolverKind::Custom &&
-            options.compute != ComputePolicy::FP64) {
+            options.compute == ComputePolicy::FP32) {
             throw std::invalid_argument(
-                "NewtonSolver: custom CUDA linear solver는 FP64 단일 케이스만 지원합니다.");
+                "NewtonSolver: custom CUDA linear solver는 FP32 프로파일을 지원하지 않습니다 "
+                "(FP64 또는 Mixed를 사용하세요).");
         }
         // FP64: either the custom direct solver (if built) or cuDSS.
         if (options.compute == ComputePolicy::FP64) {
@@ -110,6 +113,19 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
             return;
         }
         if (options.compute == ComputePolicy::Mixed) {
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+            if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
+                pipeline_ = std::make_unique<SolverPipeline>(
+                    SolverPipeline{CudaMixedCustomPipeline{options.cuda_jacobian}});
+                return;
+            }
+#else
+            if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
+                throw std::invalid_argument(
+                    "NewtonSolver: custom CUDA linear solver를 요청했지만 "
+                    "cuPF가 CUPF_ENABLE_CUSTOM_SOLVER 없이 빌드되었습니다.");
+            }
+#endif
             pipeline_ = std::make_unique<SolverPipeline>(
                 SolverPipeline{CudaMixedPipeline{options.cudss, options.cuda_jacobian}});
             return;

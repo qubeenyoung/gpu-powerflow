@@ -131,10 +131,19 @@ struct CuDSSOptions {
 // ---------------------------------------------------------------------------
 struct NewtonOptions {
     BackendKind          backend = BackendKind::CPU;
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+    // Default GPU path (when backend = CUDA): custom direct solver on the Mixed profile — FP32
+    // Jacobian/step, FP64 state — with edge Jacobian assembly. The custom solver reads the FP32
+    // Jacobian directly and factors in FP32 (CUPF_CUSTOM_PRECISION overrides). Any field below can
+    // still be set explicitly; the CPU backend ignores `compute` (always CPU FP64).
+    ComputePolicy        compute = ComputePolicy::Mixed;
+    CudaLinearSolverKind cuda_linear_solver = CudaLinearSolverKind::Custom;
+#else
     ComputePolicy        compute = ComputePolicy::FP64;
+    CudaLinearSolverKind cuda_linear_solver = CudaLinearSolverKind::CuDSS;
+#endif
     CpuLinearSolverKind  cpu_linear_solver = CpuLinearSolverKind::KLU;
     CudaJacobianKind     cuda_jacobian = CudaJacobianKind::Edge;
-    CudaLinearSolverKind cuda_linear_solver = CudaLinearSolverKind::CuDSS;
     CuDSSOptions         cudss = {};
 };
 

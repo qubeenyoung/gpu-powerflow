@@ -24,10 +24,12 @@ using custom_linear_solver::plan::MultifrontalPlan;
 namespace {
 
 // ---- batched numeric scatter: front_b[a_pos[q]] += values_b[o2c[q]] ----------------
-// Templated on the front element type FT (double for FP64/Mixed/TC master, float for FP32).
-template <typename FT>
+// FT = front element type (double for FP64/Mixed/TC master, float for FP32). VT = input CSR
+// value type (double for the FP64-input path, float for the cuPF Mixed path). The value is
+// cast to FT on scatter, so any (VT -> FT) combination is valid.
+template <typename FT, typename VT>
 __global__ void scatter_batched(int nnz_a, long front_total, const int* __restrict__ o2c,
-                                const int* __restrict__ a_pos, const double* __restrict__ valuesB,
+                                const int* __restrict__ a_pos, const VT* __restrict__ valuesB,
                                 FT* __restrict__ frontB)
 {
     const int q = blockIdx.x * blockDim.x + threadIdx.x;
@@ -402,36 +404,43 @@ __global__ void mf_invert_pivot_b(int npanels, const int* __restrict__ front_ptr
 
 // ---- batched solve helpers --------------------------------------------------------------
 // Gather the permuted RHS into the working vector y (per batch): y[k] = rhs[perm[k]].
-__global__ void gather_rhs_b(int n, const double* __restrict__ rhsB, const int* __restrict__ perm,
-                             double* __restrict__ yB)
+// RT = RHS element type (double or float). YT = solve working-vector type (double for
+// FP64/Mixed/TC, float for the pure-FP32 solve).
+template <typename RT, typename YT>
+__global__ void gather_rhs_b(int n, const RT* __restrict__ rhsB, const int* __restrict__ perm,
+                             YT* __restrict__ yB)
 {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= n) return;
     const long b = blockIdx.y;
-    yB[b * n + k] = rhsB[b * (long)n + perm[k]];
+    yB[b * n + k] = static_cast<YT>(rhsB[b * (long)n + perm[k]]);
 }
 // Scatter the working vector y back to the solution in original order: sol[perm[k]] = y[k].
-__global__ void scatter_sol_b(int n, const double* __restrict__ yB, const int* __restrict__ perm,
-                             double* __restrict__ solB)
+// YT = working-vector type, ST = solution element type (cuPF's Mixed step buffer is float).
+template <typename YT, typename ST>
+__global__ void scatter_sol_b(int n, const YT* __restrict__ yB, const int* __restrict__ perm,
+                             ST* __restrict__ solB)
 {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= n) return;
     const long b = blockIdx.y;
-    solB[b * (long)n + perm[k]] = yB[b * n + k];
+    solB[b * (long)n + perm[k]] = static_cast<ST>(yB[b * n + k]);
 }
 
-// Forward solve level (L y = b). FT = front type (read in FT, accumulated in double; the y
-// working vector stays double). selinv -> apply L_pp^-1 as a GEMV; else warp-parallel substitution.
+// Forward solve level (L y = b). FT = front type AND working/accumulation type: FP32 mode runs
+// the whole solve (front, y vector, accumulators) in float -> a true single-precision linear
+// solve; FP64/Mixed/TC read the FP64 master front and keep y in double. selinv -> apply L_pp^-1
+// as a GEMV; else warp-parallel substitution.
 template <typename FT>
 __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plcols,
                               const int* __restrict__ front_off, const int* __restrict__ front_ptr,
                               const int* __restrict__ ncols, const int* __restrict__ front_rows,
-                              const FT* frontB, double* yB, long front_total, int n, int selinv)
+                              const FT* frontB, FT* yB, long front_total, int n, int selinv)
 {
     const int idx = lbegin + blockIdx.x;
     if (idx >= lend) return;
     const FT* front = frontB + (long)blockIdx.y * front_total;
-    double* y = yB + (long)blockIdx.y * n;
+    FT* y = yB + (long)blockIdx.y * n;
     const int p = plcols[idx];
     const int s = front_ptr[p];
     const int fsz = front_ptr[p + 1] - s;
@@ -439,10 +448,10 @@ __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plc
     const FT* F = front + front_off[p];
     const int* fr = front_rows + s;
     const int t = threadIdx.x, nt = blockDim.x;
-    __shared__ double sh_piv[64];
+    __shared__ FT sh_piv[64];
     if (selinv) {
         for (int k = t; k < nc; k += nt) {
-            double v = y[fr[k]];
+            FT v = y[fr[k]];
             for (int i = 0; i < k; ++i) v += F[(long)k * fsz + i] * y[fr[i]];
             sh_piv[k] = v;
         }
@@ -456,7 +465,7 @@ __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plc
         if (t < 32) {
             const int lane = t;
             const unsigned mask = 0xffffffffu;
-            double part = 0.0, sk = 0.0;
+            FT part = FT(0), sk = FT(0);
             for (int k = 0; k < nc; ++k) {
                 if (lane == k) { sk = y[fr[k]] + part; sh_piv[k] = sk; y[fr[k]] = sk; }
                 sk = __shfl_sync(mask, sk, k);
@@ -466,7 +475,7 @@ __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plc
         __syncthreads();
     }
     for (int i = nc + t; i < fsz; i += nt) {
-        double upd = 0.0;
+        FT upd = FT(0);
         for (int k = 0; k < nc; ++k) upd += F[(long)i * fsz + k] * sh_piv[k];
         atomicAdd(&y[fr[i]], -upd);
     }
@@ -474,18 +483,19 @@ __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plc
 
 constexpr int MF_MAX_NC = 64;
 
-// Backward solve level (U x = y). FT = front type (read in FT, accumulated in double; y stays
-// double). selinv -> apply U_pp^-1 as a GEMV; else warp-parallel substitution.
+// Backward solve level (U x = y). FT = front type AND working/accumulation type (see fwd: FP32
+// runs the solve in float, FP64/Mixed/TC in double). selinv -> apply U_pp^-1 as a GEMV; else
+// warp-parallel substitution.
 template <typename FT>
 __global__ void mf_bwd_level_b(int lbegin, int lend, const int* __restrict__ plcols,
                               const int* __restrict__ front_off, const int* __restrict__ front_ptr,
                               const int* __restrict__ ncols, const int* __restrict__ front_rows,
-                              const FT* frontB, double* yB, long front_total, int n, int selinv)
+                              const FT* frontB, FT* yB, long front_total, int n, int selinv)
 {
     const int idx = lbegin + blockIdx.x;
     if (idx >= lend) return;
     const FT* front = frontB + (long)blockIdx.y * front_total;
-    double* y = yB + (long)blockIdx.y * n;
+    FT* y = yB + (long)blockIdx.y * n;
     const int p = plcols[idx];
     const int s = front_ptr[p];
     const int fsz = front_ptr[p + 1] - s;
@@ -497,21 +507,23 @@ __global__ void mf_bwd_level_b(int lbegin, int lend, const int* __restrict__ plc
     // CB contribution rhs[k] -= sum_j U[k][nc+j]*x[nc+j]. PARALLEL-OVER-K: cache x in dynamic shared
     // (coalesced gather), then lane k owns ONE output (pk) -> no per-thread part[nc] register array
     // and no nc-way warp reduction (the register pressure + reduction that made bwd the solve
-    // bottleneck). Higher occupancy; the per-lane front-row reads hit L1/L2.
-    extern __shared__ double xsh[];  // size >= cb (set per level at launch)
-    __shared__ double rhs[MF_MAX_NC];
+    // bottleneck). Higher occupancy; the per-lane front-row reads hit L1/L2. The dynamic shared is
+    // typed as raw bytes then viewed as FT so the float/double instantiations don't clash.
+    extern __shared__ unsigned char xsh_raw[];  // size >= cb*sizeof(FT) (set per level at launch)
+    FT* xsh = reinterpret_cast<FT*>(xsh_raw);
+    __shared__ FT rhs[MF_MAX_NC];
     for (int k = t; k < nc; k += nt) rhs[k] = y[fr[k]];
     for (int j = t; j < cb; j += nt) xsh[j] = y[fr[nc + j]];
     __syncthreads();
     if (t < nc) {
-        double pk = 0.0;
+        FT pk = FT(0);
         for (int j = 0; j < cb; ++j) pk += F[(long)t * fsz + (nc + j)] * xsh[j];
         rhs[t] -= pk;
     }
     __syncthreads();
     if (selinv) {
         for (int k = t; k < nc; k += nt) {
-            double v = 0.0;
+            FT v = FT(0);
             for (int j = k; j < nc; ++j) v += F[(long)k * fsz + j] * rhs[j];
             y[fr[k]] = v;
         }
@@ -521,7 +533,7 @@ __global__ void mf_bwd_level_b(int lbegin, int lend, const int* __restrict__ plc
         // -U[i][k]*x[k] into their partial. Replaces the serial thread-0 O(nc^2) loop.
         const int lane = t;
         const unsigned mask = 0xffffffffu;
-        double part = 0.0, xk = 0.0;
+        FT part = FT(0), xk = FT(0);
         for (int k = nc - 1; k >= 0; --k) {
             if (lane == k) { xk = (rhs[k] + part) / F[(long)k * fsz + k]; y[fr[k]] = xk; }
             xk = __shfl_sync(mask, xk, k);
@@ -539,6 +551,7 @@ BatchedState::~BatchedState()
     if (d_frontB) cudaFree(d_frontB);
     if (d_frontBf) cudaFree(d_frontBf);
     if (d_yB) cudaFree(d_yB);
+    if (d_yBf) cudaFree(d_yBf);
     if (d_sing) cudaFree(d_sing);
     if (stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
 }
@@ -558,7 +571,12 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
     const long fe = (long)B * plan.front_total;
     if (need_double && cudaMalloc(&st.d_frontB, fe * sizeof(double)) != cudaSuccess) return false;
     if (need_float && cudaMalloc(&st.d_frontBf, fe * sizeof(float)) != cudaSuccess) return false;
-    if (cudaMalloc(&st.d_yB, (long)B * plan.n * sizeof(double)) != cudaSuccess) return false;
+    // Solve working vector matches the solve precision: float for pure-FP32, double otherwise.
+    if (pure_fp32) {
+        if (cudaMalloc(&st.d_yBf, (long)B * plan.n * sizeof(float)) != cudaSuccess) return false;
+    } else {
+        if (cudaMalloc(&st.d_yB, (long)B * plan.n * sizeof(double)) != cudaSuccess) return false;
+    }
     if (cudaMalloc(&st.d_sing, sizeof(int)) != cudaSuccess) return false;
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -646,7 +664,7 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
         if (pure_fp32)
             mf_fwd_level_b<float><<<fg, TS, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                plan.d_front_rows, st.d_frontBf, st.d_yB, plan.front_total, plan.n, sel);
+                plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total, plan.n, sel);
         else
             mf_fwd_level_b<double><<<fg, TS, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
@@ -662,13 +680,12 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
             if (cbq > max_cb) max_cb = cbq;
         }
         const dim3 bg(e - b, B);
-        const size_t bsh = (size_t)max_cb * sizeof(double);
         if (pure_fp32)
-            mf_bwd_level_b<float><<<bg, TS, bsh, stream>>>(
+            mf_bwd_level_b<float><<<bg, TS, (size_t)max_cb * sizeof(float), stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                plan.d_front_rows, st.d_frontBf, st.d_yB, plan.front_total, plan.n, sel);
+                plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total, plan.n, sel);
         else
-            mf_bwd_level_b<double><<<bg, TS, bsh, stream>>>(
+            mf_bwd_level_b<double><<<bg, TS, (size_t)max_cb * sizeof(double), stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
     }
@@ -681,8 +698,11 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
     return cudaGetLastError() == cudaSuccess;
 }
 
-bool batched_factorize(const MultifrontalPlan& plan, BatchedState& st, const double* d_valuesB,
-                       const int* d_o2c, double* kernel_ms)
+// Shared factorize body, templated on the input CSR value type VT (double or float). The scatter
+// casts VT into whichever front the active precision mode consumes.
+template <typename VT>
+static bool batched_factorize_T(const MultifrontalPlan& plan, BatchedState& st, const VT* d_valuesB,
+                                const int* d_o2c, double* kernel_ms)
 {
     cudaStream_t stream = static_cast<cudaStream_t>(st.stream);
     const long fe = (long)st.B * plan.front_total;
@@ -697,12 +717,12 @@ bool batched_factorize(const MultifrontalPlan& plan, BatchedState& st, const dou
     const dim3 sgrid((plan.nnz_a + T - 1) / T, st.B);
     if (st.prec == BatchPrecision::FP32) {
         cudaMemsetAsync(st.d_frontBf, 0, fe * sizeof(float), stream);
-        scatter_batched<float><<<sgrid, T, 0, stream>>>(plan.nnz_a, plan.front_total, d_o2c,
-                                                        plan.d_a_pos, d_valuesB, st.d_frontBf);
+        scatter_batched<float, VT><<<sgrid, T, 0, stream>>>(plan.nnz_a, plan.front_total, d_o2c,
+                                                            plan.d_a_pos, d_valuesB, st.d_frontBf);
     } else {
         cudaMemsetAsync(st.d_frontB, 0, fe * sizeof(double), stream);
-        scatter_batched<double><<<sgrid, T, 0, stream>>>(plan.nnz_a, plan.front_total, d_o2c,
-                                                         plan.d_a_pos, d_valuesB, st.d_frontB);
+        scatter_batched<double, VT><<<sgrid, T, 0, stream>>>(plan.nnz_a, plan.front_total, d_o2c,
+                                                             plan.d_a_pos, d_valuesB, st.d_frontB);
     }
     cudaGraphLaunch(static_cast<cudaGraphExec_t>(st.factor_graph_exec), stream);
     cudaEventRecord(k1, stream);
@@ -713,8 +733,11 @@ bool batched_factorize(const MultifrontalPlan& plan, BatchedState& st, const dou
     return cudaGetLastError() == cudaSuccess;
 }
 
-bool batched_solve(const MultifrontalPlan& plan, BatchedState& st, const double* d_rhsB,
-                   double* d_solB, const int* d_perm, double* kernel_ms)
+// Shared solve body, templated on the RHS type RT and the solution type ST (the FP64 working
+// vector yB is the same regardless). gather casts RHS->FP64, scatter casts FP64->solution.
+template <typename RT, typename ST>
+static bool batched_solve_T(const MultifrontalPlan& plan, BatchedState& st, const RT* d_rhsB,
+                            ST* d_solB, const int* d_perm, double* kernel_ms)
 {
     cudaStream_t stream = static_cast<cudaStream_t>(st.stream);
     const int n = plan.n;
@@ -723,15 +746,49 @@ bool batched_solve(const MultifrontalPlan& plan, BatchedState& st, const double*
     cudaEventCreate(&k0);
     cudaEventCreate(&k1);
     cudaEventRecord(k0, stream);
-    gather_rhs_b<<<dim3((n + T - 1) / T, st.B), T, 0, stream>>>(n, d_rhsB, d_perm, st.d_yB);
-    cudaGraphLaunch(static_cast<cudaGraphExec_t>(st.solve_graph_exec), stream);
-    scatter_sol_b<<<dim3((n + T - 1) / T, st.B), T, 0, stream>>>(n, st.d_yB, d_perm, d_solB);
+    const dim3 vg((n + T - 1) / T, st.B);
+    // The solve working vector matches the captured graph: float for pure-FP32, double otherwise.
+    if (st.prec == BatchPrecision::FP32) {
+        gather_rhs_b<RT, float><<<vg, T, 0, stream>>>(n, d_rhsB, d_perm, st.d_yBf);
+        cudaGraphLaunch(static_cast<cudaGraphExec_t>(st.solve_graph_exec), stream);
+        scatter_sol_b<float, ST><<<vg, T, 0, stream>>>(n, st.d_yBf, d_perm, d_solB);
+    } else {
+        gather_rhs_b<RT, double><<<vg, T, 0, stream>>>(n, d_rhsB, d_perm, st.d_yB);
+        cudaGraphLaunch(static_cast<cudaGraphExec_t>(st.solve_graph_exec), stream);
+        scatter_sol_b<double, ST><<<vg, T, 0, stream>>>(n, st.d_yB, d_perm, d_solB);
+    }
     cudaEventRecord(k1, stream);
     cudaEventSynchronize(k1);
     if (kernel_ms) { float ms = 0; cudaEventElapsedTime(&ms, k0, k1); *kernel_ms = ms; }
     cudaEventDestroy(k0);
     cudaEventDestroy(k1);
     return cudaGetLastError() == cudaSuccess;
+}
+
+// FP64-input entry points (existing API).
+bool batched_factorize(const MultifrontalPlan& plan, BatchedState& st, const double* d_valuesB,
+                       const int* d_o2c, double* kernel_ms)
+{
+    return batched_factorize_T<double>(plan, st, d_valuesB, d_o2c, kernel_ms);
+}
+
+bool batched_solve(const MultifrontalPlan& plan, BatchedState& st, const double* d_rhsB,
+                   double* d_solB, const int* d_perm, double* kernel_ms)
+{
+    return batched_solve_T<double, double>(plan, st, d_rhsB, d_solB, d_perm, kernel_ms);
+}
+
+// FP32-input entry points (cuPF Mixed profile: float Jacobian, double RHS, float step).
+bool batched_factorize(const MultifrontalPlan& plan, BatchedState& st, const float* d_valuesB,
+                       const int* d_o2c, double* kernel_ms)
+{
+    return batched_factorize_T<float>(plan, st, d_valuesB, d_o2c, kernel_ms);
+}
+
+bool batched_solve(const MultifrontalPlan& plan, BatchedState& st, const double* d_rhsB,
+                   float* d_solB, const int* d_perm, double* kernel_ms)
+{
+    return batched_solve_T<double, float>(plan, st, d_rhsB, d_solB, d_perm, kernel_ms);
 }
 
 }  // namespace custom_linear_solver::factorize

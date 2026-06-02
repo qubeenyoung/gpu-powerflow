@@ -55,6 +55,13 @@ public:
     Status batched_factorize(const double* d_valuesB, double* kernel_ms = nullptr);
     Status batched_solve(const double* d_rhsB, double* d_solB, double* kernel_ms = nullptr);
 
+    // FP32-input overloads for callers whose Jacobian/step buffers are single precision (e.g.
+    // cuPF's Mixed profile: float Jacobian, double RHS, float step). Values are scattered
+    // straight into the factor working buffers (no FP64 staging); the internal solve vector
+    // stays FP64 for accuracy.
+    Status batched_factorize(const float* d_valuesB, double* kernel_ms = nullptr);
+    Status batched_solve(const double* d_rhsB, float* d_solB, double* kernel_ms = nullptr);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
