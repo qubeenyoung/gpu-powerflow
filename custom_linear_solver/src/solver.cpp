@@ -298,6 +298,14 @@ Status Solver::analyze()
             n, sym_col_ptr.data(), sym_row_idx.data());
         lap("etree");
 
+        // Fill pattern in METIS order. When amalgamating, the per-column counts come from here for
+        // free (no separate cs_counts) and the pattern is relabeled to the reordered space below
+        // (the reorder is a postorder -> fill-neutral), avoiding a second fill_pattern.
+        std::vector<int> Lp, Li;
+        custom_linear_solver::symbolic::fill_pattern(n, sym_col_ptr.data(), sym_row_idx.data(),
+                                                     parent, Lp, Li);
+        lap("fill_pattern");
+
         // Optional deep-K amalgamation reorder (env MF_AMALG="cap:ratio"): grow supernodes for
         // tensor-core fronts by merging child columns into their parent supernode, then reorder
         // columns so the supernodes are contiguous. Re-derives perm/iperm, the device ordered CSC
@@ -309,17 +317,8 @@ Status Solver::analyze()
             double ratio = 2.0;
             if (const char* col = std::strchr(as, ':')) ratio = std::atof(col + 1);
             if (cap < 1) cap = 1;
-            std::vector<int> cc;
-            if (std::getenv("MF_AMALG_DEG")) {
-                // cheap proxy: symmetric-graph degree (free, already have the pattern) instead of
-                // the exact L column counts -> skips postorder + cs_counts (~20ms on 70k).
-                cc.resize(static_cast<std::size_t>(n));
-                for (int j = 0; j < n; ++j) cc[j] = sym_col_ptr[j + 1] - sym_col_ptr[j];
-            } else {
-                const std::vector<int> post = custom_linear_solver::symbolic::postorder(parent, n);
-                cc = custom_linear_solver::symbolic::column_counts(
-                    n, sym_col_ptr.data(), sym_row_idx.data(), parent, post);
-            }
+            std::vector<int> cc(static_cast<std::size_t>(n));  // exact L column counts, from the fill
+            for (int j = 0; j < n; ++j) cc[j] = Lp[j + 1] - Lp[j];
             lap("  amalg:colcounts");
             std::vector<int> order;
             amalgamation_reorder(n, parent, cc, cap, ratio, order, amalg_panel_sizes);
@@ -339,9 +338,6 @@ Status Solver::analyze()
             ordered_device = std::move(ordered2);
             impl_->d_ordered_value_to_csr = std::move(ordered_device.source_pos);
             lap("  amalg:compose+csc");
-            permute_symmetric_pattern(n, metis_sym_col_ptr, metis_sym_row_idx, impl_->perm,
-                                      impl_->iperm, sym_col_ptr, sym_row_idx);
-            lap("  amalg:permute_sym");
             // The reorder is a postorder of the etree, which preserves the etree structure, so the
             // new-order parent is just the relabel of the old (metis-order) parent -- no re-etree.
             std::vector<int> pos_of(static_cast<std::size_t>(n));
@@ -352,13 +348,14 @@ Status Solver::analyze()
                 parent_new[f] = (pm < 0) ? -1 : pos_of[pm];
             }
             parent = std::move(parent_new);
-            lap("  amalg:relabel_parent");
+            // Relabel the (fill-neutral) METIS-order fill pattern into the reordered space instead
+            // of recomputing fill_pattern there. permute_pattern maps column order[f]->f, rows->pos_of.
+            std::vector<int> Lp2, Li2;
+            custom_linear_solver::symbolic::permute_pattern(n, Lp.data(), Li.data(), order, Lp2, Li2);
+            Lp = std::move(Lp2);
+            Li = std::move(Li2);
+            lap("  amalg:relabel_fill");
         }
-
-        std::vector<int> Lp, Li;
-        custom_linear_solver::symbolic::fill_pattern(n, sym_col_ptr.data(), sym_row_idx.data(),
-                                                     parent, Lp, Li);
-        lap("fill_pattern");
 
         custom_linear_solver::symbolic::PanelPartition amalg_panels;
         const custom_linear_solver::symbolic::PanelPartition* forced = nullptr;
