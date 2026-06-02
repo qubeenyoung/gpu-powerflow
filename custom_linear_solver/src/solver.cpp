@@ -102,30 +102,45 @@ void amalgamation_reorder(int n, const std::vector<int>& parent, const std::vect
             mn[keep] = std::min(mn[rj], mn[rp]);
         }
     }
-    std::vector<std::vector<int>> cols(n);
-    for (int j = 0; j < n; ++j) cols[find(j)].push_back(j);  // ascending within a supernode
-    std::vector<std::vector<int>> snch(n);
+    // Flat (CSR) supernode columns + supernode-tree children — no per-node std::vector churn.
+    std::vector<int> rt(n);
+    for (int j = 0; j < n; ++j) rt[j] = find(j);            // memoized root (top column) of each col
+    // cols: counting-sort columns by root -> colflat[coff[R]..coff[R+1]) ascending in metis index.
+    std::vector<int> coff(static_cast<std::size_t>(n) + 1, 0);
+    for (int j = 0; j < n; ++j) ++coff[rt[j] + 1];
+    for (int j = 0; j < n; ++j) coff[j + 1] += coff[j];
+    std::vector<int> colflat(n);
+    { std::vector<int> w(coff.begin(), coff.end());
+      for (int j = 0; j < n; ++j) colflat[w[rt[j]]++] = j; }  // j ascending -> ascending per root
+    // supernode-tree children (CSR), and roots list.
+    std::vector<int> choff(static_cast<std::size_t>(n) + 1, 0);
     std::vector<int> roots;
     for (int R = 0; R < n; ++R) {
-        if (find(R) != R) continue;  // R is the top (max-index) column of its supernode
+        if (rt[R] != R) continue;
         const int p = parent[R];
-        if (p < 0) roots.push_back(R);
-        else snch[find(p)].push_back(R);
+        if (p < 0) roots.push_back(R); else ++choff[rt[p] + 1];
     }
+    for (int j = 0; j < n; ++j) choff[j + 1] += choff[j];
+    std::vector<int> chflat(choff[n]);
+    { std::vector<int> w(choff.begin(), choff.end());
+      for (int R = 0; R < n; ++R) { if (rt[R] != R) continue; const int p = parent[R];
+          if (p >= 0) chflat[w[rt[p]]++] = R; } }
+    // iterative postorder of the supernode tree; emit each supernode's columns contiguously.
     order.clear();
     order.reserve(n);
     panel_sizes.clear();
     std::vector<std::pair<int, int>> stk;
     for (int r : roots) {
-        stk.push_back({r, 0});
+        stk.push_back({r, choff[r]});
         while (!stk.empty()) {
             auto& top = stk.back();
-            if (top.second < static_cast<int>(snch[top.first].size())) {
-                const int c = snch[top.first][top.second++];
-                stk.push_back({c, 0});
+            if (top.second < choff[top.first + 1]) {
+                const int c = chflat[top.second++];
+                stk.push_back({c, choff[c]});
             } else {
-                for (int col : cols[top.first]) order.push_back(col);
-                panel_sizes.push_back(static_cast<int>(cols[top.first].size()));
+                for (int q = coff[top.first]; q < coff[top.first + 1]; ++q)
+                    order.push_back(colflat[q]);
+                panel_sizes.push_back(coff[top.first + 1] - coff[top.first]);
                 stk.pop_back();
             }
         }
@@ -294,11 +309,21 @@ Status Solver::analyze()
             double ratio = 2.0;
             if (const char* col = std::strchr(as, ':')) ratio = std::atof(col + 1);
             if (cap < 1) cap = 1;
-            const std::vector<int> post = custom_linear_solver::symbolic::postorder(parent, n);
-            const std::vector<int> cc = custom_linear_solver::symbolic::column_counts(
-                n, sym_col_ptr.data(), sym_row_idx.data(), parent, post);
+            std::vector<int> cc;
+            if (std::getenv("MF_AMALG_DEG")) {
+                // cheap proxy: symmetric-graph degree (free, already have the pattern) instead of
+                // the exact L column counts -> skips postorder + cs_counts (~20ms on 70k).
+                cc.resize(static_cast<std::size_t>(n));
+                for (int j = 0; j < n; ++j) cc[j] = sym_col_ptr[j + 1] - sym_col_ptr[j];
+            } else {
+                const std::vector<int> post = custom_linear_solver::symbolic::postorder(parent, n);
+                cc = custom_linear_solver::symbolic::column_counts(
+                    n, sym_col_ptr.data(), sym_row_idx.data(), parent, post);
+            }
+            lap("  amalg:colcounts");
             std::vector<int> order;
             amalgamation_reorder(n, parent, cc, cap, ratio, order, amalg_panel_sizes);
+            lap("  amalg:reorder_fn");
             std::vector<int> newperm(static_cast<std::size_t>(n));
             for (int f = 0; f < n; ++f) newperm[f] = impl_->perm[order[f]];
             impl_->perm = std::move(newperm);
@@ -313,11 +338,21 @@ Status Solver::analyze()
             if (st != Status::Success) return st;
             ordered_device = std::move(ordered2);
             impl_->d_ordered_value_to_csr = std::move(ordered_device.source_pos);
+            lap("  amalg:compose+csc");
             permute_symmetric_pattern(n, metis_sym_col_ptr, metis_sym_row_idx, impl_->perm,
                                       impl_->iperm, sym_col_ptr, sym_row_idx);
-            parent = custom_linear_solver::symbolic::etree(n, sym_col_ptr.data(),
-                                                           sym_row_idx.data());
-            lap("amalgamation_reorder");
+            lap("  amalg:permute_sym");
+            // The reorder is a postorder of the etree, which preserves the etree structure, so the
+            // new-order parent is just the relabel of the old (metis-order) parent -- no re-etree.
+            std::vector<int> pos_of(static_cast<std::size_t>(n));
+            for (int f = 0; f < n; ++f) pos_of[order[f]] = f;
+            std::vector<int> parent_new(static_cast<std::size_t>(n));
+            for (int f = 0; f < n; ++f) {
+                const int pm = parent[order[f]];
+                parent_new[f] = (pm < 0) ? -1 : pos_of[pm];
+            }
+            parent = std::move(parent_new);
+            lap("  amalg:relabel_parent");
         }
 
         std::vector<int> Lp, Li;
