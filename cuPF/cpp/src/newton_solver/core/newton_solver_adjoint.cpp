@@ -14,30 +14,14 @@
 #include "newton_solver/core/solver_contexts.hpp"
 #include "newton_solver/ops/ibus/compute_ibus.hpp"
 #include "newton_solver/ops/jacobian/fill_jacobian.hpp"
+#include "utils/timer.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
-
-
-// ===========================================================================
-// Translation-unit-local helpers
-// ===========================================================================
-namespace {
-
-using Clock = std::chrono::steady_clock;
-
-double elapsed_ms(Clock::time_point start, Clock::time_point end)
-{
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
-
-}  // namespace
 
 
 // ===========================================================================
@@ -64,7 +48,7 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
                           grad_va, grad_va_stride,
                           grad_vm, grad_vm_stride,
                           batch_size, pv, n_pv, pq, n_pq);
-    const auto total_start = Clock::now();
+    newton_solver::utils::ScopedTimer total_timer("NR.adjoint.cpu.total");
 
     // Record provenance/diagnostic flags for this (CPU) backend.
     result.backend = p.linear_solve.backend_name();
@@ -101,13 +85,16 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
         p.adjoint_cache.has_adjoint_cache &&
         p.adjoint_cache.adjoint_cache_matches_final_state &&
         p.adjoint_cache.factorization_supports_transpose_solve;
+
     const bool allow_backward_refactor =
         options.allow_refactorize && options.allow_refactorize_for_backward;
+
     if (!cache_ok) {
         if (options.require_cached_factorization || !allow_backward_refactor) {
             throw std::runtime_error(
                 "NewtonSolver::solve_adjoint(): missing exact final-state adjoint cache");
         }
+
         // Rebuild ibus + Jacobian at the final state and refactorize.
         NRConfig cfg;
         IterationContext ctx{
@@ -117,9 +104,12 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
         };
         p.ibus(ctx);
         p.jacobian(ctx);
-        const auto factor_start = Clock::now();
+
+        newton_solver::utils::ScopedTimer factor_timer("NR.adjoint.cpu.factorize");
         p.linear_solve.factorize(p.buf, ctx);
-        result.factorization_time_ms = elapsed_ms(factor_start, Clock::now());
+        factor_timer.stop();
+
+        result.factorization_time_ms = factor_timer.elapsedMilliseconds();
         result.refactorized_for_backward = true;
         result.jt_refactorized_during_backward = true;
         p.adjoint_cache.has_adjoint_cache = true;
@@ -138,10 +128,11 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
     }
 
     // Solve J^T lambda = dL/dx using the cached factorization (dimF entries).
-    auto solve_start = Clock::now();
+    newton_solver::utils::ScopedTimer solve_timer("NR.adjoint.cpu.solve_transpose");
     result.lambda.assign(p.buf.dimF, 0.0);
     p.linear_solve.solve_transpose(grad_state.data(), result.lambda.data(), p.buf.dimF, 1);
-    result.solve_time_ms = elapsed_ms(solve_start, Clock::now());
+    solve_timer.stop();
+    result.solve_time_ms = solve_timer.elapsedMilliseconds();
     result.transpose_solve_time_ms = result.solve_time_ms;
 
     result.used_adjoint_cache = cache_ok;
@@ -156,7 +147,8 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
     if (options.compute_load_gradients) {
         project_load_gradients(result.lambda, p.buf.n_bus, 1, pv, n_pv, pq, n_pq, result);
     }
-    result.total_time_ms = elapsed_ms(total_start, Clock::now());
+    total_timer.stop();
+    result.total_time_ms = total_timer.elapsedMilliseconds();
     result.success = true;
 }
 
@@ -190,7 +182,7 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
                           grad_va, grad_va_stride,
                           grad_vm, grad_vm_stride,
                           batch_size, pv, n_pv, pq, n_pq);
-    const auto total_start = Clock::now();
+    newton_solver::utils::ScopedTimer total_timer("NR.adjoint.cuda.total");
 
     // Record provenance/diagnostic flags for this (CUDA) backend.
     result.backend = backend_name;
@@ -299,7 +291,8 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
     if (options.compute_load_gradients) {
         project_load_gradients(result.lambda, p.buf.n_bus, batch_size, pv, n_pv, pq, n_pq, result);
     }
-    result.total_time_ms = elapsed_ms(total_start, Clock::now());
+    total_timer.stop();
+    result.total_time_ms = total_timer.elapsedMilliseconds();
     result.success = true;
 }
 

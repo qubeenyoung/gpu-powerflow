@@ -25,7 +25,6 @@
 #include "utils/nvtx_trace.hpp"
 #include "utils/timer.hpp"
 
-#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <stdexcept>
@@ -36,8 +35,6 @@
 
 
 namespace {
-
-using Clock = std::chrono::steady_clock;
 
 // RAII helper that opens an NVTX range and a wall-clock timer for one stage,
 // both keyed by the same label (see docs/RULE.md for label conventions).
@@ -61,11 +58,6 @@ void validate_batch_args(int32_t batch_size, int64_t stride, int32_t n_bus, cons
     if (stride < n_bus) {
         throw std::invalid_argument(std::string("NewtonSolver::solve_batch(): ") + name + " stride must be at least n_bus");
     }
-}
-
-double elapsed_ms(Clock::time_point start, Clock::time_point end)
-{
-    return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
 }  // namespace
@@ -358,7 +350,7 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
     }
 
     std::visit([&](auto& p) {
-        const auto start = Clock::now();
+        newton_solver::utils::ScopedTimer factor_timer("NR.adjoint_cache.factorization");
 
         // Recompute current injection and Jacobian at the final voltage state.
         p.ibus(ctx);
@@ -435,9 +427,10 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
         }
 #endif
 
-        // Fall back to a wall-clock measurement if the backend did not report one.
+        // Use the scoped timing sample if the backend did not report one.
         if (p.adjoint_cache.factorization_time_ms == 0.0) {
-            p.adjoint_cache.factorization_time_ms = elapsed_ms(start, Clock::now());
+            factor_timer.stop();
+            p.adjoint_cache.factorization_time_ms = factor_timer.elapsedMilliseconds();
         }
     }, pipeline_->v);
 }

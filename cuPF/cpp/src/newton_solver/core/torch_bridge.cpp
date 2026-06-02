@@ -12,8 +12,8 @@
 #include "newton_solver/core/newton_solver_cuda_bridge.hpp"
 #include "newton_solver/core/pipeline.hpp"
 #include "newton_solver/core/solver_contexts.hpp"
+#include "utils/timer.hpp"
 
-#include <chrono>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -29,13 +29,6 @@
 // Translation-unit-local helpers
 // ===========================================================================
 namespace {
-
-using Clock = std::chrono::steady_clock;
-
-double elapsed_ms(Clock::time_point start, Clock::time_point end)
-{
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
 
 #ifdef CUPF_WITH_CUDA
 // Resize every device buffer to match the current case/batch dimensions. All
@@ -264,7 +257,7 @@ void NewtonSolver::solve_torch_backward(
                     "cupf::torch_api::solve_backward(): missing exact cached adjoint factorization");
             }
 
-            const auto total_start = Clock::now();
+            newton_solver::utils::ScopedTimer total_timer("NR.torch.backward.total");
             // The torch tensors arrive as untyped device pointers; reinterpret
             // them as the pipeline's scalar type (ValueT = float or double).
             const ValueT* grad_va = reinterpret_cast<const ValueT*>(grad_va_device_ptr);
@@ -295,7 +288,8 @@ void NewtonSolver::solve_torch_backward(
             result.adjoint_cache_matches_final_state = true;
             result.reused_final_state_factorization = true;
             result.factorization_time_ms = 0.0;
-            result.total_time_ms = elapsed_ms(total_start, Clock::now());
+            total_timer.stop();
+            result.total_time_ms = total_timer.elapsedMilliseconds();
             result.transpose_solve_backend += "_torch_extension";
         }
     }, pipeline_->v);
@@ -348,7 +342,7 @@ void NewtonSolver::solve_torch_forward(
         throw std::invalid_argument("cupf::torch_api::solve_forward(): null device pointer");
     }
     const std::string dtype_name = dtype ? std::string(dtype) : std::string();
-    const auto total_start = Clock::now();
+    newton_solver::utils::ScopedTimer total_timer("NR.torch.forward.total");
 
     result = {};
     std::visit([&](auto& p) {
@@ -466,7 +460,8 @@ void NewtonSolver::solve_torch_forward(
             result.batch_size = batch_size;
             result.dimF = p.buf.dimF;
             result.factorization_time_ms = p.adjoint_cache.factorization_time_ms;
-            result.total_time_ms = elapsed_ms(total_start, Clock::now());
+            total_timer.stop();
+            result.total_time_ms = total_timer.elapsedMilliseconds();
         }
     }, pipeline_->v);
 #endif

@@ -48,7 +48,6 @@
 
 #include <cstdint>
 #include <algorithm>
-#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
@@ -122,14 +121,6 @@ struct CudaLinearSolveCuDSS<T, Buffers>::State {
 // Translation-unit-local helpers
 // ===========================================================================
 namespace {
-
-using Clock = std::chrono::steady_clock;
-
-// Wall-clock elapsed time between two steady-clock samples.
-double elapsed_ms(Clock::time_point start, Clock::time_point end)
-{
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
 
 #ifdef CUPF_ENABLE_CUDSS
 // Map the C++ scalar type T to the matching cuDSS runtime data-type enum.
@@ -414,7 +405,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
         batch_size);
 
     // Analyze (once) then factorize J^T; only the factorization is timed.
-    const auto start = Clock::now();
+    newton_solver::utils::ScopedTimer factor_timer("cuda_cudss.adjoint.factorize");
     if (!state_->adjoint_analysis_done) {
         set_cudss_stream(state_->handle);
         CUDSS_CHECK(cudssExecute(
@@ -435,7 +426,8 @@ void CudaLinearSolveCuDSS<T, Buffers>::prepare_adjoint_explicit_transpose_cache(
     ));
     sync_cuda_for_timing();
     state_->adjoint_factorized = true;
-    factorization_time_ms = elapsed_ms(start, Clock::now());
+    factor_timer.stop();
+    factorization_time_ms = factor_timer.elapsedMilliseconds();
 #endif
 }
 
@@ -475,14 +467,15 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_host(
     state_->adjoint_solution.memsetZero();
 
     // Time only the device solve.
-    const auto start = Clock::now();
+    newton_solver::utils::ScopedTimer solve_timer("cuda_cudss.adjoint.solve_host");
     set_cudss_stream(state_->handle);
     CUDSS_CHECK(cudssExecute(
         state_->handle, CUDSS_PHASE_SOLVE,
         state_->config, state_->data,
         state_->adjoint_matrix, state_->adjoint_solution_matrix, state_->adjoint_rhs_matrix));
     sync_cuda_for_timing();
-    solve_time_ms = elapsed_ms(start, Clock::now());
+    solve_timer.stop();
+    solve_time_ms = solve_timer.elapsedMilliseconds();
 
     // Copy the solution back and up-cast T -> FP64 for the caller's buffer.
     std::vector<T> sol_t(count);
@@ -528,14 +521,15 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_cached(d
     throw std::runtime_error("CudaLinearSolveCuDSS::solve_adjoint_explicit_transpose_cached requires a cuDSS-enabled build");
 #else
     state_->adjoint_solution.memsetZero();
-    const auto start = Clock::now();
+    newton_solver::utils::ScopedTimer solve_timer("cuda_cudss.adjoint.solve_cached");
     set_cudss_stream(state_->handle);
     CUDSS_CHECK(cudssExecute(
         state_->handle, CUDSS_PHASE_SOLVE,
         state_->config, state_->data,
         state_->adjoint_matrix, state_->adjoint_solution_matrix, state_->adjoint_rhs_matrix));
     sync_cuda_for_timing();
-    solve_time_ms = elapsed_ms(start, Clock::now());
+    solve_timer.stop();
+    solve_time_ms = solve_timer.elapsedMilliseconds();
 #endif
 }
 
