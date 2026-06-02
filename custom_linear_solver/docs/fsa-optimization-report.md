@@ -191,7 +191,7 @@ compute-bound answer is "yes"):
 
 The blocker above was structural, not fundamental: power-grid supernodes are nc≤16 (K=16, one
 tensor tile), and 96% of fronts are tiny, so WMMA had nothing to amortize. The fix is to GROW the
-supernodes. An isolated microbench (`bench/tc_trailing_microbench.cu`) confirms the upside: the
+supernodes. An isolated microbench (`tests/tc_trailing_microbench.cu`) confirms the upside: the
 batched trailing `C-=L*U` is **1.5-2.7x faster in FP16 WMMA than FP32** for fronts ≥64 (e.g.
 16×128 2.69x, 32×256 2.72x).
 

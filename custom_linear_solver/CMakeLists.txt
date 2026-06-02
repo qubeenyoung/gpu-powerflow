@@ -67,11 +67,11 @@ if(CLS_BUILD_CUDA_OPS)
 
   if(CLS_BUILD_SCRIPTS)
     add_executable(custom_linear_solver_run
-      scripts/io.cpp
-      scripts/run_custom_solver.cu
+      tests/io.cpp
+      tests/run_custom_solver.cu
     )
     target_include_directories(custom_linear_solver_run PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/scripts
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests
     )
     target_link_libraries(custom_linear_solver_run PRIVATE
       custom_linear_solver_api
@@ -103,11 +103,11 @@ if(CLS_BUILD_CUDA_OPS)
       get_filename_component(CUDSS_LIBRARY_DIR "${CUDSS_LIBRARY}" DIRECTORY)
 
       add_executable(cudss_run
-        scripts/io.cpp
-        scripts/run_cudss_solver.cpp
+        tests/io.cpp
+        tests/run_cudss_solver.cpp
       )
       target_include_directories(cudss_run PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/scripts
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CUDSS_INCLUDE_DIR}
       )

@@ -134,20 +134,8 @@ void CudaLinearSolveCustomFp64::initialize(CudaFp64Storage& buf, const Initializ
     check_status(state->solver.set_solution(make_vector_view(buf.dimF, buf.d_dx.data())),
                  "set_solution");
     check_status(state->solver.analyze(), "analyze");
-    state->analyzed = true;
-
-    // Uniform-batch path for B>1 (contingency/scenario/time-step sweeps): the batch-major device
-    // buffers (d_J_values[b*nnz], d_F[b*dimF], d_dx[b*dimF]) match the library's batched layout, so
-    // one analyze is shared and factorize/solve run all B at once. B==1 keeps the single-case path.
-    state->batch = buf.batch_size;
-    state->batched = (state->batch > 1);
-    if (state->batched) {
-        if (state->solver.batched_setup(state->batch, batch_precision_from_env()) !=
-            cls::Status::Success) {
-            throw std::runtime_error("CudaLinearSolveCustomFp64::initialize: batched_setup failed");
-        }
-    }
     sync_cuda_for_timing();
+    state->analyzed = true;
 
     delete state_;
     state_ = state.release();
@@ -171,10 +159,22 @@ void CudaLinearSolveCustomFp64::factorize(CudaFp64Storage& buf, IterationContext
         throw std::runtime_error("CudaLinearSolveCustomFp64::factorize: initialize() must be called first");
     }
     state_->factorized = false;
-    if (state_->batched)
+    // The batch size is known now (set on the storage at upload()), so (re)build the uniform-batch
+    // state lazily for B>1; B==1 stays on the single-case path.
+    const int batch = buf.batch_size;
+    if (batch > 1) {
+        if (!(state_->batched && state_->batch == batch)) {
+            check_status(state_->solver.batched_setup(batch, batch_precision_from_env()),
+                         "batched_setup");
+            state_->batch = batch;
+            state_->batched = true;
+        }
         check_status(state_->solver.batched_factorize(buf.d_J_values.data()), "batched_factorize");
-    else
+    } else {
+        state_->batched = false;
+        state_->batch = 1;
         check_status(state_->solver.factorize(), "factorize");
+    }
     sync_cuda_for_timing();
     state_->factorized = true;
 }

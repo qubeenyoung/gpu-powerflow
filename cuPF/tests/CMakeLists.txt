@@ -10,6 +10,18 @@ if(BUILD_EVALUATORS)
   target_include_directories(cupf_cpp_evaluate PRIVATE
     ${PROJECT_SOURCE_DIR}/cpp/inc
     ${CMAKE_CURRENT_SOURCE_DIR})   # so #include "dump_case_loader.hpp" resolves
+
+  # Batch-scaling micro-benchmark: replicate one dump case into a B-case batch and time each NR
+  # stage. CUPF_BENCH_CUSTOM=1 benches the custom direct solver (CUPF_CUSTOM_PRECISION picks its
+  # internal factor precision); default is cuDSS.
+  add_executable(cupf_batch_bench
+    batch_bench.cpp
+    dump_case_loader.cpp
+  )
+  target_link_libraries(cupf_batch_bench PRIVATE cupf)
+  target_include_directories(cupf_batch_bench PRIVATE
+    ${PROJECT_SOURCE_DIR}/cpp/inc
+    ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 # Evaluator-only configure (BUILD_EVALUATORS=ON, BUILD_TESTING=OFF): stop here.

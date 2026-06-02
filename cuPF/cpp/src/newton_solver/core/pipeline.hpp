@@ -186,9 +186,7 @@ struct CudaFp64CustomPipeline {
     }
 
     void download_batch(NRBatchResult& result) const {
-        NRResult single;
-        buf.download(single);
-        result.V = std::move(single.V);
+        buf.download_batch(result);
     }
 
     void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp64Storage>{}.run(buf, ctx); }
@@ -200,7 +198,9 @@ struct CudaFp64CustomPipeline {
     void solve(IterationContext& ctx)         { linear_solve.solve(buf, ctx); }
     void voltage_update(IterationContext& ctx){ CudaVoltageUpdateOp<double>{}.run(buf, ctx); }
 
-    static constexpr bool batch_supported = false;
+    // The custom solver now drives the library's uniform-batch path for B>1 (see
+    // cuda_custom_solver.cpp); B==1 stays single-case.
+    static constexpr bool batch_supported = true;
 };
 #endif
 
