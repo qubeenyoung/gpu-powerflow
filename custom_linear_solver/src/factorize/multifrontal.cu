@@ -463,16 +463,12 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     namespace sym = custom_linear_solver::symbolic;
     const bool tm = std::getenv("MF_TIME") != nullptr;  // analysis sub-phase profiling
     const bool solve_f32 = std::getenv("MF_SOLVE_F32") != nullptr;  // cy170: FP32 solve A/B
-    // FP64-master / FP32-working "mixed" factor. On consumer Ampere (RTX 3090) FP64 runs at
-    // 1/64 FP32 throughput, so the dense per-front LU bulk is far cheaper in FP32 while the
-    // FP64 master keeps the assembly precise. It pays off on small/medium matrices (fronts big
-    // enough that the FP32 LU win beats the narrow/writeback overhead, deep-enough etree not yet
-    // launch-latency-bound). On the largest matrices factor is launch/occupancy-bound (FP32 does
-    // not help) AND the FP32 LU error compounds past the 1e-3 target, so they stay FP64.
-    // Adaptive by n; MF_MIXED / MF_NO_MIXED override for sweeps.
-    if (std::getenv("MF_NO_MIXED") != nullptr) fp32 = false;
-    else if (std::getenv("MF_MIXED") != nullptr) fp32 = true;
-    else if (n > 0 && n < 24000) fp32 = true;
+    // Single-system mixed factor (FP64-master / FP32-working LU). Default OFF: this single-system
+    // path is the FP64 reference; MF_MIXED opts into the mixed LU (the batched path selects
+    // precision explicitly via BatchPrecision, see multifrontal_batched). On consumer Ampere FP64
+    // is 1/64 FP32, so the mixed LU bulk is far cheaper while the FP64 master keeps the assembly
+    // precise; it helps small/medium fronts (large factor is launch-bound, not compute-bound).
+    if (std::getenv("MF_MIXED") != nullptr && std::getenv("MF_NO_MIXED") == nullptr) fp32 = true;
     auto tclk = std::chrono::steady_clock::now();
     auto lap = [&](const char* nm) {
         if (tm) {

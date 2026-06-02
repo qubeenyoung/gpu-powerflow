@@ -10,6 +10,17 @@ namespace custom_linear_solver::factorize {
 
 using custom_linear_solver::plan::MultifrontalPlan;
 
+// Kernel roster (all batched: gridDim.y = batch; front-major arena = B * front_total):
+//   scatter_batched<FT>          - scatter A values into the front (FT = front type)
+//   FACTOR, one per BatchPrecision:
+//     mf_factor_extend_level_b<FT>   - FP64 (FT=double) and pure-FP32 (FT=float) dense LU + extend
+//     mf_factor_extend_mixed_b       - Mixed: FP64 master + FP32 working LU
+//     mf_factor_extend_mixed_tc_b    - TC:    FP64 master + FP16 tensor-core (WMMA) trailing
+//     mf_invert_pivot_b<FT>          - optional selinv (invert each pivot block for a GEMV solve)
+//   SOLVE:
+//     gather_rhs_b / scatter_sol_b   - permuted RHS gather / solution scatter
+//     mf_fwd_level_b<FT> / mf_bwd_level_b<FT> - forward/backward triangular solve per etree level
+// Templates are instantiated by batched_setup's switch on BatchedState::prec.
 namespace {
 
 // ---- batched numeric scatter: front_b[a_pos[q]] += values_b[o2c[q]] ----------------
@@ -389,7 +400,8 @@ __global__ void mf_invert_pivot_b(int npanels, const int* __restrict__ front_ptr
     }
 }
 
-// ---- batched solve (selinv GEMV form) -----------------------------------------------
+// ---- batched solve helpers --------------------------------------------------------------
+// Gather the permuted RHS into the working vector y (per batch): y[k] = rhs[perm[k]].
 __global__ void gather_rhs_b(int n, const double* __restrict__ rhsB, const int* __restrict__ perm,
                              double* __restrict__ yB)
 {
@@ -398,6 +410,7 @@ __global__ void gather_rhs_b(int n, const double* __restrict__ rhsB, const int* 
     const long b = blockIdx.y;
     yB[b * n + k] = rhsB[b * (long)n + perm[k]];
 }
+// Scatter the working vector y back to the solution in original order: sol[perm[k]] = y[k].
 __global__ void scatter_sol_b(int n, const double* __restrict__ yB, const int* __restrict__ perm,
                              double* __restrict__ solB)
 {
