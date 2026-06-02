@@ -186,7 +186,7 @@ This is a genuine **GEMM** (M=uc, N=uc, K=nc), so tensor cores apply — *per ba
 gives many such independent GEMMs to keep the tensor cores busy. (Contrast the solve, which
 is `L·vector` = GEMV, N=1 — tensor cores do not apply.)
 
-An isolated microbench (`bench/tc_trailing_microbench.cu`) confirms the ceiling: the batched
+An isolated microbench (`tests/tc_trailing_microbench.cu`) confirms the ceiling: the batched
 trailing GEMM is **1.5–2.7× faster in FP16 WMMA than FP32** for fronts ≥ 64 (e.g. 16×128
 2.69×, 32×256 2.72×).
 
@@ -289,7 +289,7 @@ cmake --build build/cls -j
 MF_TC=1 MF_AMALG=32:3 MF_NO_SELINV=1 \
   build/cls/custom_linear_solver_run /datasets/.../case_ACTIVSg70k --batch 64 --batch-only --repeat 8
 # isolated trailing-GEMM tensor-core microbench:
-nvcc -O3 -arch=sm_86 custom_linear_solver/bench/tc_trailing_microbench.cu -o /tmp/tcb && /tmp/tcb
+nvcc -O3 -arch=sm_86 custom_linear_solver/tests/tc_trailing_microbench.cu -o /tmp/tcb && /tmp/tcb
 ```
 
 Runner precision env (maps to BatchPrecision; default Mixed for n<24000 else FP64):

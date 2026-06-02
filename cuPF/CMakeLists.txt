@@ -397,20 +397,8 @@ endif()
 # ---------------------------------------------------------------------------
 # Tests and Evaluators
 # ---------------------------------------------------------------------------
-# perf/: batch scaling micro-benchmark (analysis only, not shipped)
-if(BUILD_EVALUATORS)
-  add_executable(cupf_batch_bench
-    perf/batch_bench.cpp
-    tests/dump_case_loader.cpp
-  )
-  target_link_libraries(cupf_batch_bench PRIVATE cupf)
-  target_include_directories(cupf_batch_bench PRIVATE
-    ${PROJECT_SOURCE_DIR}/cpp/inc
-    ${PROJECT_SOURCE_DIR}/tests)
-endif()
-
-# The C++ evaluator (cupf_cpp_evaluate) lives under tests/ next to the shared
-# dump_case_loader it depends on, so tests/ is added whenever either testing or
+# The C++ evaluators (cupf_cpp_evaluate, cupf_batch_bench) live under tests/ next to the
+# shared dump_case_loader they depend on, so tests/ is added whenever either testing or
 # evaluators are requested.
 if(BUILD_TESTING OR BUILD_EVALUATORS)
   add_subdirectory(tests)

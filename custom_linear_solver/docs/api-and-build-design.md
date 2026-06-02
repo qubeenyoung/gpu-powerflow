@@ -157,7 +157,7 @@ Why these files:
 Not copied into the build:
 
 - benchmark drivers
-- benchmark Matrix Market tools; `scripts/io.*` keeps only the minimal runner IO
+- benchmark Matrix Market tools; `tests/io.*` keeps only the minimal runner IO
 - third-party solver adapters
 - old GPU factor/solve/spmv paths
 - CPU own pipeline implementations
