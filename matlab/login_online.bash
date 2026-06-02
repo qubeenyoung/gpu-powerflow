@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Authenticate MATLAB online licensing from a non-interactive shell.
+#
+# MATLAB's first online-licensing launch prompts for a MathWorks account email
+# and password.  The normal benchmark runners cannot answer that prompt, so this
+# helper performs one short MATLAB launch and exits as soon as authentication is
+# accepted.  It deliberately never prints the password.
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
+# Local credentials and MATLAB paths may live in the repository root .env file.
+# The file is ignored by git; do not commit real MathWorks credentials.
 if [[ -f "${repo_root}/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
@@ -14,11 +23,12 @@ fi
 matlab_bin="${MATLAB_BIN:-matlab}"
 
 if [[ -z "${MATLAB_USER_ID:-}" || -z "${MATLAB_PASSWORD:-}" ]]; then
-  echo "MATLAB_USER_ID and MATLAB_PASSWORD must be set in .env for online login." >&2
+  echo "MATLAB_USER_ID and MATLAB_PASSWORD must be set in .env or the environment for online login." >&2
   exit 2
 fi
 
 MATLAB_BIN="${matlab_bin}" python3 - <<'PY'
+"""Drive MATLAB's online licensing prompt without exposing credentials."""
 import os
 import pexpect
 import sys
@@ -27,6 +37,8 @@ user = os.environ["MATLAB_USER_ID"]
 password = os.environ["MATLAB_PASSWORD"]
 matlab_bin = os.environ.get("MATLAB_BIN", "matlab")
 
+# A tiny -batch command is enough to force MATLAB to validate the license.  The
+# sentinel text lets us distinguish a clean MATLAB run from EOF after a prompt.
 cmd = f"{matlab_bin} -licmode onlinelicensing -batch \"disp('ONLINE_AUTH_OK')\""
 child = pexpect.spawn("/bin/bash", ["-lc", cmd], encoding="utf-8", timeout=60)
 try:

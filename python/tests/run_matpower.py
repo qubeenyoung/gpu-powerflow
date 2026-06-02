@@ -30,6 +30,9 @@ MATPOWER_VARIANTS = [
     },
 ]
 
+MATLAB_DIR = eval_common.REPO_ROOT / "matlab"
+MATLAB_RUNNER = MATLAB_DIR / "run_matpower_case.m"
+
 
 def _matlab_bin(explicit: str | None) -> str | None:
     if explicit:
@@ -131,115 +134,33 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def _matlab_script(cases_file: Path, raw_csv: Path, matpower_home: Path, variant: dict[str, Any], args: argparse.Namespace) -> str:
-    solver = variant["linear_solver"]
-    return f"""
-cases_file = "{cases_file.as_posix()}";
-raw_csv = "{raw_csv.as_posix()}";
-matpower_home = "{matpower_home.as_posix()}";
-variant = "{variant['variant']}";
-linear_solver = "{solver}";
-warmup = {int(args.warmup)};
-repeats = {int(args.repeats)};
-tol = {float(args.tolerance):.17g};
-max_it = {int(args.max_iter)};
+def _matlab_quote(value: str | Path) -> str:
+    """Return a MATLAB single-quoted string literal without exposing shell quoting."""
+    return str(value).replace("'", "''")
 
-if exist(matpower_home, "dir") ~= 7
-    error("MATPOWER_HOME not found: %s", matpower_home);
-end
-addpath(genpath(matpower_home));
-define_constants;
-case_lines = readlines(cases_file);
-case_lines = case_lines(strlength(strtrim(case_lines)) > 0);
-fid = fopen(raw_csv, "w");
-cleanup = onCleanup(@() fclose(fid));
-csv_row(fid, {{"case_name","case_path","repeat_idx","warmup","success","converged","iterations","error_message","initialize_ms","solve_ms","reported_solve_ms","output_mismatch"}});
 
-for c = 1:numel(case_lines)
-    case_path = char(case_lines(c));
-    [~, case_name, ~] = fileparts(case_path);
-    for repeat = 0:(warmup + repeats - 1)
-        is_warmup = repeat < warmup;
-        repeat_idx = repeat;
-        if ~is_warmup
-            repeat_idx = repeat - warmup;
-        end
-        try
-            t_init = tic;
-            mpc = loadcase(case_path);
-            mpopt = mpoption("verbose", 0, "out.all", 0, "pf.alg", "NR", "pf.tol", tol, "pf.nr.max_it", max_it);
-            if strlength(linear_solver) > 0
-                mpopt = mpoption(mpopt, "pf.nr.lin_solver", char(linear_solver));
-            end
-            initialize_ms = toc(t_init) * 1000.0;
+def _matlab_benchmark_call(cases_file: Path, raw_csv: Path, matpower_home: Path, variant: dict[str, Any], args: argparse.Namespace) -> str:
+    """Build the MATLAB -batch expression that invokes matlab/run_matpower_case.m.
 
-            t_solve = tic;
-            results = runpf(mpc, mpopt);
-            solve_ms = toc(t_solve) * 1000.0;
-            reported_solve_ms = NaN;
-            if isfield(results, "et")
-                reported_solve_ms = results.et * 1000.0;
-            end
-            iterations = NaN;
-            if isfield(results, "iterations")
-                iterations = results.iterations;
-            end
-            output_mismatch = NaN;
-            try
-                int_results = ext2int(results);
-                [Ybus, ~, ~] = makeYbus(int_results.baseMVA, int_results.bus, int_results.branch);
-                Sbus = makeSbus(int_results.baseMVA, int_results.bus, int_results.gen);
-                [~, pv, pq] = bustypes(int_results.bus, int_results.gen);
-                V = int_results.bus(:, VM) .* exp(1j * pi / 180 * int_results.bus(:, VA));
-                mis = V .* conj(Ybus * V) - Sbus;
-                F = [real(mis(pv)); real(mis(pq)); imag(mis(pq))];
-                if isempty(F)
-                    output_mismatch = 0.0;
-                else
-                    output_mismatch = norm(F, inf);
-                end
-            catch mismatch_exc
-                output_mismatch = NaN;
-            end
-            csv_row(fid, {{case_name, case_path, repeat_idx, double(is_warmup), 1, double(results.success), iterations, "", initialize_ms, solve_ms, reported_solve_ms, output_mismatch}});
-            if ~is_warmup
-                fprintf("[%s][OK] %s repeat=%d init_ms=%.3f solve_ms=%.3f resid=%.3e\\n", variant, case_name, repeat_idx, initialize_ms, solve_ms, output_mismatch);
-            end
-        catch exc
-            csv_row(fid, {{case_name, case_path, repeat_idx, double(is_warmup), 0, 0, NaN, getReport(exc, "basic", "hyperlinks", "off"), NaN, NaN, NaN, NaN}});
-            fprintf(2, "[%s][FAIL] %s: %s\\n", variant, case_name, exc.message);
-        end
-    end
-end
-
-function csv_row(fid, values)
-    for k = 1:numel(values)
-        if k > 1
-            fprintf(fid, ",");
-        end
-        fprintf(fid, "%s", csv_cell(values{{k}}));
-    end
-    fprintf(fid, "\\n");
-end
-
-function out = csv_cell(value)
-    if isnumeric(value) || islogical(value)
-        if isempty(value) || any(isnan(value(:)))
-            out = "";
-        else
-            out = sprintf("%.17g", value);
-        end
-    else
-        out = char(string(value));
-    end
-    if contains(out, '"')
-        out = strrep(out, '"', '""');
-    end
-    if contains(out, ',') || contains(out, '"') || contains(out, newline)
-        out = ['"' out '"'];
-    end
-end
-"""
+    The substantial MATLAB logic lives in the checked-in .m file.  Python only
+    passes paths and benchmark parameters, which keeps this runner readable and
+    makes manual MATLAB debugging use the same code path as automated runs.
+    """
+    matlab_dir = _matlab_quote(MATLAB_DIR.as_posix())
+    return (
+        f"addpath('{matlab_dir}'); "
+        "run_matpower_case('', '', "
+        "'Mode', 'benchmark', "
+        f"'CasesFile', '{_matlab_quote(cases_file.as_posix())}', "
+        f"'OutputCsv', '{_matlab_quote(raw_csv.as_posix())}', "
+        f"'MatpowerHome', '{_matlab_quote(matpower_home.as_posix())}', "
+        f"'Variant', '{_matlab_quote(variant['variant'])}', "
+        f"'LinearSolver', '{_matlab_quote(variant['linear_solver'])}', "
+        f"'Warmup', {int(args.warmup)}, "
+        f"'Repeats', {int(args.repeats)}, "
+        f"'Tolerance', {float(args.tolerance):.17g}, "
+        f"'MaxIter', {int(args.max_iter)});"
+    )
 
 
 def _normalize_rows(raw_csv: Path, out: Path, variant: dict[str, Any], case_info: dict[str, dict[str, Any]]) -> None:
@@ -300,6 +221,10 @@ def run_variant(args: argparse.Namespace, variant: dict[str, Any]) -> None:
         eval_common.write_skip(out, "MATLAB executable not found", manifest)
         print(f"[{variant['variant']}][SKIP] MATLAB executable not found", flush=True)
         return
+    if not MATLAB_RUNNER.exists():
+        eval_common.write_skip(out, f"MATLAB runner not found: {MATLAB_RUNNER}", manifest)
+        print(f"[{variant['variant']}][SKIP] missing MATLAB runner={MATLAB_RUNNER}", flush=True)
+        return
     if not matpower_home.exists():
         eval_common.write_skip(out, f"MATPOWER_HOME not found: {matpower_home}", manifest)
         print(f"[{variant['variant']}][SKIP] missing MATPOWER_HOME={matpower_home}", flush=True)
@@ -319,10 +244,13 @@ def run_variant(args: argparse.Namespace, variant: dict[str, Any]) -> None:
         tmp_dir = Path(tmp)
         cases_file = tmp_dir / "cases.txt"
         raw_csv = tmp_dir / "matpower_raw.csv"
-        script = tmp_dir / "run_matpower_benchmark.m"
         cases_file.write_text("\n".join(str(path) for path in paths) + "\n", encoding="utf-8")
-        script.write_text(_matlab_script(cases_file, raw_csv, matpower_home, variant, args), encoding="utf-8")
-        cmd = [matlab_bin, *_matlab_license_args(matlab_env), "-batch", f"run('{script.as_posix()}')"]
+        cmd = [
+            matlab_bin,
+            *_matlab_license_args(matlab_env),
+            "-batch",
+            _matlab_benchmark_call(cases_file, raw_csv, matpower_home, variant, args),
+        ]
         print(f"[{variant['variant']}][RUN] {' '.join(cmd)}", flush=True)
         try:
             proc = subprocess.run(
