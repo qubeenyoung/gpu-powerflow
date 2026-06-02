@@ -7,6 +7,7 @@ ARG MATLAB_PRODUCT_LIST="MATLAB"
 ARG MATLAB_INSTALL_LOCATION=/opt/matlab
 ARG LICENSE_SERVER
 ARG MATPOWER_REF=8.1
+ARG CUDSS_PACKAGE_VERSION=0.7.1.4-1
 
 # 1. Base system packages (rarely changes)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -14,7 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-dev \
       gcc-12 g++-12 cmake ninja-build \
       libsuitesparse-dev libopenblas-dev \
-      libmetis-dev libcudss0-dev-cuda-12 \
+      libmetis-dev \
+      libcudss0-cuda-12=${CUDSS_PACKAGE_VERSION} \
+      libcudss0-dev-cuda-12=${CUDSS_PACKAGE_VERSION} \
       zlib1g-dev tree jq \
       && rm -rf /var/lib/apt/lists/*
 
