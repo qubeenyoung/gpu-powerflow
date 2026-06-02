@@ -16,7 +16,10 @@
 #include "utils/cuda_utils.hpp"
 
 #include <solver.hpp>
+#include <factorize/multifrontal_batched.hpp>
 
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -26,6 +29,22 @@
 namespace {
 
 namespace cls = custom_linear_solver;
+
+// Batch precision for B>1 (the single-case B==1 path stays FP64). The standalone solver does the
+// mixed/FP32/FP16-TC factor internally on the FP64 Jacobian, so cuPF keeps its FP64 storage and
+// only selects the factor precision here. Env CUPF_CUSTOM_PRECISION = fp64|fp32|mixed|tc
+// (default mixed: fastest factor that still passes ~1e-3 without refinement). TC additionally
+// needs the deep-K amalgamation (set MF_AMALG=cap:ratio so analyze grows the supernodes).
+cls::factorize::BatchPrecision batch_precision_from_env()
+{
+    const char* s = std::getenv("CUPF_CUSTOM_PRECISION");
+    if (s != nullptr) {
+        if (std::strcmp(s, "fp64") == 0) return cls::factorize::BatchPrecision::FP64;
+        if (std::strcmp(s, "fp32") == 0) return cls::factorize::BatchPrecision::FP32;
+        if (std::strcmp(s, "tc") == 0) return cls::factorize::BatchPrecision::TC;
+    }
+    return cls::factorize::BatchPrecision::Mixed;
+}
 
 // Translate a library status into an exception (no-op on success).
 void check_status(cls::Status status, const char* where)
@@ -78,6 +97,8 @@ struct CudaLinearSolveCustomFp64::State {
     cls::Solver solver;
     bool analyzed = false;
     bool factorized = false;
+    int batch = 1;          // B (= buf.batch_size); B>1 uses the library's uniform-batch path
+    bool batched = false;   // true iff batch > 1
 };
 
 
@@ -113,8 +134,20 @@ void CudaLinearSolveCustomFp64::initialize(CudaFp64Storage& buf, const Initializ
     check_status(state->solver.set_solution(make_vector_view(buf.dimF, buf.d_dx.data())),
                  "set_solution");
     check_status(state->solver.analyze(), "analyze");
-    sync_cuda_for_timing();
     state->analyzed = true;
+
+    // Uniform-batch path for B>1 (contingency/scenario/time-step sweeps): the batch-major device
+    // buffers (d_J_values[b*nnz], d_F[b*dimF], d_dx[b*dimF]) match the library's batched layout, so
+    // one analyze is shared and factorize/solve run all B at once. B==1 keeps the single-case path.
+    state->batch = buf.batch_size;
+    state->batched = (state->batch > 1);
+    if (state->batched) {
+        if (state->solver.batched_setup(state->batch, batch_precision_from_env()) !=
+            cls::Status::Success) {
+            throw std::runtime_error("CudaLinearSolveCustomFp64::initialize: batched_setup failed");
+        }
+    }
+    sync_cuda_for_timing();
 
     delete state_;
     state_ = state.release();
@@ -133,13 +166,15 @@ void CudaLinearSolveCustomFp64::prepare_rhs(CudaFp64Storage& buf, IterationConte
 
 void CudaLinearSolveCustomFp64::factorize(CudaFp64Storage& buf, IterationContext& ctx)
 {
-    (void)buf;
     (void)ctx;
     if (state_ == nullptr || !state_->analyzed) {
         throw std::runtime_error("CudaLinearSolveCustomFp64::factorize: initialize() must be called first");
     }
     state_->factorized = false;
-    check_status(state_->solver.factorize(), "factorize");
+    if (state_->batched)
+        check_status(state_->solver.batched_factorize(buf.d_J_values.data()), "batched_factorize");
+    else
+        check_status(state_->solver.factorize(), "factorize");
     sync_cuda_for_timing();
     state_->factorized = true;
 }
@@ -147,7 +182,6 @@ void CudaLinearSolveCustomFp64::factorize(CudaFp64Storage& buf, IterationContext
 
 void CudaLinearSolveCustomFp64::solve(CudaFp64Storage& buf, IterationContext& ctx)
 {
-    (void)buf;
     (void)ctx;
     if (state_ == nullptr || !state_->analyzed) {
         throw std::runtime_error("CudaLinearSolveCustomFp64::solve: initialize() must be called first");
@@ -155,7 +189,10 @@ void CudaLinearSolveCustomFp64::solve(CudaFp64Storage& buf, IterationContext& ct
     if (!state_->factorized) {
         throw std::runtime_error("CudaLinearSolveCustomFp64::solve: factorize() must be called first");
     }
-    check_status(state_->solver.solve(), "solve");
+    if (state_->batched)
+        check_status(state_->solver.batched_solve(buf.d_F.data(), buf.d_dx.data()), "batched_solve");
+    else
+        check_status(state_->solver.solve(), "solve");
     sync_cuda_for_timing();
 }
 
