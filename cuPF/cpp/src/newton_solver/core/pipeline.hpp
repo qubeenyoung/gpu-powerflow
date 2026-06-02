@@ -21,6 +21,9 @@
 #include "newton_solver/ops/linear_solve/cuda_cudss.hpp"
 #ifdef CUPF_ENABLE_CUSTOM_SOLVER
 #include "newton_solver/ops/linear_solve/cuda_custom_solver.hpp"
+#ifdef CUPF_ENABLE_CUDA_GRAPH
+#include "newton_solver/core/graph_iteration.hpp"  // IterationGraph + run_iterations_graph
+#endif
 #endif
 #include "newton_solver/ops/voltage_update/cuda_voltage_update.hpp"
 #endif
@@ -169,11 +172,16 @@ struct CudaFp64Pipeline {
 struct CudaFp64CustomPipeline {
     CudaFp64Storage              buf;
     CudaJacobianKind             jacobian_kind = CudaJacobianKind::Edge;
+    bool                         use_cuda_graph = false;
     CudaLinearSolveCustomFp64    linear_solve;
     AdjointCache                 adjoint_cache;
+#ifdef CUPF_ENABLE_CUDA_GRAPH
+    IterationGraph               graph;  // captured whole-iteration graph (when use_cuda_graph)
+#endif
 
-    explicit CudaFp64CustomPipeline(CudaJacobianKind jacobian = CudaJacobianKind::Edge)
-        : jacobian_kind(jacobian)
+    explicit CudaFp64CustomPipeline(CudaJacobianKind jacobian = CudaJacobianKind::Edge,
+                                    bool graph = false)
+        : jacobian_kind(jacobian), use_cuda_graph(graph)
     {}
 
     void initialize(const InitializeContext& ctx) {
@@ -246,6 +254,52 @@ struct CudaFp32Pipeline {
 };
 
 
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+// ---------------------------------------------------------------------------
+// CudaFp32CustomPipeline
+// ---------------------------------------------------------------------------
+struct CudaFp32CustomPipeline {
+    CudaFp32Storage             buf;
+    CudaJacobianKind            jacobian_kind = CudaJacobianKind::Edge;
+    bool                        use_cuda_graph = false;
+    CudaLinearSolveCustomFp32   linear_solve;
+    AdjointCache                adjoint_cache;
+#ifdef CUPF_ENABLE_CUDA_GRAPH
+    IterationGraph              graph;
+#endif
+
+    explicit CudaFp32CustomPipeline(CudaJacobianKind jacobian = CudaJacobianKind::Edge,
+                                    bool graph = false)
+        : jacobian_kind(jacobian), use_cuda_graph(graph)
+    {}
+
+    void initialize(const InitializeContext& ctx) {
+        buf.prepare(ctx);
+        linear_solve.initialize(buf, ctx);
+    }
+
+    void upload(const SolveContext& ctx) {
+        buf.upload(ctx);
+    }
+
+    void download_batch(NRBatchResult& result) const {
+        buf.download_batch(result);
+    }
+
+    void ibus(IterationContext& ctx)          { CudaIbusOp<CudaFp32Storage>{}.run(buf, ctx); }
+    void mismatch(IterationContext& ctx)      { CudaMismatchOp<CudaFp32Storage>{}.run(buf, ctx); }
+    void mismatch_norm(IterationContext& ctx) { CudaMismatchNormOp<CudaFp32Storage>{}.run(buf, ctx); }
+    void jacobian(IterationContext& ctx)      { CudaJacobianOp<float>{jacobian_kind}.run(buf, ctx); }
+    void prepare_rhs(IterationContext& ctx)   { linear_solve.prepare_rhs(buf, ctx); }
+    void factorize(IterationContext& ctx)     { linear_solve.factorize(buf, ctx); }
+    void solve(IterationContext& ctx)         { linear_solve.solve(buf, ctx); }
+    void voltage_update(IterationContext& ctx){ CudaVoltageUpdateOp<float>{}.run(buf, ctx); }
+
+    static constexpr bool batch_supported = true;
+};
+#endif
+
+
 // ---------------------------------------------------------------------------
 // CudaMixedPipeline
 // ---------------------------------------------------------------------------
@@ -296,11 +350,16 @@ struct CudaMixedPipeline {
 struct CudaMixedCustomPipeline {
     CudaMixedStorage             buf;
     CudaJacobianKind             jacobian_kind = CudaJacobianKind::Edge;
+    bool                         use_cuda_graph = false;
     CudaLinearSolveCustomMixed   linear_solve;
     AdjointCache                 adjoint_cache;
+#ifdef CUPF_ENABLE_CUDA_GRAPH
+    IterationGraph               graph;  // captured whole-iteration graph (when use_cuda_graph)
+#endif
 
-    explicit CudaMixedCustomPipeline(CudaJacobianKind jacobian = CudaJacobianKind::Edge)
-        : jacobian_kind(jacobian)
+    explicit CudaMixedCustomPipeline(CudaJacobianKind jacobian = CudaJacobianKind::Edge,
+                                     bool graph = false)
+        : jacobian_kind(jacobian), use_cuda_graph(graph)
     {}
 
     void initialize(const InitializeContext& ctx) {
@@ -345,6 +404,9 @@ struct SolverPipeline {
         , CudaFp64CustomPipeline
 #endif
         , CudaFp32Pipeline
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+        , CudaFp32CustomPipeline
+#endif
         , CudaMixedPipeline
 #ifdef CUPF_ENABLE_CUSTOM_SOLVER
         , CudaMixedCustomPipeline

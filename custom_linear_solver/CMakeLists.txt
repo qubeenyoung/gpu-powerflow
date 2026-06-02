@@ -8,6 +8,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(CLS_BUILD_CUDA_OPS "Build copied CUDA multifrontal operation kernels" ON)
+# ON  (default): batched_setup captures the factor/solve kernels into internal CUDA graphs that
+#                batched_factorize/solve replay (the standalone behavior).
+# OFF: external/capturable mode. The batched path issues its kernels directly onto a caller stream
+#      (batched_set_stream) with no internal graph and no host sync, so an OUTER stream capture
+#      (e.g. cuPF's whole-iteration graph) can record them. cuPF forces this OFF when built with
+#      CUPF_ENABLE_CUDA_GRAPH.
+option(CLS_INTERNAL_GRAPH "Capture batched factor/solve into internal CUDA graphs" ON)
 option(CLS_BUILD_SCRIPTS "Build custom_linear_solver command-line scripts" ON)
 option(CLS_BUILD_CUDSS_SCRIPT "Build cuDSS command-line comparison script" OFF)
 option(CLS_ENABLE_NVTX "Enable NVTX ranges in command-line profiling scripts" OFF)
@@ -41,7 +48,7 @@ if(CLS_BUILD_CUDA_OPS)
     src/matrix/pattern_kernels.cu
     src/plan/multifrontal_plan.cu
     src/factorize/multifrontal.cu
-    src/factorize/multifrontal_batched.cu
+    src/batched/multifrontal_batched.cu
     src/solve/multifrontal.cu
     src/symbolic/elimination_tree.cpp
     src/symbolic/supernode.cpp
@@ -58,6 +65,9 @@ if(CLS_BUILD_CUDA_OPS)
     CUDA::cudart
     ${METIS_LIBRARY}
   )
+  if(CLS_INTERNAL_GRAPH)
+    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_INTERNAL_GRAPH)
+  endif()
   set_target_properties(custom_linear_solver_ops PROPERTIES
     CUDA_ARCHITECTURES "${CLS_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION OFF

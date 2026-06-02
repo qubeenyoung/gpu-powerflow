@@ -152,6 +152,12 @@ const char* cuda_pipeline_backend_name()
 #endif
     } else if constexpr (std::is_same_v<PipelineT, CudaFp32Pipeline>) {
         return "cuda_cudss_fp32";
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+    } else if constexpr (std::is_same_v<PipelineT, CudaFp32CustomPipeline>) {
+        return "cuda_custom_fp32";
+    } else if constexpr (std::is_same_v<PipelineT, CudaMixedCustomPipeline>) {
+        return "cuda_custom_mixed";
+#endif
     } else {
         return "cuda_cudss_mixed";
     }
@@ -388,7 +394,11 @@ void NewtonSolver::solve_torch_forward(
                     p.buf.d_Va.data(), p.buf.d_Vm.data(),
                     p.buf.d_V_re.data(), p.buf.d_V_im.data(),
                     p.buf.n_bus, batch_size);
-            } else if constexpr (std::is_same_v<PipelineT, CudaFp32Pipeline>) {
+            } else if constexpr (std::is_same_v<PipelineT, CudaFp32Pipeline>
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+                                 || std::is_same_v<PipelineT, CudaFp32CustomPipeline>
+#endif
+            ) {
                 const float* base_re = static_cast<const float*>(sbus_base_re_device_ptr);
                 const float* base_im = static_cast<const float*>(sbus_base_im_device_ptr);
                 const float* load_p = static_cast<const float*>(load_p_device_ptr);
@@ -437,7 +447,11 @@ void NewtonSolver::solve_torch_forward(
                     static_cast<double*>(va_out_device_ptr),
                     static_cast<double*>(vm_out_device_ptr),
                     total_bus);
-            } else if constexpr (std::is_same_v<PipelineT, CudaFp32Pipeline>) {
+            } else if constexpr (std::is_same_v<PipelineT, CudaFp32Pipeline>
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+                                 || std::is_same_v<PipelineT, CudaFp32CustomPipeline>
+#endif
+            ) {
                 launch_copy_voltage_outputs<float, float>(
                     p.buf.d_Va.data(), p.buf.d_Vm.data(),
                     static_cast<float*>(va_out_device_ptr),

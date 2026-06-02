@@ -14,7 +14,7 @@
 #include <cuda_runtime.h>
 
 #include "factorize/multifrontal.hpp"
-#include "factorize/multifrontal_batched.hpp"
+#include "batched/multifrontal_batched.hpp"
 #include "matrix/pattern_kernels.hpp"
 #include "symbolic/supernode.hpp"
 #include "reordering/metis_nd.hpp"
@@ -165,7 +165,7 @@ struct Solver::Impl {
     custom_linear_solver::matrix::IntDeviceBuffer d_perm;
     custom_linear_solver::matrix::IntDeviceBuffer d_iperm;
     custom_linear_solver::plan::MultifrontalPlan plan;
-    custom_linear_solver::factorize::BatchedState batched;
+    custom_linear_solver::batched::BatchedState batched;
 };
 
 Solver::Solver(const SolverConfig& config) : impl_(new Impl{config}) {}
@@ -188,6 +188,15 @@ Status Solver::set_data(const CsrMatrixView& matrix)
     impl_->matrix = matrix;
     impl_->has_matrix = true;
     impl_->analyzed = false;
+    return Status::Success;
+}
+
+Status Solver::set_values(const void* values, ValueType value_type)
+{
+    if (!impl_) return Status::InvalidState;
+    if (!impl_->has_matrix || values == nullptr) return Status::InvalidState;
+    impl_->matrix.values = values;
+    impl_->matrix.value_type = value_type;
     return Status::Success;
 }
 
@@ -384,7 +393,10 @@ Status Solver::analyze()
 
         impl_->plan = custom_linear_solver::factorize::analyze_multifrontal(
             n, nnz, ordered_device.col_ptr.ptr, ordered_device.row_idx.ptr, Lp, Li, parent,
-            impl_->config.panel_cap, false, forced);
+            impl_->config.panel_cap,
+            impl_->config.single_precision == SinglePrecision::Mixed,
+            forced,
+            impl_->config.single_precision == SinglePrecision::FP32);
         lap("analyze_multifrontal");
         if (impl_->plan.num_panels == 0) return Status::AnalysisFailed;
         impl_->analyzed = true;
@@ -401,9 +413,19 @@ Status Solver::factorize(double* kernel_ms)
     if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::InvalidState;
     if (impl_->matrix.values == nullptr) return Status::InvalidState;  // single-case needs values
     try {
-        if (!custom_linear_solver::factorize::factorize_multifrontal_device(
-                impl_->plan, impl_->matrix.values, impl_->d_ordered_value_to_csr.ptr, kernel_ms))
-            return Status::FactorizationFailed;
+        bool ok = false;
+        if (impl_->config.single_precision == SinglePrecision::FP32) {
+            if (impl_->matrix.value_type != ValueType::Float32) return Status::InvalidValue;
+            ok = custom_linear_solver::factorize::factorize_multifrontal_device(
+                impl_->plan, static_cast<const float*>(impl_->matrix.values),
+                impl_->d_ordered_value_to_csr.ptr, kernel_ms);
+        } else {
+            if (impl_->matrix.value_type != ValueType::Float64) return Status::InvalidValue;
+            ok = custom_linear_solver::factorize::factorize_multifrontal_device(
+                impl_->plan, static_cast<const double*>(impl_->matrix.values),
+                impl_->d_ordered_value_to_csr.ptr, kernel_ms);
+        }
+        if (!ok) return Status::FactorizationFailed;
         return Status::Success;
     } catch (const std::bad_alloc&) {
         return Status::AllocationFailed;
@@ -419,9 +441,31 @@ Status Solver::solve(double* kernel_ms)
     const int n = static_cast<int>(impl_->matrix.nrows);
     if (impl_->rhs.size != n || impl_->solution.size != n) return Status::InvalidValue;
     try {
-        if (!custom_linear_solver::solve::solve_multifrontal_device(
-                impl_->plan, impl_->rhs.values, impl_->solution.values, impl_->d_perm.ptr, kernel_ms))
-            return Status::SolveFailed;
+        bool ok = false;
+        if (impl_->config.single_precision == SinglePrecision::FP32) {
+            if (impl_->rhs.value_type == ValueType::Float32 &&
+                impl_->solution.value_type == ValueType::Float32) {
+                ok = custom_linear_solver::solve::solve_multifrontal_device(
+                    impl_->plan, static_cast<const float*>(impl_->rhs.values),
+                    static_cast<float*>(impl_->solution.values), impl_->d_perm.ptr, kernel_ms);
+            } else if (impl_->rhs.value_type == ValueType::Float64 &&
+                       impl_->solution.value_type == ValueType::Float32) {
+                ok = custom_linear_solver::solve::solve_multifrontal_device(
+                    impl_->plan, static_cast<const double*>(impl_->rhs.values),
+                    static_cast<float*>(impl_->solution.values), impl_->d_perm.ptr, kernel_ms);
+            } else {
+                return Status::InvalidValue;
+            }
+        } else {
+            if (impl_->rhs.value_type != ValueType::Float64 ||
+                impl_->solution.value_type != ValueType::Float64) {
+                return Status::InvalidValue;
+            }
+            ok = custom_linear_solver::solve::solve_multifrontal_device(
+                impl_->plan, static_cast<const double*>(impl_->rhs.values),
+                static_cast<double*>(impl_->solution.values), impl_->d_perm.ptr, kernel_ms);
+        }
+        if (!ok) return Status::SolveFailed;
         return Status::Success;
     } catch (const std::bad_alloc&) {
         return Status::AllocationFailed;
@@ -430,19 +474,34 @@ Status Solver::solve(double* kernel_ms)
     }
 }
 
-Status Solver::batched_setup(int batch, custom_linear_solver::factorize::BatchPrecision prec)
+Status Solver::set_stream(void* stream)
+{
+    if (!impl_ || !impl_->analyzed) return Status::InvalidState;
+    impl_->plan.stream = stream;
+    impl_->plan.owns_stream = false;
+    return Status::Success;
+}
+
+Status Solver::batched_setup(int batch, custom_linear_solver::batched::BatchPrecision prec)
 {
     if (!impl_ || !impl_->analyzed) return Status::InvalidState;
     if (batch <= 0) return Status::InvalidValue;
-    return custom_linear_solver::factorize::batched_setup(impl_->plan, batch, prec, impl_->batched)
+    return custom_linear_solver::batched::batched_setup(impl_->plan, batch, prec, impl_->batched)
                ? Status::Success
                : Status::AllocationFailed;
+}
+
+Status Solver::batched_set_stream(void* stream)
+{
+    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
+    custom_linear_solver::batched::batched_set_stream(impl_->batched, stream);
+    return Status::Success;
 }
 
 Status Solver::batched_factorize(const double* d_valuesB, double* kernel_ms)
 {
     if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    return custom_linear_solver::factorize::batched_factorize(
+    return custom_linear_solver::batched::batched_factorize(
                impl_->plan, impl_->batched, d_valuesB, impl_->d_ordered_value_to_csr.ptr, kernel_ms)
                ? Status::Success
                : Status::FactorizationFailed;
@@ -451,7 +510,7 @@ Status Solver::batched_factorize(const double* d_valuesB, double* kernel_ms)
 Status Solver::batched_solve(const double* d_rhsB, double* d_solB, double* kernel_ms)
 {
     if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    return custom_linear_solver::factorize::batched_solve(impl_->plan, impl_->batched, d_rhsB,
+    return custom_linear_solver::batched::batched_solve(impl_->plan, impl_->batched, d_rhsB,
                                                           d_solB, impl_->d_perm.ptr, kernel_ms)
                ? Status::Success
                : Status::SolveFailed;
@@ -460,7 +519,7 @@ Status Solver::batched_solve(const double* d_rhsB, double* d_solB, double* kerne
 Status Solver::batched_factorize(const float* d_valuesB, double* kernel_ms)
 {
     if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    return custom_linear_solver::factorize::batched_factorize(
+    return custom_linear_solver::batched::batched_factorize(
                impl_->plan, impl_->batched, d_valuesB, impl_->d_ordered_value_to_csr.ptr, kernel_ms)
                ? Status::Success
                : Status::FactorizationFailed;
@@ -469,7 +528,16 @@ Status Solver::batched_factorize(const float* d_valuesB, double* kernel_ms)
 Status Solver::batched_solve(const double* d_rhsB, float* d_solB, double* kernel_ms)
 {
     if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    return custom_linear_solver::factorize::batched_solve(impl_->plan, impl_->batched, d_rhsB,
+    return custom_linear_solver::batched::batched_solve(impl_->plan, impl_->batched, d_rhsB,
+                                                          d_solB, impl_->d_perm.ptr, kernel_ms)
+               ? Status::Success
+               : Status::SolveFailed;
+}
+
+Status Solver::batched_solve(const float* d_rhsB, float* d_solB, double* kernel_ms)
+{
+    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
+    return custom_linear_solver::batched::batched_solve(impl_->plan, impl_->batched, d_rhsB,
                                                           d_solB, impl_->d_perm.ptr, kernel_ms)
                ? Status::Success
                : Status::SolveFailed;

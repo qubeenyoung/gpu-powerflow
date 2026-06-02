@@ -23,10 +23,16 @@ custom_linear_solver::plan::MultifrontalPlan analyze_multifrontal(
     int n, int nnz_a, const int* d_Ap, const int* d_Ai,
     const std::vector<int>& Lp, const std::vector<int>& Li,
     const std::vector<int>& parent, int panel_cap = 8, bool fp32 = false,
-    const custom_linear_solver::symbolic::PanelPartition* forced_panels = nullptr);
+    const custom_linear_solver::symbolic::PanelPartition* forced_panels = nullptr,
+    bool pure_fp32 = false);
 
 bool factorize_multifrontal_device(custom_linear_solver::plan::MultifrontalPlan& plan,
                                    const double* d_csr_values,
+                                   const int* d_ordered_value_to_csr,
+                                   double* kernel_ms = nullptr);
+
+bool factorize_multifrontal_device(custom_linear_solver::plan::MultifrontalPlan& plan,
+                                   const float* d_csr_values,
                                    const int* d_ordered_value_to_csr,
                                    double* kernel_ms = nullptr);
 

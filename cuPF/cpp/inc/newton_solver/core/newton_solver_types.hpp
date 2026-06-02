@@ -145,6 +145,14 @@ struct NewtonOptions {
     CpuLinearSolverKind  cpu_linear_solver = CpuLinearSolverKind::KLU;
     CudaJacobianKind     cuda_jacobian = CudaJacobianKind::Edge;
     CuDSSOptions         cudss = {};
+
+    // Capture the whole Newton iteration (ibus -> mismatch -> jacobian -> linear solve -> voltage
+    // update) into a single CUDA graph and replay it per step, collapsing the per-iteration kernel
+    // launches into one cudaGraphLaunch. Only valid with backend = CUDA and
+    // cuda_linear_solver = Custom (cuDSS's cudssExecute is not stream-capturable), and only when
+    // the library is built with CUPF_ENABLE_CUDA_GRAPH (which builds custom_linear_solver in its
+    // external/capturable mode). Ignored / rejected otherwise.
+    bool                 use_cuda_graph = false;
 };
 
 

@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "factorize/multifrontal_batched.hpp"
+#include "batched/multifrontal_batched.hpp"
 #include "io.hpp"
 #include "solver.hpp"
 
@@ -27,6 +27,7 @@ struct Options {
     int repeat = 1;
     int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
     bool batch_only = false;  // skip the single-system factor/solve (e.g. nc>16 amalgamation)
+    bool single_fp32 = false;
 };
 
 template <typename T>
@@ -99,8 +100,8 @@ void usage(const char* argv0)
 {
     std::cerr
         << "Usage:\n"
-        << "  " << argv0 << " <case-dir> [--repeat N] [--solution-out x.mtx]\n"
-        << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [--repeat N] [--solution-out x.mtx]\n";
+        << "  " << argv0 << " <case-dir> [--repeat N] [--single-precision fp64|fp32] [--solution-out x.mtx]\n"
+        << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [--repeat N] [--single-precision fp64|fp32] [--solution-out x.mtx]\n";
 }
 
 Options parse_args(int argc, char** argv)
@@ -129,6 +130,12 @@ Options parse_args(int argc, char** argv)
             options.batch = std::stoi(argv[i]);
         } else if (arg == "--batch-only") {
             options.batch_only = true;
+        } else if (arg == "--single-precision") {
+            if (++i >= argc) throw std::runtime_error("--single-precision requires fp64 or fp32");
+            const std::string value = argv[i];
+            if (value == "fp64") options.single_fp32 = false;
+            else if (value == "fp32") options.single_fp32 = true;
+            else throw std::runtime_error("--single-precision must be fp64 or fp32");
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -228,33 +235,59 @@ int main(int argc, char** argv)
         DeviceBuffer<double> d_values;
         DeviceBuffer<double> d_rhs;
         DeviceBuffer<double> d_solution;
+        DeviceBuffer<float> d_values_f;
+        DeviceBuffer<float> d_rhs_f;
+        DeviceBuffer<float> d_solution_f;
         d_row_ptr.upload(matrix.row_ptr);
         d_col_idx.upload(matrix.col_idx);
-        d_values.upload(matrix.values);
-        d_rhs.upload(rhs.values);
-        d_solution.allocate(rhs.values.size());
+        if (options.single_fp32) {
+            std::vector<float> values_f(matrix.values.begin(), matrix.values.end());
+            std::vector<float> rhs_f(rhs.values.begin(), rhs.values.end());
+            d_values_f.upload(values_f);
+            d_rhs_f.upload(rhs_f);
+            d_solution_f.allocate(rhs.values.size());
+        } else {
+            d_values.upload(matrix.values);
+            d_rhs.upload(rhs.values);
+            d_solution.allocate(rhs.values.size());
+        }
         const auto t_upload = std::chrono::steady_clock::now();
 
-        cls::Solver solver;
+        cls::SolverConfig solver_config;
+        solver_config.single_precision =
+            options.single_fp32 ? cls::SinglePrecision::FP32 : cls::SinglePrecision::FP64;
+        cls::Solver solver(solver_config);
         cls::CsrMatrixView matrix_view;
         matrix_view.nrows = matrix.rows;
         matrix_view.ncols = matrix.cols;
         matrix_view.nnz = matrix.nnz();
         matrix_view.index_type = cls::IndexType::Int32;
         matrix_view.location = cls::DataLocation::Device;
+        matrix_view.value_type =
+            options.single_fp32 ? cls::ValueType::Float32 : cls::ValueType::Float64;
         matrix_view.row_offsets = d_row_ptr.get();
         matrix_view.col_indices = d_col_idx.get();
-        matrix_view.values = d_values.get();
+        matrix_view.values = options.single_fp32
+                                 ? static_cast<const void*>(d_values_f.get())
+                                 : static_cast<const void*>(d_values.get());
 
         cls::DenseVectorView rhs_view;
         rhs_view.size = rhs.size();
         rhs_view.location = cls::DataLocation::Device;
-        rhs_view.values = d_rhs.get();
+        rhs_view.value_type =
+            options.single_fp32 ? cls::ValueType::Float32 : cls::ValueType::Float64;
+        rhs_view.values = options.single_fp32
+                              ? static_cast<void*>(d_rhs_f.get())
+                              : static_cast<void*>(d_rhs.get());
 
         cls::DenseVectorView solution_view;
         solution_view.size = rhs.size();
         solution_view.location = cls::DataLocation::Device;
-        solution_view.values = d_solution.get();
+        solution_view.value_type =
+            options.single_fp32 ? cls::ValueType::Float32 : cls::ValueType::Float64;
+        solution_view.values = options.single_fp32
+                                   ? static_cast<void*>(d_solution_f.get())
+                                   : static_cast<void*>(d_solution.get());
 
         require_success(solver.set_data(matrix_view), "set_data");
         require_success(solver.set_rhs(rhs_view), "set_rhs");
@@ -293,7 +326,13 @@ int main(int argc, char** argv)
         }
         const auto t_solve = std::chrono::steady_clock::now();
 
-        std::vector<double> solution = d_solution.download();
+        std::vector<double> solution;
+        if (options.single_fp32) {
+            const std::vector<float> solution_f = d_solution_f.download();
+            solution.assign(solution_f.begin(), solution_f.end());
+        } else {
+            solution = d_solution.download();
+        }
         const ResidualStats stats = residual(matrix, rhs.values, solution);
         if (options.write_solution) {
             scripts::write_matrix_market_vector(options.solution_out, solution);
@@ -307,7 +346,7 @@ int main(int argc, char** argv)
             const int n = matrix.rows, nnz = matrix.nnz();
             // Map env knobs to the batch precision mode. Default: Mixed for small/medium (it passes
             // 1e-3 without refinement), FP64 for large. MF_TC / MF_FP32 / MF_MIXED / MF_NO_MIXED force.
-            using cls::factorize::BatchPrecision;
+            using cls::batched::BatchPrecision;
             BatchPrecision prec = (n < 24000) ? BatchPrecision::Mixed : BatchPrecision::FP64;
             if (std::getenv("MF_NO_MIXED")) prec = BatchPrecision::FP64;
             if (std::getenv("MF_FP32")) prec = BatchPrecision::FP32;
@@ -326,12 +365,38 @@ int main(int argc, char** argv)
             d_solB.allocate((std::size_t)B * n);
             require_success(solver.batched_setup(B, prec), "batched_setup");
             std::vector<double> bf, bs;
-            for (int r = 0; r < options.repeat; ++r) {
-                double kf = 0, ks = 0;
-                require_success(solver.batched_factorize(d_valB.get(), &kf), "batched_factorize");
-                require_success(solver.batched_solve(d_rhsB.get(), d_solB.get(), &ks), "batched_solve");
-                bf.push_back(kf);
-                bs.push_back(ks);
+            if (std::getenv("MF_EXT_CAPTURE") != nullptr) {
+                // External/capturable path (lib built with CLS_INTERNAL_GRAPH=OFF): capture the
+                // batched factorize+solve into ONE graph on our own stream and replay it -- the
+                // same way cuPF folds the solve into its whole-iteration graph. Verifies the OFF
+                // mode issues a capturable kernel sequence and replays to the right answer.
+                cudaStream_t cap_stream;
+                cuda_check(cudaStreamCreate(&cap_stream), "capture stream create");
+                require_success(solver.batched_set_stream(cap_stream), "batched_set_stream");
+                cudaGraph_t cg;
+                cudaGraphExec_t cge;
+                cuda_check(cudaStreamBeginCapture(cap_stream, cudaStreamCaptureModeGlobal),
+                           "begin capture");
+                require_success(solver.batched_factorize(d_valB.get()), "batched_factorize(capture)");
+                require_success(solver.batched_solve(d_rhsB.get(), d_solB.get()), "batched_solve(capture)");
+                cuda_check(cudaStreamEndCapture(cap_stream, &cg), "end capture");
+                cuda_check(cudaGraphInstantiate(&cge, cg, nullptr, nullptr, 0), "graph instantiate");
+                for (int r = 0; r < options.repeat; ++r)
+                    cuda_check(cudaGraphLaunch(cge, cap_stream), "graph launch");
+                cuda_check(cudaStreamSynchronize(cap_stream), "graph sync");
+                cudaGraphExecDestroy(cge);
+                cudaGraphDestroy(cg);
+                cudaStreamDestroy(cap_stream);
+                bf.push_back(0.0);
+                bs.push_back(0.0);  // per-op timing is unavailable under capture
+            } else {
+                for (int r = 0; r < options.repeat; ++r) {
+                    double kf = 0, ks = 0;
+                    require_success(solver.batched_factorize(d_valB.get(), &kf), "batched_factorize");
+                    require_success(solver.batched_solve(d_rhsB.get(), d_solB.get(), &ks), "batched_solve");
+                    bf.push_back(kf);
+                    bs.push_back(ks);
+                }
             }
             batch_factor_per_ms = median(bf) / B;
             batch_solve_per_ms = median(bs) / B;

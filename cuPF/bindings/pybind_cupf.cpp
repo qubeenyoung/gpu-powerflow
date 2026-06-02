@@ -260,7 +260,10 @@ PYBIND11_MODULE(_cupf, m)
         .def_readwrite("cuda_linear_solver", &NewtonOptions::cuda_linear_solver,
             "CUDA FP64 linear solver backend (CudaLinearSolverKind.CuDSS 또는 Custom)")
         .def_readwrite("cudss", &NewtonOptions::cudss,
-            "CUDA direct solver 런타임 설정");
+            "CUDA direct solver 런타임 설정")
+        .def_readwrite("use_cuda_graph", &NewtonOptions::use_cuda_graph,
+            "전체 Newton 반복을 CUDA 그래프로 캡처해 매 스텝 replay (backend=CUDA + "
+            "cuda_linear_solver=Custom + CUPF_ENABLE_CUDA_GRAPH 빌드에서만 유효)");
 
     py::class_<SolveOptions>(m, "SolveOptions",
         "forward solve 옵션.")

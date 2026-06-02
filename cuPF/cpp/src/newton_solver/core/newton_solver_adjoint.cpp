@@ -354,6 +354,24 @@ void solve_adjoint_pipeline(CudaMixedCustomPipeline&,
     throw std::runtime_error(
         "NewtonSolver::solve_adjoint(): custom CUDA Mixed solver does not implement adjoint solve");
 }
+
+void solve_adjoint_pipeline(CudaFp32CustomPipeline&,
+                            const double*,
+                            int64_t,
+                            const double*,
+                            int64_t,
+                            int32_t,
+                            const int32_t*,
+                            int32_t,
+                            const int32_t*,
+                            int32_t,
+                            const AdjointOptions&,
+                            const CuDSSOptions&,
+                            AdjointResult&)
+{
+    throw std::runtime_error(
+        "NewtonSolver::solve_adjoint(): custom CUDA FP32 solver does not implement adjoint solve");
+}
 #endif
 
 void solve_adjoint_pipeline(CudaFp32Pipeline& p,

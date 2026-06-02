@@ -22,6 +22,16 @@ if(BUILD_EVALUATORS)
   target_include_directories(cupf_batch_bench PRIVATE
     ${PROJECT_SOURCE_DIR}/cpp/inc
     ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # End-to-end wall-clock bench (no per-stage timing -> compatible with CUDA-graph capture).
+  add_executable(cupf_graph_bench
+    graph_bench.cpp
+    dump_case_loader.cpp
+  )
+  target_link_libraries(cupf_graph_bench PRIVATE cupf)
+  target_include_directories(cupf_graph_bench PRIVATE
+    ${PROJECT_SOURCE_DIR}/cpp/inc
+    ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 # Evaluator-only configure (BUILD_EVALUATORS=ON, BUILD_TESTING=OFF): stop here.

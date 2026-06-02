@@ -52,15 +52,22 @@ void run_compute_mismatch(Storage& buf)
 // norm element type (float for FP32, double for FP64/Mixed). Reduces max|F| per
 // case on device, takes the worst case as the batch norm, checks finiteness,
 // optionally dumps the residual, and sets the converged flag.
-template <typename NormScalar, typename Storage>
-void reduce_norm_into_ctx(Storage& buf, IterationContext& ctx)
+// Device-side per-case L∞ reduction only (capturable). Shared by run() and the graph path.
+template <typename Storage>
+void reduce_norm_device(Storage& buf)
 {
     if (buf.dimF <= 0 || buf.batch_size <= 0) {
         throw std::runtime_error("CudaMismatchNormOp::run: buffers are not prepared");
     }
-
     launch_reduce_mismatch_norm(buf);
+}
 
+// Host-side readback: pull the per-case norms, take the worst case as the batch norm, check
+// finiteness, optionally dump, and set the converged flag. Must run AFTER the device reduction
+// has completed on the active stream (the copyTo synchronizes it).
+template <typename NormScalar, typename Storage>
+void readback_norm_into_ctx(Storage& buf, IterationContext& ctx)
+{
     // Pull the per-case norms and take the worst case as the batch norm (so the
     // whole batch is "converged" only when every case is). NormScalar may be
     // float; widen to double for the host-side comparison.
@@ -86,6 +93,14 @@ void reduce_norm_into_ctx(Storage& buf, IterationContext& ctx)
     }
 
     ctx.converged = (ctx.normF <= ctx.config.tolerance);
+}
+
+// Eager (non-graph) path: device reduction immediately followed by the host readback.
+template <typename NormScalar, typename Storage>
+void reduce_norm_into_ctx(Storage& buf, IterationContext& ctx)
+{
+    reduce_norm_device(buf);
+    readback_norm_into_ctx<NormScalar>(buf, ctx);
 }
 
 }  // namespace
@@ -134,6 +149,21 @@ void CudaMismatchNormOp<CudaMixedStorage>::run(CudaMixedStorage& buf, IterationC
 {
     reduce_norm_into_ctx<double>(buf, ctx);
 }
+
+// Graph-capture split: device reduction (capturable) + host readback (after replay).
+template <> void CudaMismatchNormOp<CudaFp64Storage>::run_device(CudaFp64Storage& buf)
+{ reduce_norm_device(buf); }
+template <> void CudaMismatchNormOp<CudaFp32Storage>::run_device(CudaFp32Storage& buf)
+{ reduce_norm_device(buf); }
+template <> void CudaMismatchNormOp<CudaMixedStorage>::run_device(CudaMixedStorage& buf)
+{ reduce_norm_device(buf); }
+
+template <> void CudaMismatchNormOp<CudaFp64Storage>::readback(CudaFp64Storage& buf, IterationContext& ctx)
+{ readback_norm_into_ctx<double>(buf, ctx); }
+template <> void CudaMismatchNormOp<CudaFp32Storage>::readback(CudaFp32Storage& buf, IterationContext& ctx)
+{ readback_norm_into_ctx<float>(buf, ctx); }
+template <> void CudaMismatchNormOp<CudaMixedStorage>::readback(CudaMixedStorage& buf, IterationContext& ctx)
+{ readback_norm_into_ctx<double>(buf, ctx); }
 
 
 #endif  // CUPF_WITH_CUDA

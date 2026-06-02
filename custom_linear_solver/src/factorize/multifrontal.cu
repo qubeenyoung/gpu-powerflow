@@ -94,7 +94,7 @@ __global__ void mf_factor_extend_level(int lbegin, int lend, const int* __restri
         for (int k = 1; k < nc; ++k) {
             for (int e = t; e < uc; e += nt) {
                 const int jj = nc + e;
-                double v = F[(long)k * fsz + jj];
+                FT v = F[(long)k * fsz + jj];
                 for (int i = 0; i < k; ++i) v -= F[(long)k * fsz + i] * F[(long)i * fsz + jj];
                 F[(long)k * fsz + jj] = v;
             }
@@ -352,14 +352,15 @@ __global__ void mf_bigC_extend(int lbegin, int lend, const int* __restrict__ plc
     }
 }
 
+template <typename FT, typename VT>
 __global__ void mf_scatter_csr_values(int nnz_a, const int* __restrict__ ordered_value_to_csr,
                                       const int* __restrict__ a_pos,
-                                      const double* __restrict__ csr_values, double* front)
+                                      const VT* __restrict__ csr_values, FT* front)
 {
     const int q = blockIdx.x * blockDim.x + threadIdx.x;
     if (q >= nnz_a) return;
     const int pos = a_pos[q];
-    if (pos >= 0) atomicAdd(&front[pos], csr_values[ordered_value_to_csr[q]]);
+    if (pos >= 0) atomicAdd(&front[pos], static_cast<FT>(csr_values[ordered_value_to_csr[q]]));
 }
 
 __device__ int front_lower_bound(const int* front_rows, int begin, int end, int value)
@@ -416,31 +417,32 @@ constexpr int MF_REG_NC = 16;    // register-partial bound; nc <= panel_cap (cy3
 // block per front, one thread per inverse column (nc<=8); shared scratch so all reads of the original
 // L/U finish before the in-place write-back. Adds a little FACTOR time (user OK'd F dropping as long
 // as it still beats cuDSS); the win is on S.
+template <typename FT>
 __global__ void mf_invert_pivot(int npanels, const int* __restrict__ front_ptr,
                                 const int* __restrict__ front_off, const int* __restrict__ ncols,
-                                double* front)
+                                FT* front)
 {
     const int p = blockIdx.x;
     if (p >= npanels) return;
     const int s = front_ptr[p];
     const int fsz = front_ptr[p + 1] - s;
     const int nc = ncols[p];
-    double* F = front + front_off[p];
+    FT* F = front + front_off[p];
     const int j = threadIdx.x;  // one thread per inverse column j (blockDim >= nc)
-    __shared__ double Ui[MF_REG_NC * MF_REG_NC];  // Uinv[i][j], upper (i<=j)
-    __shared__ double Li[MF_REG_NC * MF_REG_NC];  // Linv[i][j], unit-lower (i>=j)
+    __shared__ FT Ui[MF_REG_NC * MF_REG_NC];  // Uinv[i][j], upper (i<=j)
+    __shared__ FT Li[MF_REG_NC * MF_REG_NC];  // Linv[i][j], unit-lower (i>=j)
     if (j < nc) {
         // Uinv column j: back-substitution up the column (needs Uinv[k][j], k>i)
-        Ui[j * nc + j] = 1.0 / F[(long)j * fsz + j];
+        Ui[j * nc + j] = FT(1) / F[(long)j * fsz + j];
         for (int i = j - 1; i >= 0; --i) {
-            double v = 0.0;
+            FT v = FT(0);
             for (int k = i + 1; k <= j; ++k) v -= F[(long)i * fsz + k] * Ui[k * nc + j];
             Ui[i * nc + j] = v / F[(long)i * fsz + i];
         }
         // Linv column j: forward-substitution down the column (unit diagonal; needs Linv[k][j], k<i)
-        Li[j * nc + j] = 1.0;
+        Li[j * nc + j] = FT(1);
         for (int i = j + 1; i < nc; ++i) {
-            double v = 0.0;
+            FT v = FT(0);
             for (int k = j; k < i; ++k) v -= F[(long)i * fsz + k] * Li[k * nc + j];
             Li[i * nc + j] = v;
         }
@@ -452,13 +454,102 @@ __global__ void mf_invert_pivot(int npanels, const int* __restrict__ front_ptr,
     }
 }
 
+int factor_threads_for_level(const MultifrontalPlan& plan, int L)
+{
+    const char* ft_s = std::getenv("MF_FT");
+    const int ft_force = ft_s ? std::atoi(ft_s) : 0;
+    if (ft_force) return ft_force;
+    const char* fts_s = std::getenv("MF_FT_TINY");
+    const int ft_tiny = fts_s ? std::atoi(fts_s) : 128;
+    const char* ftc_s = std::getenv("MF_FT_TINY_CNT");
+    const int ft_tiny_cnt = ftc_s ? std::atoi(ftc_s) : 1024;
+    const int cnt = plan.plptr[L + 1] - plan.plptr[L];
+    int mx = 0;
+    for (int q = plan.plptr[L]; q < plan.plptr[L + 1]; ++q) {
+        const int pp = plan.h_plcols[q];
+        mx = std::max(mx, plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp]);
+    }
+    if (mx >= 257) return 768;
+    if (mx <= 48 && cnt >= ft_tiny_cnt) return ft_tiny;
+    return 384;
+}
+
+[[maybe_unused]] void issue_factor_levels(MultifrontalPlan& plan, cudaStream_t stream)
+{
+    const int do_extend = std::getenv("MF_SKIP_EXTEND") == nullptr ? 1 : 0;
+    const char* flo_s = std::getenv("MF_FLO");
+    const char* fhi_s = std::getenv("MF_FHI");
+    const int flo = flo_s ? std::atoi(flo_s) : 0;
+    const int fhi = fhi_s ? std::atoi(fhi_s) : plan.num_plevels;
+    const bool bigmulti = std::getenv("MF_NO_BIGMULTI") == nullptr;
+    const char* mbt_s = std::getenv("MB_THRESH");
+    const int mb_thresh = mbt_s ? std::atoi(mbt_s) : 81;
+
+    for (int L = flo; L < fhi; ++L) {
+        const int b = plan.plptr[L];
+        const int e = plan.plptr[L + 1];
+        if (e <= b) continue;
+        const int T = factor_threads_for_level(plan, L);
+        int mxf = 0;
+        for (int q = b; q < e; ++q)
+            mxf = std::max(mxf, plan.h_front_ptr[plan.h_plcols[q] + 1] -
+                                    plan.h_front_ptr[plan.h_plcols[q]]);
+        if (bigmulti && !plan.fp32 && !plan.pure_fp32 && mxf >= mb_thresh) {
+            mf_bigA_panelU<<<e - b, T, 0, stream>>>(b, e, plan.d_plcols, plan.d_front_off,
+                plan.d_front_ptr, plan.d_ncols, plan.d_front, plan.d_sing);
+            const int mxtc = (mxf + MF_BT_TS - 1) / MF_BT_TS;
+            int mxnc = 1;
+            for (int q = b; q < e; ++q) mxnc = std::max(mxnc, plan.h_ncols[plan.h_plcols[q]]);
+            const size_t bt_sh = (size_t)2 * MF_BT_TS * mxnc * sizeof(double);
+            mf_bigB_trailing<<<dim3(mxtc * mxtc, e - b), MF_BT_TS * MF_BT_TS, bt_sh, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_front);
+            if (do_extend) {
+                const char* xt_s = std::getenv("MF_XTILES");
+                const int xtiles = xt_s ? std::atoi(xt_s) : 16;
+                mf_bigC_extend<<<dim3(xtiles, e - b), T, 0, stream>>>(b, e, plan.d_plcols,
+                    plan.d_front_off, plan.d_front_ptr, plan.d_ncols, plan.d_panel_parent,
+                    plan.d_asm_ptr, plan.d_asm_local, plan.d_front);
+            }
+        } else if (plan.pure_fp32) {
+            mf_factor_extend_level<float><<<e - b, T, 0, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, plan.d_frontf,
+                plan.d_sing, do_extend);
+        } else if (plan.fp32) {
+            mf_factor_extend_mixed<<<e - b, T, 0, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, plan.d_front,
+                plan.d_frontf, plan.d_sing, do_extend);
+        } else {
+            mf_factor_extend_level<double><<<e - b, T, 0, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, plan.d_front,
+                plan.d_sing, do_extend);
+        }
+    }
+
+    if (std::getenv("MF_NO_SELINV") == nullptr) {
+        if (plan.pure_fp32) {
+            mf_invert_pivot<float><<<plan.num_panels, 32, 0, stream>>>(
+                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols,
+                plan.d_frontf);
+        } else {
+            mf_invert_pivot<double><<<plan.num_panels, 32, 0, stream>>>(
+                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols,
+                plan.d_front);
+        }
+    }
+}
+
 }  // namespace
 
 MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const int* d_Ai,
                                       const std::vector<int>& Lp,
                                       const std::vector<int>& Li,
                                       const std::vector<int>& parent, int panel_cap, bool fp32,
-                                      const custom_linear_solver::symbolic::PanelPartition* forced_panels)
+                                      const custom_linear_solver::symbolic::PanelPartition* forced_panels,
+                                      bool pure_fp32)
 {
     namespace sym = custom_linear_solver::symbolic;
     const bool tm = std::getenv("MF_TIME") != nullptr;  // analysis sub-phase profiling
@@ -468,7 +559,10 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // precision explicitly via BatchPrecision, see multifrontal_batched). On consumer Ampere FP64
     // is 1/64 FP32, so the mixed LU bulk is far cheaper while the FP64 master keeps the assembly
     // precise; it helps small/medium fronts (large factor is launch-bound, not compute-bound).
-    if (std::getenv("MF_MIXED") != nullptr && std::getenv("MF_NO_MIXED") == nullptr) fp32 = true;
+    if (!pure_fp32 && std::getenv("MF_MIXED") != nullptr &&
+        std::getenv("MF_NO_MIXED") == nullptr) {
+        fp32 = true;
+    }
     auto tclk = std::chrono::steady_clock::now();
     auto lap = [&](const char* nm) {
         if (tm) {
@@ -685,14 +779,14 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     cudaMalloc(&plan.arena, off);
     char* base = static_cast<char*>(plan.arena);
     plan.d_front = reinterpret_cast<double*>(base + o_front);
-    // FP32 view of the same arena region: the double front reserves total*8 bytes, the
-    // FP32 front needs only total*4, so it fits in-place (no extra alloc). Only one of
-    // d_front/d_frontf is used per plan, chosen by fp32.
+    // `fp32` means single-system mixed factor (FP64 master + FP32 working). `pure_fp32`
+    // means the factor and solve front are float.
     plan.fp32 = fp32;
+    plan.pure_fp32 = pure_fp32;
     // FP32 "working" arena for the mixed factor (double-master design): a separate
     // allocation (front_total floats), narrowed/written-back per front during factor.
     // The FP64 master (d_front) holds the assembly + final L/U used by solve.
-    if (fp32 || solve_f32) cudaMalloc(&plan.d_frontf, (long)total * sizeof(float));
+    if (fp32 || pure_fp32 || solve_f32) cudaMalloc(&plan.d_frontf, (long)total * sizeof(float));
     plan.d_front_off = reinterpret_cast<int*>(base + o_foff);
     plan.d_front_ptr = reinterpret_cast<int*>(base + o_fptr);
     plan.d_ncols = reinterpret_cast<int*>(base + o_nc);
@@ -704,6 +798,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     plan.d_front_rows = reinterpret_cast<int*>(base + o_fr);
     plan.d_y = reinterpret_cast<double*>(base + o_y);
     plan.d_sing = reinterpret_cast<int*>(base + o_sing);
+    if (pure_fp32) cudaMalloc(&plan.d_yf, (long)n * sizeof(float));
     int* d_panel_first = reinterpret_cast<int*>(base + o_pf);
     int* d_panel_of = reinterpret_cast<int*>(base + o_pof);
 
@@ -731,9 +826,11 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
 
     // Capture the level-scheduled schedule (factor+extend per level) in
     // one CUDA graph; replayed each factorize after the value-dependent A scatter.
+#ifdef CLS_INTERNAL_GRAPH
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     plan.stream = stream;
+    plan.owns_stream = true;
     // 512 threads/block: the big fronts near the root (up to 214x214) sit on the
     // sequential critical path and underutilize the GPU with one small block each;
     // more threads/front cuts their dense-LU time. Swept 128/256/512/1024 ->
@@ -795,7 +892,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         int mxf = 0;
         for (int q = b; q < e; ++q)
             mxf = std::max(mxf, mf.front_ptr[plcols[q] + 1] - mf.front_ptr[plcols[q]]);
-        if (bigmulti && !fp32 && mxf >= mb_thresh) {  // big-front level -> multi-block triple
+        if (bigmulti && !fp32 && !pure_fp32 && mxf >= mb_thresh) {  // big-front level -> multi-block triple
             mf_bigA_panelU<<<e - b, T, 0, stream>>>(b, e, plan.d_plcols, plan.d_front_off,
                 plan.d_front_ptr, plan.d_ncols, plan.d_front, plan.d_sing);
             // cy270/271: TILED trailing -- grid.x = ceil(maxfsz/TS)^2 tiles per front, blockDim=TS*TS,
@@ -817,7 +914,12 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
                     plan.d_front_off, plan.d_front_ptr, plan.d_ncols, plan.d_panel_parent,
                     plan.d_asm_ptr, plan.d_asm_local, plan.d_front);
             }
-        } else if (fp32)  // double-master: FP64 master assembly + FP32 working LU
+        } else if (pure_fp32)
+            mf_factor_extend_level<float><<<e - b, T, 0, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, plan.d_frontf,
+                plan.d_sing, do_extend);
+        else if (fp32)  // double-master: FP64 master assembly + FP32 working LU
             mf_factor_extend_mixed<<<e - b, T, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, plan.d_front,
@@ -832,9 +934,14 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // a parallel GEMV instead of a sequential triangular
     // back-solve. Appended to the factor graph -> counted in factor time. Opt-out MF_NO_SELINV.
     const bool selinv = std::getenv("MF_NO_SELINV") == nullptr;
-    if (selinv)
-        mf_invert_pivot<<<plan.num_panels, 32, 0, stream>>>(
-            plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, plan.d_front);
+    if (selinv) {
+        if (pure_fp32)
+            mf_invert_pivot<float><<<plan.num_panels, 32, 0, stream>>>(
+                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, plan.d_frontf);
+        else
+            mf_invert_pivot<double><<<plan.num_panels, 32, 0, stream>>>(
+                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, plan.d_front);
+    }
     cudaGraph_t graph;
     cudaStreamEndCapture(stream, &graph);
     cudaGraphExec_t exec;
@@ -843,13 +950,19 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     plan.graph_exec = exec;
 
     custom_linear_solver::solve::capture_multifrontal_solve_graph(plan, mf.front_ptr, plcols,
-                                                                  solve_f32, selinv);
+                                                                  solve_f32 || pure_fp32,
+                                                                  pure_fp32,
+                                                                  selinv);
     lap("solve_graph_capture");
+#else
+    (void)solve_f32;
+#endif
     return plan;
 }
 
-bool factorize_multifrontal_device(MultifrontalPlan& plan, const double* d_csr_values,
-                                   const int* d_ordered_value_to_csr, double* kernel_ms)
+template <typename VT>
+bool factorize_multifrontal_device_T(MultifrontalPlan& plan, const VT* d_csr_values,
+                                     const int* d_ordered_value_to_csr, double* kernel_ms)
 {
     const int n = plan.n;
     if (n <= 0 || plan.num_panels == 0 || d_csr_values == nullptr ||
@@ -859,17 +972,31 @@ bool factorize_multifrontal_device(MultifrontalPlan& plan, const double* d_csr_v
     cudaStream_t stream = static_cast<cudaStream_t>(plan.stream);
 
     const int T = 128;
+#ifdef CLS_INTERNAL_GRAPH
     cudaEvent_t k0, k1;
     cudaEventCreate(&k0);
     cudaEventCreate(&k1);
     cudaEventRecord(k0, stream);
+#else
+    (void)kernel_ms;
+#endif
     // FP64 master holds the assembly (both modes); the FP32 working arena is overwritten
     // per front by the mixed kernel's narrow, so it needs no memset.
-    cudaMemsetAsync(plan.d_front, 0, plan.front_total * sizeof(double), stream);
+    if (plan.pure_fp32) {
+        cudaMemsetAsync(plan.d_frontf, 0, plan.front_total * sizeof(float), stream);
+    } else {
+        cudaMemsetAsync(plan.d_front, 0, plan.front_total * sizeof(double), stream);
+    }
     cudaMemsetAsync(plan.d_sing, 0, sizeof(int), stream);
     const int sb = (plan.nnz_a + T - 1) / T;  // scatter A into the FP64 master (both modes)
-    mf_scatter_csr_values<<<sb, T, 0, stream>>>(plan.nnz_a, d_ordered_value_to_csr,
-                                                plan.d_a_pos, d_csr_values, plan.d_front);
+    if (plan.pure_fp32) {
+        mf_scatter_csr_values<float, VT><<<sb, T, 0, stream>>>(
+            plan.nnz_a, d_ordered_value_to_csr, plan.d_a_pos, d_csr_values, plan.d_frontf);
+    } else {
+        mf_scatter_csr_values<double, VT><<<sb, T, 0, stream>>>(
+            plan.nnz_a, d_ordered_value_to_csr, plan.d_a_pos, d_csr_values, plan.d_front);
+    }
+#ifdef CLS_INTERNAL_GRAPH
     cudaGraphLaunch(static_cast<cudaGraphExec_t>(plan.graph_exec), stream);
     cudaEventRecord(k1, stream);
     cudaEventSynchronize(k1);
@@ -880,8 +1007,23 @@ bool factorize_multifrontal_device(MultifrontalPlan& plan, const double* d_csr_v
     }
     cudaEventDestroy(k0);
     cudaEventDestroy(k1);
+#else
+    issue_factor_levels(plan, stream);
+#endif
 
     return cudaGetLastError() == cudaSuccess;
+}
+
+bool factorize_multifrontal_device(MultifrontalPlan& plan, const double* d_csr_values,
+                                   const int* d_ordered_value_to_csr, double* kernel_ms)
+{
+    return factorize_multifrontal_device_T(plan, d_csr_values, d_ordered_value_to_csr, kernel_ms);
+}
+
+bool factorize_multifrontal_device(MultifrontalPlan& plan, const float* d_csr_values,
+                                   const int* d_ordered_value_to_csr, double* kernel_ms)
+{
+    return factorize_multifrontal_device_T(plan, d_csr_values, d_ordered_value_to_csr, kernel_ms);
 }
 
 }  // namespace custom_linear_solver::factorize

@@ -27,6 +27,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -69,6 +70,14 @@ void validate_batch_args(int32_t batch_size, int64_t stride, int32_t n_bus, cons
 NewtonSolver::NewtonSolver(const NewtonOptions& options)
     : options_(options)
 {
+    // CUDA-graph capture of the whole Newton iteration is a CUDA + custom-solver-only feature
+    // (cuDSS's cudssExecute is not stream-capturable). Reject the obviously-incompatible combos
+    // up front; the build-availability check happens in the CUDA block below.
+    if (options.use_cuda_graph && options.backend != BackendKind::CUDA) {
+        throw std::invalid_argument(
+            "NewtonSolver: use_cuda_graph=true는 backend=CUDA에서만 지원됩니다.");
+    }
+
     // CPU backend: single FP64 pipeline, no further variants.
     if (options.backend == BackendKind::CPU) {
         pipeline_ = std::make_unique<SolverPipeline>(
@@ -79,20 +88,28 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
 #ifdef CUPF_WITH_CUDA
     // CUDA backend: pick the pipeline variant from compute policy + solver kind.
     if (options.backend == BackendKind::CUDA) {
-        // The custom solver supports FP64 (FP64 Jacobian) and Mixed (FP32 Jacobian/step) profiles;
-        // a pure-FP32 profile (FP32 residual) is not wired to the custom backend.
-        if (options.cuda_linear_solver == CudaLinearSolverKind::Custom &&
-            options.compute == ComputePolicy::FP32) {
+        // CUDA graph capture needs the custom solver (cuDSS is not capturable) and a build with
+        // both CUPF_ENABLE_CUSTOM_SOLVER and CUPF_ENABLE_CUDA_GRAPH (the latter builds
+        // custom_linear_solver in its external/capturable mode, CLS_INTERNAL_GRAPH=OFF).
+        if (options.use_cuda_graph) {
+            if (options.cuda_linear_solver != CudaLinearSolverKind::Custom) {
+                throw std::invalid_argument(
+                    "NewtonSolver: use_cuda_graph=true는 cuda_linear_solver=Custom에서만 "
+                    "지원됩니다 (cuDSS는 CUDA 그래프 캡처가 불가능합니다).");
+            }
+#if !defined(CUPF_ENABLE_CUSTOM_SOLVER) || !defined(CUPF_ENABLE_CUDA_GRAPH)
             throw std::invalid_argument(
-                "NewtonSolver: custom CUDA linear solver는 FP32 프로파일을 지원하지 않습니다 "
-                "(FP64 또는 Mixed를 사용하세요).");
+                "NewtonSolver: use_cuda_graph=true를 요청했지만 cuPF가 "
+                "CUPF_ENABLE_CUSTOM_SOLVER + CUPF_ENABLE_CUDA_GRAPH 없이 빌드되었습니다.");
+#endif
         }
         // FP64: either the custom direct solver (if built) or cuDSS.
         if (options.compute == ComputePolicy::FP64) {
 #ifdef CUPF_ENABLE_CUSTOM_SOLVER
             if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
                 pipeline_ = std::make_unique<SolverPipeline>(
-                    SolverPipeline{CudaFp64CustomPipeline{options.cuda_jacobian}});
+                    SolverPipeline{CudaFp64CustomPipeline{options.cuda_jacobian,
+                                                          options.use_cuda_graph}});
                 return;
             }
 #else
@@ -108,6 +125,20 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
         }
         // FP32 / Mixed: cuDSS-backed batch-capable pipelines.
         if (options.compute == ComputePolicy::FP32) {
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+            if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
+                pipeline_ = std::make_unique<SolverPipeline>(
+                    SolverPipeline{CudaFp32CustomPipeline{options.cuda_jacobian,
+                                                          options.use_cuda_graph}});
+                return;
+            }
+#else
+            if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
+                throw std::invalid_argument(
+                    "NewtonSolver: custom CUDA linear solver를 요청했지만 "
+                    "cuPF가 CUPF_ENABLE_CUSTOM_SOLVER 없이 빌드되었습니다.");
+            }
+#endif
             pipeline_ = std::make_unique<SolverPipeline>(
                 SolverPipeline{CudaFp32Pipeline{options.cudss, options.cuda_jacobian}});
             return;
@@ -116,7 +147,8 @@ NewtonSolver::NewtonSolver(const NewtonOptions& options)
 #ifdef CUPF_ENABLE_CUSTOM_SOLVER
             if (options.cuda_linear_solver == CudaLinearSolverKind::Custom) {
                 pipeline_ = std::make_unique<SolverPipeline>(
-                    SolverPipeline{CudaMixedCustomPipeline{options.cuda_jacobian}});
+                    SolverPipeline{CudaMixedCustomPipeline{options.cuda_jacobian,
+                                                           options.use_cuda_graph}});
                 return;
             }
 #else
@@ -435,6 +467,12 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
 #endif
             } else if constexpr (std::is_same_v<std::decay_t<decltype(p)>, CudaFp32Pipeline>) {
                 p.adjoint_cache.backend_name = "cuda_cudss_fp32";
+#ifdef CUPF_ENABLE_CUSTOM_SOLVER
+            } else if constexpr (std::is_same_v<std::decay_t<decltype(p)>, CudaFp32CustomPipeline>) {
+                p.adjoint_cache.backend_name = "cuda_custom_fp32";
+            } else if constexpr (std::is_same_v<std::decay_t<decltype(p)>, CudaMixedCustomPipeline>) {
+                p.adjoint_cache.backend_name = "cuda_custom_mixed";
+#endif
             } else {
                 p.adjoint_cache.backend_name = "cuda_cudss_mixed";
             }
@@ -457,6 +495,25 @@ void NewtonSolver::prepare_adjoint_cache(IterationContext& ctx,
 // ---------------------------------------------------------------------------
 int32_t NewtonSolver::run_iteration_stages(IterationContext& ctx)
 {
+#if defined(CUPF_WITH_CUDA) && defined(CUPF_ENABLE_CUSTOM_SOLVER) && defined(CUPF_ENABLE_CUDA_GRAPH)
+    // Graph path: a custom pipeline with use_cuda_graph captures the whole iteration once and
+    // replays it per step (see graph_iteration.hpp). The convergence readback stays on the host.
+    {
+        std::optional<int32_t> graph_iters = std::visit(
+            [&](auto& p) -> std::optional<int32_t> {
+                using P = std::decay_t<decltype(p)>;
+                if constexpr (std::is_same_v<P, CudaFp64CustomPipeline> ||
+                              std::is_same_v<P, CudaFp32CustomPipeline> ||
+                              std::is_same_v<P, CudaMixedCustomPipeline>) {
+                    if (p.use_cuda_graph) return run_iterations_graph(p, ctx);
+                }
+                return std::nullopt;
+            },
+            pipeline_->v);
+        if (graph_iters) return *graph_iters;
+    }
+#endif
+
     int32_t completed = 0;
 
     for (int32_t iter = 0; iter < ctx.config.max_iter; ++iter) {

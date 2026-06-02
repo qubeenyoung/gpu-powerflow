@@ -12,7 +12,7 @@
 // across B systems, and the B*level_size blocks fill the GPU on the otherwise occupancy-
 // starved narrow levels. This is the regime where lower precision / tensor cores finally
 // matter (the single-system path is latency-bound, not compute-bound).
-namespace custom_linear_solver::factorize {
+namespace custom_linear_solver::batched {
 
 // The four factorization precision modes. The batched solve always reads the front the factor
 // produced (FP64 front for FP64; FP32 front for FP32; the FP64 master for Mixed/TC):
@@ -35,7 +35,8 @@ struct BatchedState {
     double* d_yB = nullptr;       // B * n FP64 solve working vector (FP64/Mixed/TC modes)
     float* d_yBf = nullptr;       // B * n FP32 solve working vector (pure-FP32 mode)
     int* d_sing = nullptr;
-    void* stream = nullptr;
+    void* stream = nullptr;       // internal-graph mode: solver-owned; external mode: caller's
+    bool owns_stream = false;     // true only when the solver created `stream` (internal-graph mode)
     void* factor_graph_exec = nullptr;
     void* solve_graph_exec = nullptr;
     BatchedState() = default;
@@ -44,9 +45,16 @@ struct BatchedState {
     BatchedState& operator=(const BatchedState&) = delete;
 };
 
-// Allocate batched arenas and capture the batched factor + solve CUDA graphs for B systems.
+// Allocate batched arenas and (internal-graph mode only) capture the factor + solve CUDA graphs
+// for B systems. In external mode (CLS_INTERNAL_GRAPH off) this only allocates; the caller must
+// also call batched_set_stream() so factorize/solve issue onto its (capturable) stream.
 bool batched_setup(const custom_linear_solver::plan::MultifrontalPlan& plan, int B,
                    BatchPrecision prec, BatchedState& state);
+
+// External/capturable mode: adopt a caller-provided CUDA stream (cudaStream_t as void*) for the
+// factor/solve kernel launches, so they can be recorded by an outer stream capture. Not owned by
+// the state (the caller keeps lifetime). No-op effect on the internal-graph mode's private stream.
+void batched_set_stream(BatchedState& state, void* stream);
 
 // Factorize all B systems. d_valuesB is B*nnz_a FP64 CSR values (batch b at b*nnz_a).
 bool batched_factorize(const custom_linear_solver::plan::MultifrontalPlan& plan,
@@ -67,5 +75,8 @@ bool batched_factorize(const custom_linear_solver::plan::MultifrontalPlan& plan,
 bool batched_solve(const custom_linear_solver::plan::MultifrontalPlan& plan, BatchedState& state,
                    const double* d_rhsB, float* d_solB, const int* d_perm,
                    double* kernel_ms = nullptr);
+bool batched_solve(const custom_linear_solver::plan::MultifrontalPlan& plan, BatchedState& state,
+                   const float* d_rhsB, float* d_solB, const int* d_perm,
+                   double* kernel_ms = nullptr);
 
-}  // namespace custom_linear_solver::factorize
+}  // namespace custom_linear_solver::batched

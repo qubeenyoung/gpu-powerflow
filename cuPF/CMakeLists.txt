@@ -13,6 +13,11 @@ option(ENABLE_DUMP           "Enable debug dump utilities"      OFF)
 option(ENABLE_TIMING         "Enable ScopedTimer timing collection" OFF)
 option(ENABLE_NVTX           "Enable NVTX tracing utility when headers are available" OFF)
 option(CUPF_ENABLE_CUSTOM_SOLVER "Build the custom CUDA FP64 linear solver backend" OFF)
+# Capture the whole Newton iteration into a CUDA graph (NewtonOptions.use_cuda_graph). Requires the
+# custom solver and builds custom_linear_solver in its external/capturable mode (CLS_INTERNAL_GRAPH
+# OFF) so its factor/solve kernels are recorded by cuPF's iteration-graph capture instead of the
+# solver's own internal graphs.
+option(CUPF_ENABLE_CUDA_GRAPH "Enable CUDA-graph capture of the Newton iteration (custom solver only)" OFF)
 set(CUPF_CUDSS_REORDERING_ALG "DEFAULT" CACHE STRING "cuDSS reordering algorithm: DEFAULT, ALG_1, or ALG_2")
 set_property(CACHE CUPF_CUDSS_REORDERING_ALG PROPERTY STRINGS DEFAULT ALG_1 ALG_2)
 option(CUPF_CUDSS_ENABLE_MT "Enable cuDSS multi-threaded mode via CUDSS_THREADING_LIB" OFF)
@@ -188,6 +193,11 @@ if(WITH_CUDA)
   endif()
 endif()
 
+if(CUPF_ENABLE_CUDA_GRAPH AND NOT CUPF_ENABLE_CUSTOM_SOLVER)
+  message(FATAL_ERROR "CUPF_ENABLE_CUDA_GRAPH=ON requires CUPF_ENABLE_CUSTOM_SOLVER=ON "
+                      "(cuDSS is not stream-capturable).")
+endif()
+
 if(CUPF_ENABLE_CUSTOM_SOLVER)
   if(NOT WITH_CUDA)
     message(FATAL_ERROR "CUPF_ENABLE_CUSTOM_SOLVER=ON requires WITH_CUDA=ON")
@@ -195,6 +205,13 @@ if(CUPF_ENABLE_CUSTOM_SOLVER)
   set(CLS_BUILD_CUDA_OPS ON CACHE BOOL "" FORCE)
   set(CLS_BUILD_SCRIPTS OFF CACHE BOOL "" FORCE)
   set(CLS_BUILD_CUDSS_SCRIPT OFF CACHE BOOL "" FORCE)
+  # Graph mode owns the iteration graph in cuPF, so build the linear solver in external/capturable
+  # mode (its factor/solve issue raw kernels on cuPF's capture stream, no internal graph/host sync).
+  if(CUPF_ENABLE_CUDA_GRAPH)
+    set(CLS_INTERNAL_GRAPH OFF CACHE BOOL "" FORCE)
+  else()
+    set(CLS_INTERNAL_GRAPH ON CACHE BOOL "" FORCE)
+  endif()
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../custom_linear_solver"
                    "${CMAKE_CURRENT_BINARY_DIR}/custom_linear_solver")
 endif()
@@ -312,6 +329,7 @@ target_compile_definitions(cupf PUBLIC
   $<$<BOOL:${WITH_CUDA}>:CUPF_WITH_CUDA>
   $<$<BOOL:${WITH_CUDA}>:CUPF_ENABLE_CUDSS>
   $<$<BOOL:${CUPF_ENABLE_CUSTOM_SOLVER}>:CUPF_ENABLE_CUSTOM_SOLVER>
+  $<$<BOOL:${CUPF_ENABLE_CUDA_GRAPH}>:CUPF_ENABLE_CUDA_GRAPH>
   $<$<BOOL:${WITH_CUDA}>:CUPF_CUDSS_REORDERING_ALG=${CUPF_CUDSS_REORDERING_ALG_DEFINE}>
   $<$<BOOL:${CUPF_CUDSS_ENABLE_MT}>:CUPF_CUDSS_ENABLE_MT>
   $<$<BOOL:${CUPF_CUDSS_SET_HOST_NTHREADS}>:CUPF_CUDSS_HOST_NTHREADS=${CUPF_CUDSS_HOST_NTHREADS_DEFINE}>
