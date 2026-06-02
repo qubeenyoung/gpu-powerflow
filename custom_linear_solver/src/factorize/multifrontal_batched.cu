@@ -583,21 +583,18 @@ bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState&
     // Capture batched solve graph (gather -> fwd levels -> bwd levels -> scatter is done
     // outside the graph in batched_solve; here only the level kernels, like the single path).
     const int sel = st.selinv ? 1 : 0;
-    // 32 threads (1 warp) per (front,batch) beats 64: the warp-parallel pivot solve uses one warp
-    // anyway and smaller blocks pack more per SM -> higher occupancy across the many B*fronts blocks.
-    const char* ts_env = std::getenv("MF_BSOLVE_TS");
-    const int TS = ts_env ? std::atoi(ts_env) : 32;
-    const bool skip_fwd = std::getenv("MF_BSKIP_FWD") != nullptr;  // profiling
-    const bool skip_bwd = std::getenv("MF_BSKIP_BWD") != nullptr;
+    // 32 threads (1 warp) per (front,batch): the warp-parallel pivot solve uses one warp anyway and
+    // smaller blocks pack more per SM -> higher occupancy across the many B*fronts blocks (swept).
+    const int TS = 32;
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-    for (int L = 0; L < plan.num_plevels && !skip_fwd; ++L) {
+    for (int L = 0; L < plan.num_plevels; ++L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
         mf_fwd_level_b<<<dim3(e - b, B), TS, 0, stream>>>(
             b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
     }
-    for (int L = plan.num_plevels - 1; L >= 0 && !skip_bwd; --L) {
+    for (int L = plan.num_plevels - 1; L >= 0; --L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
         int max_cb = 1;  // dynamic shared for the bwd x-cache, sized by the level's max CB rows

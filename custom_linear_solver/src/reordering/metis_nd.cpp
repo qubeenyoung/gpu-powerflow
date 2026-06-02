@@ -97,7 +97,6 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     METIS_SetDefaultOptions(opt);
     opt[METIS_OPTION_NUMBERING] = 0;
     opt[METIS_OPTION_SEED] = 42;  // fixed seed -> deterministic across threads
-    if (const char* ni = std::getenv("METIS_NITER")) opt[METIS_OPTION_NITER] = std::atoi(ni);
     std::srand(42);  // cy168: reseed per call (see base_nodend)
     bool got_sep = false;
     if (!got_sep &&

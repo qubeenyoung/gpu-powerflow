@@ -1,46 +1,6 @@
 #include "symbolic/supernode.hpp"
 
-#include <algorithm>
-#include <cstdlib>
-#include <cstring>
-
 namespace custom_linear_solver::symbolic {
-
-namespace {
-// Blocked (aggressive) amalgamation for tensor-core deep-K fronts: greedily merge
-// postorder-consecutive columns into one panel up to `cap`, as long as their colcounts stay
-// within a `ratio` band (keeps the zero-padding bounded). Grows nc (= the trailing-GEMM K) far
-// beyond what the chain-only relaxed_panels can on branchy power-grid etrees. Env MF_AMALG=
-// "cap:ratio" (e.g. "32:2.0"). Returns true and fills pp if enabled.
-bool blocked_panels(int n, const std::vector<int>& colcount, PanelPartition& pp)
-{
-    const char* s = std::getenv("MF_AMALG");
-    if (!s) return false;
-    int cap = std::atoi(s);
-    double ratio = 2.0;
-    if (const char* colon = std::strchr(s, ':')) ratio = std::atof(colon + 1);
-    if (cap < 1) cap = 1;
-    pp.panel_of.assign(n, -1);
-    for (int j = 0; j < n;) {
-        const int start = j;
-        int sz = 1, w = colcount[j], wmin = colcount[j];
-        while (j + 1 < n && sz < cap) {
-            const int cnext = colcount[j + 1];
-            const int nw = std::max(w, cnext), nwmin = std::min(wmin, cnext);
-            if ((double)nw > ratio * (double)nwmin) break;  // colcounts too dissimilar -> stop
-            ++j; ++sz; w = nw; wmin = nwmin;
-        }
-        const int id = pp.num_panels++;
-        pp.first.push_back(start);
-        pp.ncols.push_back(sz);
-        pp.width.push_back(w);
-        pp.padded_fill += static_cast<long>(sz) * w;
-        for (int c = start; c <= j; ++c) pp.panel_of[c] = id;
-        ++j;
-    }
-    return true;
-}
-}  // namespace
 
 SupernodePartition supernodes(int n, const std::vector<int>& parent,
                               const std::vector<int>& post,
@@ -93,14 +53,11 @@ PanelPartition relaxed_panels(int n, const std::vector<int>& parent,
     if (cap < 1) {
         cap = 1;
     }
-    // NOTE: MF_AMALG (blocked_panels) merges postorder-consecutive columns to grow nc for deep-K
-    // tensor cores, but that is only VALID for etree parent-child chains: merging columns from
-    // different subtrees breaks the multifrontal invariant (a child's CB no longer nests in one
-    // parent front -> asm_idx=-1 -> OOB extend-add, verified with compute-sanitizer). A correct
-    // nc-growing amalgamation requires reordering columns into etree-connected supernodes, which
-    // touches the whole analyze pipeline (perm/value-map/symbolic). Gated behind MF_AMALG_UNSAFE
-    // for experiments only.
-    if (std::getenv("MF_AMALG_UNSAFE") && blocked_panels(n, colcount, pp)) return pp;
+    // Deep-K amalgamation for tensor cores (env MF_AMALG) is done CORRECTLY in the analyze path
+    // (Solver::analyze -> amalgamation_reorder): it merges each column into its etree-PARENT
+    // supernode and reorders columns so supernodes are contiguous. (A naive "merge any consecutive
+    // columns" version is invalid -- a child's contribution block must nest in one parent front --
+    // so it is not done here.) relaxed_panels itself only does the safe chain merge below.
     // Postorder index space: an etree chain is a run of consecutive columns with
     // parent[j]==j+1. Greedily extend a panel along such a chain until it would
     // exceed `cap` columns; the panel's dense block is padded to its widest member

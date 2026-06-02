@@ -861,23 +861,19 @@ bool factorize_multifrontal_device(MultifrontalPlan& plan, const double* d_csr_v
         return false;
 
     cudaStream_t stream = static_cast<cudaStream_t>(plan.stream);
-    const bool split = std::getenv("CLS_FACTOR_SPLIT") != nullptr;
 
     const int T = 128;
-    cudaEvent_t k0, k1, km, ks;
+    cudaEvent_t k0, k1;
     cudaEventCreate(&k0);
     cudaEventCreate(&k1);
-    if (split) { cudaEventCreate(&km); cudaEventCreate(&ks); }
     cudaEventRecord(k0, stream);
     // FP64 master holds the assembly (both modes); the FP32 working arena is overwritten
     // per front by the mixed kernel's narrow, so it needs no memset.
     cudaMemsetAsync(plan.d_front, 0, plan.front_total * sizeof(double), stream);
     cudaMemsetAsync(plan.d_sing, 0, sizeof(int), stream);
-    if (split) cudaEventRecord(km, stream);
     const int sb = (plan.nnz_a + T - 1) / T;  // scatter A into the FP64 master (both modes)
     mf_scatter_csr_values<<<sb, T, 0, stream>>>(plan.nnz_a, d_ordered_value_to_csr,
                                                 plan.d_a_pos, d_csr_values, plan.d_front);
-    if (split) cudaEventRecord(ks, stream);
     cudaGraphLaunch(static_cast<cudaGraphExec_t>(plan.graph_exec), stream);
     cudaEventRecord(k1, stream);
     cudaEventSynchronize(k1);
@@ -885,14 +881,6 @@ bool factorize_multifrontal_device(MultifrontalPlan& plan, const double* d_csr_v
         float ms = 0.0f;
         cudaEventElapsedTime(&ms, k0, k1);
         *kernel_ms = ms;
-    }
-    if (split) {
-        float mms = 0, sms = 0, gms = 0;
-        cudaEventElapsedTime(&mms, k0, km);
-        cudaEventElapsedTime(&sms, km, ks);
-        cudaEventElapsedTime(&gms, ks, k1);
-        std::fprintf(stderr, "  [factor-split] memset=%.3f scatter=%.3f graph=%.3f ms\n", mms, sms, gms);
-        cudaEventDestroy(km); cudaEventDestroy(ks);
     }
     cudaEventDestroy(k0);
     cudaEventDestroy(k1);
