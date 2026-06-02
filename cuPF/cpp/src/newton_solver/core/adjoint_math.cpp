@@ -71,17 +71,12 @@ std::vector<double> build_grad_state(const double* grad_va,
 {
     const int32_t n_pvpq = n_pv + n_pq;
     const int32_t dimF = n_pvpq + n_pq;
-    // size_t widening keeps the batch_size * dimF allocation overflow-safe.
-    std::vector<double> grad_state(static_cast<std::size_t>(batch_size) *
-                                   static_cast<std::size_t>(dimF), 0.0);
+    std::vector<double> grad_state(batch_size * dimF, 0.0);
     for (int32_t b = 0; b < batch_size; ++b) {
         // Offset into this case's source/destination rows.
-        const double* va =
-            grad_va + static_cast<std::size_t>(b) * static_cast<std::size_t>(grad_va_stride);
-        const double* vm =
-            grad_vm + static_cast<std::size_t>(b) * static_cast<std::size_t>(grad_vm_stride);
-        double* dst = grad_state.data() +
-            static_cast<std::size_t>(b) * static_cast<std::size_t>(dimF);
+        const double* va = grad_va + b * grad_va_stride;
+        const double* vm = grad_vm + b * grad_vm_stride;
+        double* dst = grad_state.data() + b * dimF;
         // dVa at pv and pq buses, then dVm at pq buses (the dimF ordering).
         for (int32_t i = 0; i < n_pv; ++i) {
             dst[i] = va[pv[i]];
@@ -108,17 +103,13 @@ void project_load_gradients(const std::vector<double>& lambda,
 {
     const int32_t n_pvpq = n_pv + n_pq;
     const int32_t dimF = n_pvpq + n_pq;
-    result.grad_load_p.assign(static_cast<std::size_t>(batch_size) *
-                              static_cast<std::size_t>(n_bus), 0.0);
+    result.grad_load_p.assign(batch_size * n_bus, 0.0);
     result.grad_load_q.assign(result.grad_load_p.size(), 0.0);
 
     for (int32_t b = 0; b < batch_size; ++b) {
-        const double* lam = lambda.data() +
-            static_cast<std::size_t>(b) * static_cast<std::size_t>(dimF);
-        double* grad_p = result.grad_load_p.data() +
-            static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
-        double* grad_q = result.grad_load_q.data() +
-            static_cast<std::size_t>(b) * static_cast<std::size_t>(n_bus);
+        const double* lam = lambda.data() + b * dimF;
+        double* grad_p = result.grad_load_p.data() + b * n_bus;
+        double* grad_q = result.grad_load_q.data() + b * n_bus;
 
         for (int32_t i = 0; i < n_pv; ++i) {
             grad_p[pv[i]] = -lam[i];
@@ -149,10 +140,9 @@ double relative_residual_norm_csc(const CpuJacobianMatrixF64& J,
         // (J^T lambda)[c] = sum over the nonzeros in column c of J.
         long double acc = 0.0L;
         for (int32_t k = col_ptr[c]; k < col_ptr[c + 1]; ++k) {
-            acc += static_cast<long double>(vals[k]) *
-                   static_cast<long double>(lambda[static_cast<std::size_t>(row_idx[k])]);
+            acc += static_cast<long double>(vals[k]) * static_cast<long double>(lambda[row_idx[k]]);
         }
-        const long double r = static_cast<long double>(rhs[static_cast<std::size_t>(c)]);
+        const long double r = static_cast<long double>(rhs[c]);
         const long double d = acc - r;
         residual_sq += d * d;
         rhs_sq      += r * r;

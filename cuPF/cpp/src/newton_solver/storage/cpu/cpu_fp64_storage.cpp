@@ -63,7 +63,7 @@ void CpuFp64Storage::prepare(const InitializeContext& ctx)
     Ybus_data.assign(ctx.ybus.nnz, std::complex<double>(0.0, 0.0));
     if (ctx.ybus.data != nullptr) {
         for (int32_t k = 0; k < ctx.ybus.nnz; ++k) {
-            Ybus_data[static_cast<std::size_t>(k)] = ctx.ybus.data[k];
+            Ybus_data[k] = ctx.ybus.data[k];
         }
     }
 
@@ -76,12 +76,12 @@ void CpuFp64Storage::prepare(const InitializeContext& ctx)
             // Build the CSC sparsity from the CSR pattern (values filled later).
             using Triplet = CpuTriplet<double>;
             std::vector<Triplet> trips;
-            trips.reserve(static_cast<std::size_t>(ctx.J.nnz));
+            trips.reserve(ctx.J.nnz);
 
             for (int32_t row = 0; row < ctx.J.dim; ++row) {
-                for (int32_t k = ctx.J.row_ptr[static_cast<std::size_t>(row)];
-                     k < ctx.J.row_ptr[static_cast<std::size_t>(row + 1)]; ++k) {
-                    trips.emplace_back(row, ctx.J.col_idx[static_cast<std::size_t>(k)], 1.0);
+                for (int32_t k = ctx.J.row_ptr[row];
+                     k < ctx.J.row_ptr[row + 1]; ++k) {
+                    trips.emplace_back(row, ctx.J.col_idx[k], 1.0);
                 }
             }
 
@@ -99,28 +99,28 @@ void CpuFp64Storage::prepare(const InitializeContext& ctx)
             const int32_t* csc_row_idx = J.innerIndexPtr();
             const int32_t  j_nnz       = J.nonZeros();
 
-            std::vector<int32_t> csr_row_ptr(static_cast<std::size_t>(ctx.J.dim + 1), 0);
+            std::vector<int32_t> csr_row_ptr(ctx.J.dim + 1, 0);
             for (int32_t k = 0; k < j_nnz; ++k) {
-                ++csr_row_ptr[static_cast<std::size_t>(csc_row_idx[k] + 1)];
+                ++csr_row_ptr[csc_row_idx[k] + 1];
             }
             for (int32_t row = 0; row < ctx.J.dim; ++row) {
-                csr_row_ptr[static_cast<std::size_t>(row + 1)] += csr_row_ptr[static_cast<std::size_t>(row)];
+                csr_row_ptr[row + 1] += csr_row_ptr[row];
             }
 
-            std::vector<int32_t> csr_to_csc(static_cast<std::size_t>(j_nnz), -1);
+            std::vector<int32_t> csr_to_csc(j_nnz, -1);
             std::vector<int32_t> row_cursor = csr_row_ptr;
 
             for (int32_t col = 0; col < ctx.J.dim; ++col) {
                 for (int32_t k = csc_col_ptr[col]; k < csc_col_ptr[col + 1]; ++k) {
                     const int32_t row     = csc_row_idx[k];
-                    const int32_t csr_pos = row_cursor[static_cast<std::size_t>(row)]++;
-                    csr_to_csc[static_cast<std::size_t>(csr_pos)] = k;
+                    const int32_t csr_pos = row_cursor[row]++;
+                    csr_to_csc[csr_pos] = k;
                 }
             }
 
             auto remap = [&csr_to_csc](std::vector<int32_t>& positions) {
                 for (int32_t& pos : positions) {
-                    pos = (pos >= 0) ? csr_to_csc[static_cast<std::size_t>(pos)] : -1;
+                    pos = (pos >= 0) ? csr_to_csc[pos] : -1;
                 }
             };
 
@@ -159,28 +159,28 @@ void CpuFp64Storage::upload(const SolveContext& ctx)
     require_pointer(ctx.V0,       "SolveContext.V0",            n_bus);
 
     for (int32_t row = 0; row <= n_bus; ++row) {
-        if (ybus.indptr[row] != Ybus_indptr[static_cast<std::size_t>(row)]) {
+        if (ybus.indptr[row] != Ybus_indptr[row]) {
             throw std::runtime_error("CpuFp64Storage::upload: Ybus 희소 구조가 initialize() 이후 변경되었습니다.");
         }
     }
     for (int32_t k = 0; k < ybus.nnz; ++k) {
-        if (ybus.indices[k] != Ybus_indices[static_cast<std::size_t>(k)]) {
+        if (ybus.indices[k] != Ybus_indices[k]) {
             throw std::runtime_error("CpuFp64Storage::upload: Ybus 희소 구조가 initialize() 이후 변경되었습니다.");
         }
-        Ybus_data[static_cast<std::size_t>(k)] = ybus.data[k];
+        Ybus_data[k] = ybus.data[k];
     }
 
     {
         using Triplet = CpuTriplet<std::complex<double>>;
         std::vector<Triplet> trips;
-        trips.reserve(static_cast<std::size_t>(ybus.nnz));
+        trips.reserve(ybus.nnz);
 
         for (int32_t row = 0; row < n_bus; ++row) {
-            for (int32_t k = Ybus_indptr[static_cast<std::size_t>(row)];
-                 k < Ybus_indptr[static_cast<std::size_t>(row + 1)]; ++k) {
+            for (int32_t k = Ybus_indptr[row];
+                 k < Ybus_indptr[row + 1]; ++k) {
                 trips.emplace_back(row,
-                                   Ybus_indices[static_cast<std::size_t>(k)],
-                                   Ybus_data[static_cast<std::size_t>(k)]);
+                                   Ybus_indices[k],
+                                   Ybus_data[k]);
             }
         }
 
@@ -190,11 +190,11 @@ void CpuFp64Storage::upload(const SolveContext& ctx)
     }
 
     for (int32_t bus = 0; bus < n_bus; ++bus) {
-        V[static_cast<std::size_t>(bus)]    = ctx.V0[bus];
-        Va[static_cast<std::size_t>(bus)]   = std::arg(V[static_cast<std::size_t>(bus)]);
-        Vm[static_cast<std::size_t>(bus)]   = std::abs(V[static_cast<std::size_t>(bus)]);
-        Sbus[static_cast<std::size_t>(bus)] = ctx.sbus[bus];
-        Ibus[static_cast<std::size_t>(bus)] = std::complex<double>(0.0, 0.0);
+        V[bus]    = ctx.V0[bus];
+        Va[bus]   = std::arg(V[bus]);
+        Vm[bus]   = std::abs(V[bus]);
+        Sbus[bus] = ctx.sbus[bus];
+        Ibus[bus] = std::complex<double>(0.0, 0.0);
     }
 
     std::fill(F.begin(), F.end(), 0.0);

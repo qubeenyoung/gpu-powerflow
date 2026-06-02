@@ -29,15 +29,12 @@ std::vector<T> transpose_batched_values(const std::vector<T>& values,
                                         int32_t batch_size,
                                         int32_t nnz)
 {
-    std::vector<T> transposed(static_cast<std::size_t>(batch_size) *
-                              static_cast<std::size_t>(nnz), T(0));
+    std::vector<T> transposed(batch_size * nnz, T(0));
     for (int32_t b = 0; b < batch_size; ++b) {
-        const std::size_t base =
-            static_cast<std::size_t>(b) * static_cast<std::size_t>(nnz);
+        const std::size_t base = b * nnz;
         for (int32_t k = 0; k < nnz; ++k) {
-            const int32_t dst = src_to_transpose_pos[static_cast<std::size_t>(k)];
-            transposed[base + static_cast<std::size_t>(dst)] =
-                values[base + static_cast<std::size_t>(k)];
+            const int32_t dst = src_to_transpose_pos[k];
+            transposed[base + dst] = values[base + k];
         }
     }
     return transposed;

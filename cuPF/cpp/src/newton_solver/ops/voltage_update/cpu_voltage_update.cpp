@@ -23,23 +23,20 @@ void CpuVoltageUpdateOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 
     // Angle update at pv buses, then angle and magnitude updates at pq buses.
     for (int32_t i = 0; i < ctx.n_pv; ++i) {
-        buf.Va[static_cast<std::size_t>(ctx.pv[i])] -= buf.dx[static_cast<std::size_t>(i)];
+        buf.Va[ctx.pv[i]] -= buf.dx[i];
     }
     for (int32_t i = 0; i < ctx.n_pq; ++i) {
-        buf.Va[static_cast<std::size_t>(ctx.pq[i])] -=
-            buf.dx[static_cast<std::size_t>(ctx.n_pv + i)];
+        buf.Va[ctx.pq[i]] -= buf.dx[ctx.n_pv + i];
     }
     for (int32_t i = 0; i < ctx.n_pq; ++i) {
-        buf.Vm[static_cast<std::size_t>(ctx.pq[i])] -=
-            buf.dx[static_cast<std::size_t>(ctx.n_pv + ctx.n_pq + i)];
+        buf.Vm[ctx.pq[i]] -= buf.dx[ctx.n_pv + ctx.n_pq + i];
     }
 
     // Refresh the rectangular voltage from the updated polar (Vm, Va).
     for (int32_t bus = 0; bus < buf.n_bus; ++bus) {
-        const double vm = buf.Vm[static_cast<std::size_t>(bus)];
-        const double va = buf.Va[static_cast<std::size_t>(bus)];
-        buf.V[static_cast<std::size_t>(bus)] =
-            std::complex<double>(vm * std::cos(va), vm * std::sin(va));
+        const double vm = buf.Vm[bus];
+        const double va = buf.Va[bus];
+        buf.V[bus] = std::complex<double>(vm * std::cos(va), vm * std::sin(va));
     }
 
     buf.has_cached_Ibus = false;

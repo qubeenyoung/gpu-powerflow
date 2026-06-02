@@ -42,9 +42,9 @@ void CpuJacobianOpF64::run(CpuFp64Storage& buf, IterationContext& ctx)
     }
 
     // Vm_clamped[i] = max(|V[i]|, 1e-8); Vnorm[i] = V[i] / Vm_clamped[i].
-    std::vector<std::complex<double>> Vnorm(static_cast<std::size_t>(buf.n_bus));
+    std::vector<std::complex<double>> Vnorm(buf.n_bus);
     for (int32_t i = 0; i < buf.n_bus; ++i) {
-        const std::size_t idx = static_cast<std::size_t>(i);
+        const std::size_t idx = i;
         const double vm = std::max(std::abs(buf.V[idx]), 1e-8);
         Vnorm[idx] = buf.V[idx] / vm;
     }
@@ -52,25 +52,21 @@ void CpuJacobianOpF64::run(CpuFp64Storage& buf, IterationContext& ctx)
     // 오프 대각 기여
     int32_t t = 0;
     for (int32_t row = 0; row < buf.n_bus; ++row) {
-        for (int32_t k = buf.Ybus_indptr[static_cast<std::size_t>(row)];
-             k < buf.Ybus_indptr[static_cast<std::size_t>(row + 1)];
+        for (int32_t k = buf.Ybus_indptr[row];
+             k < buf.Ybus_indptr[row + 1];
              ++k, ++t) {
             const int32_t y_i = row;
-            const int32_t y_j = buf.Ybus_indices[static_cast<std::size_t>(k)];
-            const std::complex<double> y = buf.Ybus_data[static_cast<std::size_t>(k)];
+            const int32_t y_j = buf.Ybus_indices[k];
+            const std::complex<double> y = buf.Ybus_data[k];
 
-            const std::complex<double> va =
-                -kImaginaryUnit * buf.V[static_cast<std::size_t>(y_i)] *
-                std::conj(y * buf.V[static_cast<std::size_t>(y_j)]);
+            const std::complex<double> va = -kImaginaryUnit * buf.V[y_i] * std::conj(y * buf.V[y_j]);
 
-            const std::complex<double> vm =
-                buf.V[static_cast<std::size_t>(y_i)] *
-                std::conj(y * Vnorm[static_cast<std::size_t>(y_j)]);
+            const std::complex<double> vm = buf.V[y_i] * std::conj(y * Vnorm[y_j]);
 
-            const int32_t p11 = buf.maps.mapJ11[static_cast<std::size_t>(t)];
-            const int32_t p21 = buf.maps.mapJ21[static_cast<std::size_t>(t)];
-            const int32_t p12 = buf.maps.mapJ12[static_cast<std::size_t>(t)];
-            const int32_t p22 = buf.maps.mapJ22[static_cast<std::size_t>(t)];
+            const int32_t p11 = buf.maps.mapJ11[t];
+            const int32_t p21 = buf.maps.mapJ21[t];
+            const int32_t p12 = buf.maps.mapJ12[t];
+            const int32_t p22 = buf.maps.mapJ22[t];
 
             if (p11 >= 0) J_values[p11] = va.real();
             if (p21 >= 0) J_values[p21] = va.imag();
@@ -81,19 +77,14 @@ void CpuJacobianOpF64::run(CpuFp64Storage& buf, IterationContext& ctx)
 
     // 대각 기여
     for (int32_t bus = 0; bus < buf.n_bus; ++bus) {
-        const std::complex<double> va =
-            kImaginaryUnit *
-            (buf.V[static_cast<std::size_t>(bus)] *
-             std::conj(buf.Ibus[static_cast<std::size_t>(bus)]));
+        const std::complex<double> va = kImaginaryUnit * (buf.V[bus] * std::conj(buf.Ibus[bus]));
 
-        const std::complex<double> vm =
-            std::conj(buf.Ibus[static_cast<std::size_t>(bus)]) *
-            Vnorm[static_cast<std::size_t>(bus)];
+        const std::complex<double> vm = std::conj(buf.Ibus[bus]) * Vnorm[bus];
 
-        const int32_t q11 = buf.maps.diagJ11[static_cast<std::size_t>(bus)];
-        const int32_t q21 = buf.maps.diagJ21[static_cast<std::size_t>(bus)];
-        const int32_t q12 = buf.maps.diagJ12[static_cast<std::size_t>(bus)];
-        const int32_t q22 = buf.maps.diagJ22[static_cast<std::size_t>(bus)];
+        const int32_t q11 = buf.maps.diagJ11[bus];
+        const int32_t q21 = buf.maps.diagJ21[bus];
+        const int32_t q12 = buf.maps.diagJ12[bus];
+        const int32_t q22 = buf.maps.diagJ22[bus];
 
         if (q11 >= 0) J_values[q11] += va.real();
         if (q21 >= 0) J_values[q21] += va.imag();

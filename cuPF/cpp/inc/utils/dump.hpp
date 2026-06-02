@@ -162,9 +162,9 @@ inline bool dumpArray(const std::string& name, int iteration, const T* data, int
         return false;
     }
 
-    std::vector<T> values(static_cast<std::size_t>(size));
+    std::vector<T> values(size);
     for (int32_t i = 0; i < size; ++i) {
-        values[static_cast<std::size_t>(i)] = data[i];
+        values[i] = data[i];
     }
     return dumpVector(name, iteration, values);
 }
@@ -187,8 +187,8 @@ inline bool dumpCSR(const std::string& name,
     }
 
     try {
-        const std::size_t row_count = static_cast<std::size_t>(n_rows);
-        const std::size_t nnz = static_cast<std::size_t>(indptr[n_rows]);
+        const std::size_t row_count = n_rows;
+        const std::size_t nnz = indptr[n_rows];
         IndexType inferred_cols = n_cols;
         if (inferred_cols < 0) {
             inferred_cols = 0;
@@ -199,7 +199,7 @@ inline bool dumpCSR(const std::string& name,
 
         const std::string path = makeDumpFilePath(name, iteration);
         std::ofstream out = openDumpFile(path);
-        writeMatrixHeader(out, "csr_matrix", row_count, static_cast<std::size_t>(inferred_cols), nnz);
+        writeMatrixHeader(out, "csr_matrix", row_count, inferred_cols, nnz);
         writeNamedLine(out, "row_ptr", indptr, row_count + 1);
         writeNamedLine(out, "col_idx", indices, nnz);
         writeNamedLine(out, "values", values, nnz);

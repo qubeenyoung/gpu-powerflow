@@ -66,32 +66,26 @@ struct CudaBatchedStorage {
     // Flat index of bus `bus` in case `batch` (per-bus arrays are [B * n_bus]).
     std::size_t bus_offset(int32_t batch, int32_t bus) const
     {
-        return static_cast<std::size_t>(batch) * static_cast<std::size_t>(n_bus) +
-               static_cast<std::size_t>(bus);
+        return batch * n_bus + bus;
     }
 
     // Flat index of residual row `row` in case `batch` (d_F/d_dx are [B * dimF]).
     std::size_t residual_offset(int32_t batch, int32_t row) const
     {
-        return static_cast<std::size_t>(batch) * static_cast<std::size_t>(dimF) +
-               static_cast<std::size_t>(row);
+        return batch * dimF + row;
     }
 
     // Flat index of J value `pos` in case `batch` (d_J_values is [B * nnz_J]).
     std::size_t jacobian_offset(int32_t batch, int32_t pos) const
     {
-        return static_cast<std::size_t>(batch) * static_cast<std::size_t>(nnz_J) +
-               static_cast<std::size_t>(pos);
+        return batch * nnz_J + pos;
     }
 
     // Flat index of Ybus value `pos` in case `batch`. When the Ybus values are
     // shared across the batch (the common case) every case reads slot `pos`.
     std::size_t ybus_value_offset(int32_t batch, int32_t pos) const
     {
-        return ybus_values_batched
-            ? static_cast<std::size_t>(batch) * static_cast<std::size_t>(nnz_ybus) +
-                  static_cast<std::size_t>(pos)
-            : static_cast<std::size_t>(pos);
+        return ybus_values_batched ? batch * nnz_ybus + pos : pos;
     }
 
     // --- Ybus (pattern shared across batch; values shared unless batched) ----

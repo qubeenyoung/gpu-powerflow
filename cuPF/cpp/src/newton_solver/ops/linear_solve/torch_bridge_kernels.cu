@@ -222,7 +222,7 @@ void launch_project_load_gradients(const T* lambda,
 
     // Zero both outputs (every non-pv/pq bus gradient is 0), then scatter only
     // the pv and pq buses. 0 bytes == 0.0 for IEEE float and double.
-    const std::size_t total_bus = static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(n_bus);
+    const std::size_t total_bus = batch_size * n_bus;
     CUDA_CHECK(cudaMemsetAsync(grad_load_p, 0, total_bus * sizeof(T), stream));
     CUDA_CHECK(cudaMemsetAsync(grad_load_q, 0, total_bus * sizeof(T), stream));
 

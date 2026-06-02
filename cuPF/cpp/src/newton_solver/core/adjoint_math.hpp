@@ -74,23 +74,18 @@ double relative_residual_norm_csr(const std::vector<int32_t>& row_ptr,
     long double residual_sq = 0.0L;
     long double rhs_sq = 0.0L;
     for (int32_t b = 0; b < batch_size; ++b) {
-        const std::size_t dense_base =
-            static_cast<std::size_t>(b) * static_cast<std::size_t>(dim);
-        const std::size_t sparse_base =
-            static_cast<std::size_t>(b) * static_cast<std::size_t>(nnz);
+        const std::size_t dense_base = b * dim;
+        const std::size_t sparse_base = b * nnz;
         for (int32_t row = 0; row < dim; ++row) {
             long double acc = 0.0L;
-            for (int32_t k = row_ptr[static_cast<std::size_t>(row)];
-                 k < row_ptr[static_cast<std::size_t>(row + 1)]; ++k) {
-                const int32_t col = col_idx[static_cast<std::size_t>(k)];
-                acc += static_cast<long double>(values[sparse_base + static_cast<std::size_t>(k)]) *
-                       static_cast<long double>(lambda[dense_base + static_cast<std::size_t>(col)]);
+            for (int32_t k = row_ptr[row];
+                 k < row_ptr[row + 1]; ++k) {
+                const int32_t col = col_idx[k];
+                acc += static_cast<long double>(values[sparse_base + k]) * static_cast<long double>(lambda[dense_base + col]);
             }
-            const long double diff =
-                acc - static_cast<long double>(rhs[dense_base + static_cast<std::size_t>(row)]);
+            const long double diff = acc - static_cast<long double>(rhs[dense_base + row]);
             residual_sq += diff * diff;
-            const long double r =
-                static_cast<long double>(rhs[dense_base + static_cast<std::size_t>(row)]);
+            const long double r = static_cast<long double>(rhs[dense_base + row]);
             rhs_sq += r * r;
         }
     }

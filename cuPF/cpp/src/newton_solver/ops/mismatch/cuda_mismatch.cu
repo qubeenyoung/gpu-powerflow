@@ -64,7 +64,7 @@ void reduce_norm_into_ctx(Storage& buf, IterationContext& ctx)
     // Pull the per-case norms and take the worst case as the batch norm (so the
     // whole batch is "converged" only when every case is). NormScalar may be
     // float; widen to double for the host-side comparison.
-    std::vector<NormScalar> h_norm(static_cast<std::size_t>(buf.batch_size));
+    std::vector<NormScalar> h_norm(buf.batch_size);
     buf.d_normF.copyTo(h_norm.data(), h_norm.size());
 
     ctx.normF = 0.0;
@@ -79,7 +79,7 @@ void reduce_norm_into_ctx(Storage& buf, IterationContext& ctx)
     }
 
     if (newton_solver::utils::isDumpEnabled()) {
-        std::vector<NormScalar> h_F(static_cast<std::size_t>(buf.batch_size) * buf.dimF);
+        std::vector<NormScalar> h_F(buf.batch_size * buf.dimF);
         buf.d_F.copyTo(h_F.data(), h_F.size());
         newton_solver::utils::dumpVector("residual", ctx.iter, h_F);
         newton_solver::utils::dumpVector("residual_before_update", ctx.iter, h_F);

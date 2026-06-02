@@ -145,9 +145,9 @@ void dump_cuda_jacobian_if_enabled(const char* name,
         return;
     }
 
-    std::vector<int32_t> row_ptr(static_cast<std::size_t>(dim + 1));
-    std::vector<int32_t> col_idx(static_cast<std::size_t>(nnz));
-    std::vector<ValueType> values(static_cast<std::size_t>(nnz));
+    std::vector<int32_t> row_ptr(dim + 1);
+    std::vector<int32_t> col_idx(nnz);
+    std::vector<ValueType> values(nnz);
     d_row_ptr.copyTo(row_ptr.data(), row_ptr.size());
     d_col_idx.copyTo(col_idx.data(), col_idx.size());
     d_values.copyTo(values.data(), values.size());

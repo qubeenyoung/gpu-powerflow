@@ -340,8 +340,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve(Buffers& buf, IterationContext& ctx
     // Debug-only: copy dx back to host and record it.
     if (newton_solver::utils::isDumpEnabled()) {
         const int32_t count = cuda_storage_batch_size(buf) * buf.dimF;
-        // count is a positive element count; widen to size_t for the host vector.
-        std::vector<T> h_dx(static_cast<std::size_t>(count));
+        std::vector<T> h_dx(count);
         buf.d_dx.copyTo(h_dx.data(), h_dx.size());
         newton_solver::utils::dumpVector("dx", ctx.iter, h_dx);
     }
@@ -468,9 +467,9 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_host(
     // Down-cast the FP64 host RHS into the solver's working precision T.
     // (static_cast<T> is the explicit double->float narrowing for FP32 solves;
     //  for the double instantiation it is an identity conversion.)
-    std::vector<T> rhs_t(static_cast<std::size_t>(count));  // count>0 -> widen to size_t for sizing
+    std::vector<T> rhs_t(count);
     for (int32_t i = 0; i < count; ++i) {
-        rhs_t[static_cast<std::size_t>(i)] = static_cast<T>(rhs[i]);
+        rhs_t[i] = static_cast<T>(rhs[i]);
     }
     state_->adjoint_rhs.assign(rhs_t.data(), rhs_t.size());
     state_->adjoint_solution.memsetZero();
@@ -486,10 +485,10 @@ void CudaLinearSolveCuDSS<T, Buffers>::solve_adjoint_explicit_transpose_host(
     solve_time_ms = elapsed_ms(start, Clock::now());
 
     // Copy the solution back and up-cast T -> FP64 for the caller's buffer.
-    std::vector<T> sol_t(static_cast<std::size_t>(count));
+    std::vector<T> sol_t(count);
     state_->adjoint_solution.copyTo(sol_t.data(), sol_t.size());
     for (int32_t i = 0; i < count; ++i) {
-        solution[i] = static_cast<double>(sol_t[static_cast<std::size_t>(i)]);
+        solution[i] = static_cast<double>(sol_t[i]);
     }
 #endif
 }
@@ -585,9 +584,7 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_descriptors(Buffers& buf)
 
     // Mixed precision needs its own FP32 RHS buffer sized batch_size * dimF.
     if constexpr (std::is_same_v<T, float> && std::is_same_v<Buffers, CudaMixedStorage>) {
-        // Widen both factors to size_t before multiplying to avoid int overflow.
-        state_->rhs.resize(static_cast<std::size_t>(batch_size) *
-                           static_cast<std::size_t>(dimF));
+        state_->rhs.resize(batch_size * dimF);
     }
 
     CUDSS_CHECK(cudssMatrixCreateCsr(
@@ -653,13 +650,9 @@ void CudaLinearSolveCuDSS<T, Buffers>::ensure_adjoint_descriptors(Buffers& buf)
     cupf_cudss_detail::configure_solver(state_->config, cudss_options_, batch_size);
 
     // Allocate and zero the J^T value / RHS / solution buffers.
-    // (size_t widening guards the batch_size * dim products against overflow.)
-    state_->adjoint_values.resize(static_cast<std::size_t>(batch_size) *
-                                  static_cast<std::size_t>(nnz_J));
-    state_->adjoint_rhs.resize(static_cast<std::size_t>(batch_size) *
-                               static_cast<std::size_t>(dimF));
-    state_->adjoint_solution.resize(static_cast<std::size_t>(batch_size) *
-                                    static_cast<std::size_t>(dimF));
+    state_->adjoint_values.resize(batch_size * nnz_J);
+    state_->adjoint_rhs.resize(batch_size * dimF);
+    state_->adjoint_solution.resize(batch_size * dimF);
     state_->adjoint_values.memsetZero();
     state_->adjoint_rhs.memsetZero();
     state_->adjoint_solution.memsetZero();

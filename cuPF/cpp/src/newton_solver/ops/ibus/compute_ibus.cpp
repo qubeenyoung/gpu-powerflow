@@ -26,10 +26,10 @@ void compute_ibus(CpuFp64Storage& buf)
     const std::complex<double>* vals = buf.Ybus.valuePtr();
 
     for (int32_t col = 0; col < buf.n_bus; ++col) {
-        const std::complex<double> vc = buf.V[static_cast<std::size_t>(col)];
+        const std::complex<double> vc = buf.V[col];
         const int32_t k_end = col_ptr[col + 1];
         for (int32_t k = col_ptr[col]; k < k_end; ++k) {
-            buf.Ibus[static_cast<std::size_t>(row_idx[k])] += vals[k] * vc;
+            buf.Ibus[row_idx[k]] += vals[k] * vc;
         }
     }
     buf.has_cached_Ibus = true;

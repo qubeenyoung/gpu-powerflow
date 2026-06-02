@@ -139,7 +139,7 @@ void solve_adjoint_pipeline(CpuFp64Pipeline& p,
 
     // Solve J^T lambda = dL/dx using the cached factorization (dimF entries).
     auto solve_start = Clock::now();
-    result.lambda.assign(static_cast<std::size_t>(p.buf.dimF), 0.0);  // dimF>0 -> size_t
+    result.lambda.assign(p.buf.dimF, 0.0);
     p.linear_solve.solve_transpose(grad_state.data(), result.lambda.data(), p.buf.dimF, 1);
     result.solve_time_ms = elapsed_ms(solve_start, Clock::now());
     result.transpose_solve_time_ms = result.solve_time_ms;
@@ -265,10 +265,8 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
         result.reused_final_state_factorization = true;
     }
 
-    // Solve J^T lambda = dL/dx for the whole batch (size_t widening guards the
-    // batch_size * dimF allocation against int overflow).
-    result.lambda.assign(static_cast<std::size_t>(batch_size) *
-                         static_cast<std::size_t>(p.buf.dimF), 0.0);
+    // Solve J^T lambda = dL/dx for the whole batch.
+    result.lambda.assign(batch_size * p.buf.dimF, 0.0);
     p.linear_solve.solve_adjoint_explicit_transpose_host(
         grad_state.data(),
         result.lambda.data(),
@@ -281,11 +279,10 @@ void solve_adjoint_cuda_pipeline(PipelineT& p,
     if (options.check_residual) {
         const int32_t dim = p.buf.dimF;
         const int32_t nnz = cuda_storage_nnz_j(p.buf);
-        // Host CSR mirrors of J (size_t casts size the host vectors).
-        std::vector<int32_t> row_ptr(static_cast<std::size_t>(dim + 1));
-        std::vector<int32_t> col_idx(static_cast<std::size_t>(nnz));
-        std::vector<ValueT> values(static_cast<std::size_t>(batch_size) *
-                                   static_cast<std::size_t>(nnz));
+        // Host CSR mirrors of J.
+        std::vector<int32_t> row_ptr(dim + 1);
+        std::vector<int32_t> col_idx(nnz);
+        std::vector<ValueT> values(batch_size * nnz);
         p.buf.d_J_row_ptr.copyTo(row_ptr.data(), row_ptr.size());
         p.buf.d_J_col_idx.copyTo(col_idx.data(), col_idx.size());
         p.buf.d_J_values.copyTo(values.data(), values.size());

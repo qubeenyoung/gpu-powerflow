@@ -176,7 +176,7 @@ void CpuLinearSolveKLU::solve_transpose(const double* rhs,
         throw std::invalid_argument("CpuLinearSolveKLU::solve_transpose: invalid arguments");
     }
 
-    std::copy(rhs, rhs + static_cast<std::size_t>(dim) * static_cast<std::size_t>(nrhs), solution);
+    std::copy(rhs, rhs + dim * nrhs, solution);
     const int ok = klu_tsolve(symbolic_, numeric_, dim, nrhs, solution, &common_);
     if (!ok) {
         throw std::runtime_error("CpuLinearSolveKLU::solve_transpose: KLU transpose solve failed");

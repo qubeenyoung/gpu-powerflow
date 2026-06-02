@@ -59,8 +59,7 @@ void validate_batch_args(int32_t batch_size, int64_t stride, int32_t n_bus, cons
         throw std::invalid_argument("NewtonSolver::solve_batch(): batch_size must be positive");
     }
     if (stride < n_bus) {
-        throw std::invalid_argument(std::string("NewtonSolver::solve_batch(): ") +
-                                    name + " stride must be at least n_bus");
+        throw std::invalid_argument(std::string("NewtonSolver::solve_batch(): ") + name + " stride must be at least n_bus");
     }
 }
 
@@ -278,26 +277,25 @@ void NewtonSolver::solve_batch(
         std::visit([&](auto& p) { p.download_batch(result); }, pipeline_->v);
     }
 
-    // Finalize per-case result vectors. batch_size is a positive int32; it is
-    // widened to size_t for every vector size/index (signed->unsigned, no loss).
+    // Finalize per-case result vectors.
     result.n_bus = ybus.rows;
     result.batch_size = batch_size;
-    result.iterations.assign(static_cast<std::size_t>(batch_size), iterations);
+    result.iterations.assign(batch_size, iterations);
 
     // Backends that did not fill per-case mismatches fall back to the shared norm.
-    if (result.final_mismatch.size() != static_cast<std::size_t>(batch_size)) {
-        result.final_mismatch.assign(static_cast<std::size_t>(batch_size), iter_ctx.normF);
+    if (result.final_mismatch.size() != batch_size) {
+        result.final_mismatch.assign(batch_size, iter_ctx.normF);
     }
 
     // Convergence flag per case: 1 if final mismatch is within tolerance.
-    result.converged.resize(static_cast<std::size_t>(batch_size));
+    result.converged.resize(batch_size);
     for (int32_t b = 0; b < batch_size; ++b) {
         const double norm =
             result.final_mismatch.empty()
                 ? iter_ctx.normF
-                : result.final_mismatch[static_cast<std::size_t>(b)];
+                : result.final_mismatch[b];
         // converged is a uint8 flag buffer; store the bool result as 0/1.
-        result.converged[static_cast<std::size_t>(b)] =
+        result.converged[b] =
             static_cast<uint8_t>(norm <= config.tolerance ? 1 : 0);
     }
 }

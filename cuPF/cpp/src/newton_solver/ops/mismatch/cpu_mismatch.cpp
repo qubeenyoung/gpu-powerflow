@@ -28,14 +28,14 @@ void CpuMismatchOp::run(CpuFp64Storage& buf, IterationContext& ctx)
 
     // mis[i] = V[i] * conj(Ibus[i]) - Sbus[i]
     auto mis_at = [&buf](int32_t i) -> std::complex<double> {
-        const std::size_t idx = static_cast<std::size_t>(i);
+        const std::size_t idx = i;
         return buf.V[idx] * std::conj(buf.Ibus[idx]) - buf.Sbus[idx];
     };
 
     int32_t k = 0;
-    for (int32_t i = 0; i < ctx.n_pv; ++i) buf.F[static_cast<std::size_t>(k++)] = mis_at(ctx.pv[i]).real();
-    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[static_cast<std::size_t>(k++)] = mis_at(ctx.pq[i]).real();
-    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[static_cast<std::size_t>(k++)] = mis_at(ctx.pq[i]).imag();
+    for (int32_t i = 0; i < ctx.n_pv; ++i) buf.F[k++] = mis_at(ctx.pv[i]).real();
+    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[k++] = mis_at(ctx.pq[i]).real();
+    for (int32_t i = 0; i < ctx.n_pq; ++i) buf.F[k++] = mis_at(ctx.pq[i]).imag();
 }
 
 
