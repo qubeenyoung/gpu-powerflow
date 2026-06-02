@@ -424,12 +424,18 @@ __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plc
         __syncthreads();
         for (int k = t; k < nc; k += nt) y[fr[k]] = sh_piv[k];
     } else {
-        if (t == 0) {
+        // WARP-PARALLEL forward substitution L_pp * sh_piv = rhs (nc<=32). Replaces the serial
+        // thread-0 O(nc^2) loop that bottlenecked the amalgamated (big-nc) solve: lane k finalizes
+        // sh_piv[k] = rhs[k] - sum_{i<k} L[k][i] sh_piv[i], broadcasts it, and every lane j>k folds
+        // -L[j][k]*sh_piv[k] into its running partial -> O(nc) steps of O(1) parallel work.
+        if (t < 32) {
+            const int lane = t;
+            const unsigned mask = 0xffffffffu;
+            double part = 0.0, sk = 0.0;
             for (int k = 0; k < nc; ++k) {
-                double v = y[fr[k]];
-                for (int i = 0; i < k; ++i) v -= F[(long)k * fsz + i] * sh_piv[i];
-                sh_piv[k] = v;
-                y[fr[k]] = v;
+                if (lane == k) { sk = y[fr[k]] + part; sh_piv[k] = sk; y[fr[k]] = sk; }
+                sk = __shfl_sync(mask, sk, k);
+                if (lane > k && lane < nc) part -= F[(long)lane * fsz + k] * sk;
             }
         }
         __syncthreads();
@@ -491,11 +497,17 @@ __global__ void mf_bwd_level_b(int lbegin, int lend, const int* __restrict__ plc
             for (int j = k; j < nc; ++j) v += F[(long)k * fsz + j] * rhs[j];
             y[fr[k]] = v;
         }
-    } else if (t == 0) {
+    } else if (t < 32) {
+        // WARP-PARALLEL backward substitution U_pp * x = rhs (nc<=32): lane k (high->low) finalizes
+        // x[k] = (rhs[k] - sum_{j>k} U[k][j] x[j]) / U[k][k], broadcasts it, lanes i<k fold
+        // -U[i][k]*x[k] into their partial. Replaces the serial thread-0 O(nc^2) loop.
+        const int lane = t;
+        const unsigned mask = 0xffffffffu;
+        double part = 0.0, xk = 0.0;
         for (int k = nc - 1; k >= 0; --k) {
-            double v = rhs[k];
-            for (int j = k + 1; j < nc; ++j) v -= F[(long)k * fsz + j] * y[fr[j]];
-            y[fr[k]] = v / F[(long)k * fsz + k];
+            if (lane == k) { xk = (rhs[k] + part) / F[(long)k * fsz + k]; y[fr[k]] = xk; }
+            xk = __shfl_sync(mask, xk, k);
+            if (lane < k) part -= F[(long)lane * fsz + k] * xk;
         }
     }
 }
@@ -581,7 +593,10 @@ bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState&
     // Capture batched solve graph (gather -> fwd levels -> bwd levels -> scatter is done
     // outside the graph in batched_solve; here only the level kernels, like the single path).
     const int sel = st.selinv ? 1 : 0;
-    const int TS = 64;
+    // 32 threads (1 warp) per (front,batch) beats 64: the warp-parallel pivot solve uses one warp
+    // anyway and smaller blocks pack more per SM -> higher occupancy across the many B*fronts blocks.
+    const char* ts_env = std::getenv("MF_BSOLVE_TS");
+    const int TS = ts_env ? std::atoi(ts_env) : 32;
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     for (int L = 0; L < plan.num_plevels; ++L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
