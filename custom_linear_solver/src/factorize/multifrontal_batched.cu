@@ -466,29 +466,19 @@ __global__ void mf_bwd_level_b(int lbegin, int lend, const int* __restrict__ plc
     const int* fr = front_rows + s;
     const int t = threadIdx.x, nt = blockDim.x;
     const int cb = fsz - nc;
+    // CB contribution rhs[k] -= sum_j U[k][nc+j]*x[nc+j]. PARALLEL-OVER-K: cache x in dynamic shared
+    // (coalesced gather), then lane k owns ONE output (pk) -> no per-thread part[nc] register array
+    // and no nc-way warp reduction (the register pressure + reduction that made bwd the solve
+    // bottleneck). Higher occupancy; the per-lane front-row reads hit L1/L2.
+    extern __shared__ double xsh[];  // size >= cb (set per level at launch)
     __shared__ double rhs[MF_MAX_NC];
-    __shared__ double wsum[(256 / 32) * MF_REG_NC];
     for (int k = t; k < nc; k += nt) rhs[k] = y[fr[k]];
-    double part[MF_REG_NC];
-    for (int k = 0; k < nc; ++k) part[k] = 0.0;
-    for (int j = t; j < cb; j += nt) {
-        const double xj = y[fr[nc + j]];
-        for (int k = 0; k < nc; ++k) part[k] += F[(long)k * fsz + (nc + j)] * xj;
-    }
-    const int lane = t & 31, warp = t >> 5;
-    for (int k = 0; k < nc; ++k) {
-        double v = part[k];
-        for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
-        if (lane == 0) wsum[warp * nc + k] = v;
-    }
+    for (int j = t; j < cb; j += nt) xsh[j] = y[fr[nc + j]];
     __syncthreads();
-    if (t == 0) {
-        const int nw = (nt + 31) / 32;
-        for (int k = 0; k < nc; ++k) {
-            double sm = 0.0;
-            for (int w = 0; w < nw; ++w) sm += wsum[w * nc + k];
-            rhs[k] -= sm;
-        }
+    if (t < nc) {
+        double pk = 0.0;
+        for (int j = 0; j < cb; ++j) pk += F[(long)t * fsz + (nc + j)] * xsh[j];
+        rhs[t] -= pk;
     }
     __syncthreads();
     if (selinv) {
@@ -597,18 +587,26 @@ bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState&
     // anyway and smaller blocks pack more per SM -> higher occupancy across the many B*fronts blocks.
     const char* ts_env = std::getenv("MF_BSOLVE_TS");
     const int TS = ts_env ? std::atoi(ts_env) : 32;
+    const bool skip_fwd = std::getenv("MF_BSKIP_FWD") != nullptr;  // profiling
+    const bool skip_bwd = std::getenv("MF_BSKIP_BWD") != nullptr;
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-    for (int L = 0; L < plan.num_plevels; ++L) {
+    for (int L = 0; L < plan.num_plevels && !skip_fwd; ++L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
         mf_fwd_level_b<<<dim3(e - b, B), TS, 0, stream>>>(
             b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
     }
-    for (int L = plan.num_plevels - 1; L >= 0; --L) {
+    for (int L = plan.num_plevels - 1; L >= 0 && !skip_bwd; --L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
-        mf_bwd_level_b<<<dim3(e - b, B), TS, 0, stream>>>(
+        int max_cb = 1;  // dynamic shared for the bwd x-cache, sized by the level's max CB rows
+        for (int q = b; q < e; ++q) {
+            const int pp = plan.h_plcols[q];
+            const int cbq = (plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp]) - plan.h_ncols[pp];
+            if (cbq > max_cb) max_cb = cbq;
+        }
+        mf_bwd_level_b<<<dim3(e - b, B), TS, (size_t)max_cb * sizeof(double), stream>>>(
             b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
     }
