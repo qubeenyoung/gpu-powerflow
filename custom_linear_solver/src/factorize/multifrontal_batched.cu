@@ -13,43 +13,48 @@ using custom_linear_solver::plan::MultifrontalPlan;
 namespace {
 
 // ---- batched numeric scatter: front_b[a_pos[q]] += values_b[o2c[q]] ----------------
+// Templated on the front element type FT (double for FP64/Mixed/TC master, float for FP32).
+template <typename FT>
 __global__ void scatter_batched(int nnz_a, long front_total, const int* __restrict__ o2c,
                                 const int* __restrict__ a_pos, const double* __restrict__ valuesB,
-                                double* __restrict__ frontB)
+                                FT* __restrict__ frontB)
 {
     const int q = blockIdx.x * blockDim.x + threadIdx.x;
     if (q >= nnz_a) return;
     const int pos = a_pos[q];
     if (pos < 0) return;
     const long b = blockIdx.y;
-    atomicAdd(&frontB[b * front_total + pos], valuesB[b * (long)nnz_a + o2c[q]]);
+    atomicAdd(&frontB[b * front_total + pos], static_cast<FT>(valuesB[b * (long)nnz_a + o2c[q]]));
 }
 
-// ---- batched fused factor + extend-add (FP64). One block per (front, batch). ----------
+// ---- batched fused factor + extend-add. One block per (front, batch). FT = front type
+// (double = FP64 mode, float = pure-FP32 mode). The dense no-pivot LU + rank-nc trailing
+// update run in FT; the CB is extend-added into the parent front (atomicAdd). ----------
+template <typename FT>
 __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __restrict__ plcols,
                                          const int* __restrict__ front_off,
                                          const int* __restrict__ front_ptr,
                                          const int* __restrict__ ncols,
                                          const int* __restrict__ panel_parent,
                                          const int* __restrict__ asm_ptr,
-                                         const int* __restrict__ asm_local, double* frontB,
+                                         const int* __restrict__ asm_local, FT* frontB,
                                          long front_total, int* sing, int do_extend)
 {
     const int idx = lbegin + blockIdx.x;
     if (idx >= lend) return;
-    double* front = frontB + (long)blockIdx.y * front_total;
+    FT* front = frontB + (long)blockIdx.y * front_total;
     const int p = plcols[idx];
     const int s = front_ptr[p];
     const int fsz = front_ptr[p + 1] - s;
     const int nc = ncols[p];
-    double* F = front + front_off[p];
+    FT* F = front + front_off[p];
     const int t = threadIdx.x, nt = blockDim.x;
     const int uc = fsz - nc;
 
     if (fsz <= 48) {
         for (int k = 0; k < nc; ++k) {
-            double piv = F[(long)k * fsz + k];
-            if (piv == 0.0) { if (t == 0) *sing = 1; piv = 1.0; }
+            FT piv = F[(long)k * fsz + k];
+            if (piv == FT(0)) { if (t == 0) *sing = 1; piv = FT(1); }
             for (int i = k + 1 + t; i < fsz; i += nt) F[(long)i * fsz + k] /= piv;
             __syncthreads();
             const int m = fsz - k - 1;
@@ -61,8 +66,8 @@ __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __rest
         }
     } else {
         for (int k = 0; k < nc; ++k) {
-            double piv = F[(long)k * fsz + k];
-            if (piv == 0.0) { if (t == 0) *sing = 1; piv = 1.0; }
+            FT piv = F[(long)k * fsz + k];
+            if (piv == FT(0)) { if (t == 0) *sing = 1; piv = FT(1); }
             for (int i = k + 1 + t; i < fsz; i += nt) F[(long)i * fsz + k] /= piv;
             __syncthreads();
             const int pc = nc - 1 - k;
@@ -75,7 +80,7 @@ __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __rest
         for (int k = 1; k < nc; ++k) {
             for (int e = t; e < uc; e += nt) {
                 const int jj = nc + e;
-                double v = F[(long)k * fsz + jj];
+                FT v = F[(long)k * fsz + jj];
                 for (int i = 0; i < k; ++i) v -= F[(long)k * fsz + i] * F[(long)i * fsz + jj];
                 F[(long)k * fsz + jj] = v;
             }
@@ -83,7 +88,7 @@ __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __rest
         }
         for (int e = t; e < uc * uc; e += nt) {
             const int ii = nc + e / uc, jj = nc + e % uc;
-            double acc = 0;
+            FT acc = FT(0);
             for (int k = 0; k < nc; ++k) acc += F[(long)ii * fsz + k] * F[(long)k * fsz + jj];
             F[(long)ii * fsz + jj] -= acc;
         }
@@ -91,7 +96,7 @@ __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __rest
     const int par = panel_parent[p];
     if (par < 0 || !do_extend) return;
     __syncthreads();
-    double* Fp = front + front_off[par];
+    FT* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
     const int abase = asm_ptr[p];
     for (int e = t; e < uc * uc; e += nt) {
@@ -345,38 +350,42 @@ __global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __r
     }
 }
 
+// Invert each front's nc x nc pivot block (Uinv upper incl. diag, Linv unit-lower) so the solve
+// applies them as parallel GEMVs (selinv). FT = front type; the inverse is computed in double for
+// stability and stored back in FT. One block per (front,batch), one thread per inverse column.
+template <typename FT>
 __global__ void mf_invert_pivot_b(int npanels, const int* __restrict__ front_ptr,
                                   const int* __restrict__ front_off, const int* __restrict__ ncols,
-                                  double* frontB, long front_total)
+                                  FT* frontB, long front_total)
 {
     const int p = blockIdx.x;
     if (p >= npanels) return;
-    double* front = frontB + (long)blockIdx.y * front_total;
+    FT* front = frontB + (long)blockIdx.y * front_total;
     const int s = front_ptr[p];
     const int fsz = front_ptr[p + 1] - s;
     const int nc = ncols[p];
-    double* F = front + front_off[p];
+    FT* F = front + front_off[p];
     const int j = threadIdx.x;
     __shared__ double Ui[MF_REG_NC * MF_REG_NC];
     __shared__ double Li[MF_REG_NC * MF_REG_NC];
     if (j < nc) {
-        Ui[j * nc + j] = 1.0 / F[(long)j * fsz + j];
+        Ui[j * nc + j] = 1.0 / static_cast<double>(F[(long)j * fsz + j]);
         for (int i = j - 1; i >= 0; --i) {
             double v = 0.0;
-            for (int k = i + 1; k <= j; ++k) v -= F[(long)i * fsz + k] * Ui[k * nc + j];
-            Ui[i * nc + j] = v / F[(long)i * fsz + i];
+            for (int k = i + 1; k <= j; ++k) v -= static_cast<double>(F[(long)i * fsz + k]) * Ui[k * nc + j];
+            Ui[i * nc + j] = v / static_cast<double>(F[(long)i * fsz + i]);
         }
         Li[j * nc + j] = 1.0;
         for (int i = j + 1; i < nc; ++i) {
             double v = 0.0;
-            for (int k = j; k < i; ++k) v -= F[(long)i * fsz + k] * Li[k * nc + j];
+            for (int k = j; k < i; ++k) v -= static_cast<double>(F[(long)i * fsz + k]) * Li[k * nc + j];
             Li[i * nc + j] = v;
         }
     }
     __syncthreads();
     if (j < nc) {
-        for (int i = 0; i <= j; ++i) F[(long)i * fsz + j] = Ui[i * nc + j];
-        for (int i = j + 1; i < nc; ++i) F[(long)i * fsz + j] = Li[i * nc + j];
+        for (int i = 0; i <= j; ++i) F[(long)i * fsz + j] = static_cast<FT>(Ui[i * nc + j]);
+        for (int i = j + 1; i < nc; ++i) F[(long)i * fsz + j] = static_cast<FT>(Li[i * nc + j]);
     }
 }
 
@@ -398,20 +407,23 @@ __global__ void scatter_sol_b(int n, const double* __restrict__ yB, const int* _
     solB[b * (long)n + perm[k]] = yB[b * n + k];
 }
 
+// Forward solve level (L y = b). FT = front type (read in FT, accumulated in double; the y
+// working vector stays double). selinv -> apply L_pp^-1 as a GEMV; else warp-parallel substitution.
+template <typename FT>
 __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plcols,
                               const int* __restrict__ front_off, const int* __restrict__ front_ptr,
                               const int* __restrict__ ncols, const int* __restrict__ front_rows,
-                              const double* frontB, double* yB, long front_total, int n, int selinv)
+                              const FT* frontB, double* yB, long front_total, int n, int selinv)
 {
     const int idx = lbegin + blockIdx.x;
     if (idx >= lend) return;
-    const double* front = frontB + (long)blockIdx.y * front_total;
+    const FT* front = frontB + (long)blockIdx.y * front_total;
     double* y = yB + (long)blockIdx.y * n;
     const int p = plcols[idx];
     const int s = front_ptr[p];
     const int fsz = front_ptr[p + 1] - s;
     const int nc = ncols[p];
-    const double* F = front + front_off[p];
+    const FT* F = front + front_off[p];
     const int* fr = front_rows + s;
     const int t = threadIdx.x, nt = blockDim.x;
     __shared__ double sh_piv[64];
@@ -449,20 +461,23 @@ __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plc
 
 constexpr int MF_MAX_NC = 64;
 
+// Backward solve level (U x = y). FT = front type (read in FT, accumulated in double; y stays
+// double). selinv -> apply U_pp^-1 as a GEMV; else warp-parallel substitution.
+template <typename FT>
 __global__ void mf_bwd_level_b(int lbegin, int lend, const int* __restrict__ plcols,
                               const int* __restrict__ front_off, const int* __restrict__ front_ptr,
                               const int* __restrict__ ncols, const int* __restrict__ front_rows,
-                              const double* frontB, double* yB, long front_total, int n, int selinv)
+                              const FT* frontB, double* yB, long front_total, int n, int selinv)
 {
     const int idx = lbegin + blockIdx.x;
     if (idx >= lend) return;
-    const double* front = frontB + (long)blockIdx.y * front_total;
+    const FT* front = frontB + (long)blockIdx.y * front_total;
     double* y = yB + (long)blockIdx.y * n;
     const int p = plcols[idx];
     const int s = front_ptr[p];
     const int fsz = front_ptr[p + 1] - s;
     const int nc = ncols[p];
-    const double* F = front + front_off[p];
+    const FT* F = front + front_off[p];
     const int* fr = front_rows + s;
     const int t = threadIdx.x, nt = blockDim.x;
     const int cb = fsz - nc;
@@ -515,19 +530,21 @@ BatchedState::~BatchedState()
     if (stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
 }
 
-bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState& st)
+bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, BatchedState& st)
 {
     if (plan.num_panels == 0 || B <= 0) return false;
-    const bool tc = std::getenv("MF_TC") != nullptr;  // FP16 tensor-core trailing (implies mixed)
-    if (tc) fp32 = true;
     st.B = B;
     st.front_total = plan.front_total;
     st.n = plan.n;
-    st.fp32 = fp32;
+    st.prec = prec;
     st.selinv = std::getenv("MF_NO_SELINV") == nullptr;
+    const bool pure_fp32 = (prec == BatchPrecision::FP32);
+    const bool need_double = (prec != BatchPrecision::FP32);              // FP64 front or Mixed/TC master
+    const bool need_float = (prec == BatchPrecision::FP32 || prec == BatchPrecision::Mixed ||
+                             prec == BatchPrecision::TC);                 // FP32 front or Mixed/TC working
     const long fe = (long)B * plan.front_total;
-    if (cudaMalloc(&st.d_frontB, fe * sizeof(double)) != cudaSuccess) return false;
-    if (fp32 && cudaMalloc(&st.d_frontBf, fe * sizeof(float)) != cudaSuccess) return false;
+    if (need_double && cudaMalloc(&st.d_frontB, fe * sizeof(double)) != cudaSuccess) return false;
+    if (need_float && cudaMalloc(&st.d_frontBf, fe * sizeof(float)) != cudaSuccess) return false;
     if (cudaMalloc(&st.d_yB, (long)B * plan.n * sizeof(double)) != cudaSuccess) return false;
     if (cudaMalloc(&st.d_sing, sizeof(int)) != cudaSuccess) return false;
     cudaStream_t stream;
@@ -536,43 +553,63 @@ bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState&
 
     const int T = 128;
     const int do_extend = 1;
-    // Capture batched factor graph: per level, gridDim=(level_size, B).
+    // Capture batched factor graph: per level, gridDim=(level_size, B); kernel chosen by precision.
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     for (int L = 0; L < plan.num_plevels; ++L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
         dim3 grid(e - b, B);
-        if (tc) {
-            // per-level max uc (= dynamic-shared Uh stride) so small-front levels use little shared.
-            int max_uc = 1;  // only WMMA-eligible fronts (uc<=256, nc<=32) use the shared staging
-            for (int q = b; q < e; ++q) {
-                const int pp = plan.h_plcols[q];
-                const int fsz = plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp];
-                const int nc = plan.h_ncols[pp];
-                const int uc = fsz - nc;
-                if (uc > max_uc && uc <= 256 && nc <= 32) max_uc = uc;
+        switch (prec) {
+            case BatchPrecision::FP64:
+                mf_factor_extend_level_b<double><<<grid, T, 0, stream>>>(
+                    b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB,
+                    plan.front_total, st.d_sing, do_extend);
+                break;
+            case BatchPrecision::FP32:
+                mf_factor_extend_level_b<float><<<grid, T, 0, stream>>>(
+                    b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                    plan.front_total, st.d_sing, do_extend);
+                break;
+            case BatchPrecision::Mixed:
+                mf_factor_extend_mixed_b<<<grid, T, 0, stream>>>(
+                    b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,
+                    plan.front_total, st.d_sing, do_extend);
+                break;
+            case BatchPrecision::TC: {
+                // per-level max uc (= dynamic-shared Uh stride) so small-front levels use little shared.
+                int max_uc = 1;  // only WMMA-eligible fronts (uc<=256, nc<=32) use the shared staging
+                for (int q = b; q < e; ++q) {
+                    const int pp = plan.h_plcols[q];
+                    const int fsz = plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp];
+                    const int nc = plan.h_ncols[pp];
+                    const int uc = fsz - nc;
+                    if (uc > max_uc && uc <= 256 && nc <= 32) max_uc = uc;
+                }
+                const int ucp_max = ((max_uc + 15) / 16) * 16;
+                const size_t shbytes =
+                    (size_t)2 * ucp_max * 32 * sizeof(__half) + 4 * 256 * sizeof(float);
+                mf_factor_extend_mixed_tc_b<<<grid, 128, shbytes, stream>>>(
+                    b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,
+                    plan.front_total, st.d_sing, do_extend, ucp_max);
+                break;
             }
-            const int ucp_max = ((max_uc + 15) / 16) * 16;
-            const size_t shbytes = (size_t)2 * ucp_max * 32 * sizeof(__half) + 4 * 256 * sizeof(float);
-            mf_factor_extend_mixed_tc_b<<<grid, 128, shbytes, stream>>>(
-                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,
-                plan.front_total, st.d_sing, do_extend, ucp_max);
-        } else if (fp32)
-            mf_factor_extend_mixed_b<<<grid, T, 0, stream>>>(
-                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,
-                plan.front_total, st.d_sing, do_extend);
-        else
-            mf_factor_extend_level_b<<<grid, T, 0, stream>>>(
-                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB,
-                plan.front_total, st.d_sing, do_extend);
+        }
     }
-    if (st.selinv)
-        mf_invert_pivot_b<<<dim3(plan.num_panels, B), 32, 0, stream>>>(
-            plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, st.d_frontB,
-            plan.front_total);
+    if (st.selinv) {
+        const dim3 ig(plan.num_panels, B);
+        if (pure_fp32)
+            mf_invert_pivot_b<float><<<ig, 32, 0, stream>>>(
+                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, st.d_frontBf,
+                plan.front_total);
+        else
+            mf_invert_pivot_b<double><<<ig, 32, 0, stream>>>(
+                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, st.d_frontB,
+                plan.front_total);
+    }
     cudaGraph_t g;
     cudaStreamEndCapture(stream, &g);
     cudaGraphExec_t ge;
@@ -587,12 +624,20 @@ bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState&
     // smaller blocks pack more per SM -> higher occupancy across the many B*fronts blocks (swept).
     const int TS = 32;
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+    // The solve reads the front the factor produced: the FP32 front (pure-FP32 mode) or the FP64
+    // front / master (all other modes).
     for (int L = 0; L < plan.num_plevels; ++L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
-        mf_fwd_level_b<<<dim3(e - b, B), TS, 0, stream>>>(
-            b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-            plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
+        const dim3 fg(e - b, B);
+        if (pure_fp32)
+            mf_fwd_level_b<float><<<fg, TS, 0, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_front_rows, st.d_frontBf, st.d_yB, plan.front_total, plan.n, sel);
+        else
+            mf_fwd_level_b<double><<<fg, TS, 0, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
     }
     for (int L = plan.num_plevels - 1; L >= 0; --L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
@@ -603,9 +648,16 @@ bool batched_setup(const MultifrontalPlan& plan, int B, bool fp32, BatchedState&
             const int cbq = (plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp]) - plan.h_ncols[pp];
             if (cbq > max_cb) max_cb = cbq;
         }
-        mf_bwd_level_b<<<dim3(e - b, B), TS, (size_t)max_cb * sizeof(double), stream>>>(
-            b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-            plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
+        const dim3 bg(e - b, B);
+        const size_t bsh = (size_t)max_cb * sizeof(double);
+        if (pure_fp32)
+            mf_bwd_level_b<float><<<bg, TS, bsh, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_front_rows, st.d_frontBf, st.d_yB, plan.front_total, plan.n, sel);
+        else
+            mf_bwd_level_b<double><<<bg, TS, bsh, stream>>>(
+                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
     }
     cudaGraph_t sg;
     cudaStreamEndCapture(stream, &sg);
@@ -625,11 +677,20 @@ bool batched_factorize(const MultifrontalPlan& plan, BatchedState& st, const dou
     cudaEventCreate(&k0);
     cudaEventCreate(&k1);
     cudaEventRecord(k0, stream);
-    cudaMemsetAsync(st.d_frontB, 0, fe * sizeof(double), stream);
+    // Zero + scatter A into the front the factor graph consumes: the FP32 front (pure-FP32) or the
+    // FP64 front / master (all other modes; the FP32 working arena is overwritten per front).
     cudaMemsetAsync(st.d_sing, 0, sizeof(int), stream);
     const int T = 256;
-    scatter_batched<<<dim3((plan.nnz_a + T - 1) / T, st.B), T, 0, stream>>>(
-        plan.nnz_a, plan.front_total, d_o2c, plan.d_a_pos, d_valuesB, st.d_frontB);
+    const dim3 sgrid((plan.nnz_a + T - 1) / T, st.B);
+    if (st.prec == BatchPrecision::FP32) {
+        cudaMemsetAsync(st.d_frontBf, 0, fe * sizeof(float), stream);
+        scatter_batched<float><<<sgrid, T, 0, stream>>>(plan.nnz_a, plan.front_total, d_o2c,
+                                                        plan.d_a_pos, d_valuesB, st.d_frontBf);
+    } else {
+        cudaMemsetAsync(st.d_frontB, 0, fe * sizeof(double), stream);
+        scatter_batched<double><<<sgrid, T, 0, stream>>>(plan.nnz_a, plan.front_total, d_o2c,
+                                                         plan.d_a_pos, d_valuesB, st.d_frontB);
+    }
     cudaGraphLaunch(static_cast<cudaGraphExec_t>(st.factor_graph_exec), stream);
     cudaEventRecord(k1, stream);
     cudaEventSynchronize(k1);

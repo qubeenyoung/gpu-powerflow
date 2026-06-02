@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "factorize/multifrontal_batched.hpp"
 #include "io.hpp"
 #include "solver.hpp"
 
@@ -304,8 +305,14 @@ int main(int argc, char** argv)
         if (options.batch > 0) {
             const int B = options.batch;
             const int n = matrix.rows, nnz = matrix.nnz();
-            const bool mixed = std::getenv("MF_NO_MIXED") == nullptr &&
-                               (std::getenv("MF_MIXED") != nullptr || n < 24000);
+            // Map env knobs to the batch precision mode. Default: Mixed for small/medium (it passes
+            // 1e-3 without refinement), FP64 for large. MF_TC / MF_FP32 / MF_MIXED / MF_NO_MIXED force.
+            using cls::factorize::BatchPrecision;
+            BatchPrecision prec = (n < 24000) ? BatchPrecision::Mixed : BatchPrecision::FP64;
+            if (std::getenv("MF_NO_MIXED")) prec = BatchPrecision::FP64;
+            if (std::getenv("MF_FP32")) prec = BatchPrecision::FP32;
+            if (std::getenv("MF_MIXED")) prec = BatchPrecision::Mixed;
+            if (std::getenv("MF_TC")) prec = BatchPrecision::TC;
             // B identical copies (same pattern + values) -> each batch solves the same system,
             // so the per-batch residual must match the single-system solve (correctness check).
             std::vector<double> hvalB((std::size_t)B * nnz), hrhsB((std::size_t)B * n);
@@ -317,7 +324,7 @@ int main(int argc, char** argv)
             d_valB.upload(hvalB);
             d_rhsB.upload(hrhsB);
             d_solB.allocate((std::size_t)B * n);
-            require_success(solver.batched_setup(B, mixed), "batched_setup");
+            require_success(solver.batched_setup(B, prec), "batched_setup");
             std::vector<double> bf, bs;
             for (int r = 0; r < options.repeat; ++r) {
                 double kf = 0, ks = 0;

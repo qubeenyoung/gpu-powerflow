@@ -6,6 +6,8 @@
 
 namespace custom_linear_solver {
 
+namespace factorize { enum class BatchPrecision; }  // FP64 / FP32 / Mixed / TC (defined in batched hdr)
+
 enum class Status {
     Success,
     InvalidValue,
@@ -49,7 +51,7 @@ public:
     // Uniform-batch path (research): B systems sharing this analyzed sparsity pattern.
     // setup once after analyze(); then factorize/solve all B at once. Device buffers are
     // batch-strided: valuesB[b*nnz + .], rhsB[b*n + .], solB[b*n + .].
-    Status batched_setup(int batch, bool fp32);
+    Status batched_setup(int batch, factorize::BatchPrecision prec);
     Status batched_factorize(const double* d_valuesB, double* kernel_ms = nullptr);
     Status batched_solve(const double* d_rhsB, double* d_solB, double* kernel_ms = nullptr);
 

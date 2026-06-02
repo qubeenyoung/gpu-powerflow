@@ -426,11 +426,11 @@ Status Solver::solve(double* kernel_ms)
     }
 }
 
-Status Solver::batched_setup(int batch, bool fp32)
+Status Solver::batched_setup(int batch, custom_linear_solver::factorize::BatchPrecision prec)
 {
     if (!impl_ || !impl_->analyzed) return Status::InvalidState;
     if (batch <= 0) return Status::InvalidValue;
-    return custom_linear_solver::factorize::batched_setup(impl_->plan, batch, fp32, impl_->batched)
+    return custom_linear_solver::factorize::batched_setup(impl_->plan, batch, prec, impl_->batched)
                ? Status::Success
                : Status::AllocationFailed;
 }

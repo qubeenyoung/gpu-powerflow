@@ -14,14 +14,24 @@
 // matter (the single-system path is latency-bound, not compute-bound).
 namespace custom_linear_solver::factorize {
 
+// The four factorization precision modes. The batched solve always reads the front the factor
+// produced (FP64 front for FP64; FP32 front for FP32; the FP64 master for Mixed/TC):
+//   FP64  - everything double. Reference accuracy (~1e-13), slowest factor.
+//   FP32  - the whole front is float (no FP64 master). Fastest/least accurate (~1e-4..1e-2).
+//   Mixed - FP64 master front (precise assembly/solve) + FP32 working LU. GA102 FP64 is 1/64
+//           FP32, so the LU bulk is far cheaper while pivots/assembly stay precise (~1e-5..1e-3).
+//   TC    - like Mixed but the dense trailing update is an FP16 tensor-core (WMMA) GEMM; needs
+//           the deep-K amalgamation (Solver::analyze) to be worthwhile (~1e-3..1e-1).
+enum class BatchPrecision { FP64, FP32, Mixed, TC };
+
 struct BatchedState {
     int B = 0;
     long front_total = 0;
     int n = 0;
-    bool fp32 = false;
+    BatchPrecision prec = BatchPrecision::FP64;
     bool selinv = false;
-    double* d_frontB = nullptr;   // B * front_total (FP64 master)
-    float* d_frontBf = nullptr;   // B * front_total (FP32 working, mixed factor)
+    double* d_frontB = nullptr;   // B * front_total FP64 front (FP64 mode) or FP64 master (Mixed/TC)
+    float* d_frontBf = nullptr;   // B * front_total FP32 front (FP32 mode) or FP32 working (Mixed/TC)
     double* d_yB = nullptr;       // B * n (solve working vector)
     int* d_sing = nullptr;
     void* stream = nullptr;
@@ -34,8 +44,8 @@ struct BatchedState {
 };
 
 // Allocate batched arenas and capture the batched factor + solve CUDA graphs for B systems.
-bool batched_setup(const custom_linear_solver::plan::MultifrontalPlan& plan, int B, bool fp32,
-                   BatchedState& state);
+bool batched_setup(const custom_linear_solver::plan::MultifrontalPlan& plan, int B,
+                   BatchPrecision prec, BatchedState& state);
 
 // Factorize all B systems. d_valuesB is B*nnz_a FP64 CSR values (batch b at b*nnz_a).
 bool batched_factorize(const custom_linear_solver::plan::MultifrontalPlan& plan,
