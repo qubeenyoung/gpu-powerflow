@@ -81,13 +81,15 @@ __global__ void mf_factor_small_warp_b(int lbegin, int level_size, int B, int fs
     const int fsz2 = fsz * fsz;
     FT* Fs = smem_sw + (long)warp_in_blk * fsz2cap;
 
-    for (int e = lane; e < fsz2; e += 32) Fs[e] = F[e];  // coalesced stage-in
+    // Stage the front into per-warp shared (coalesced), factor it there, write back only the L/U
+    // the solve reads -- the CB stays in shared for the extend-add below.
+    for (int e = lane; e < fsz2; e += 32) Fs[e] = F[e];
     __syncwarp();
     lu_small_warp<FT>(Fs, fsz, nc, lane, sing);
     __syncwarp();
-    // Write back only the L/U the solve reads; the CB stays in shared for the extend-add below.
     writeback_factored<FT, FT>(F, Fs, fsz, nc, uc, lane, 32);
 
+    // Extend-add this front's CB (from shared) into the parent.
     const int par = panel_parent[p];
     if (par < 0 || !do_extend) return;
     FT* Fp = front + front_off[par];

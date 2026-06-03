@@ -11,6 +11,13 @@
 #include <thrust/sort.h>
 #include <thrust/unique.h>
 
+// ============================================================================
+// Analyze-phase device pattern kernels: device CSR -> CSC, fill-reducing permutation of a CSC
+// pattern, and the symmetric (A+Aᵀ) adjacency graph METIS consumes. All run on the GPU so the
+// only host transfers in analyze are the small permutation arrays. source_pos[] threads each
+// CSC entry back to its CSR slot so factorize can scatter values without rebuilding the map.
+// ============================================================================
+
 namespace custom_linear_solver::matrix {
 namespace {
 
@@ -19,6 +26,7 @@ Status cuda_status(cudaError_t err)
     return err == cudaSuccess ? Status::Success : Status::AnalysisFailed;
 }
 
+// Tally per-column nnz into shifted_counts[col+1] (an inclusive scan later makes col_ptr).
 __global__ void count_csr_columns(int nnz, const int* __restrict__ csr_col_idx,
                                   int* __restrict__ shifted_counts)
 {
@@ -26,6 +34,8 @@ __global__ void count_csr_columns(int nnz, const int* __restrict__ csr_col_idx,
     if (p < nnz) atomicAdd(&shifted_counts[csr_col_idx[p] + 1], 1);
 }
 
+// Scatter CSR entries into CSC slots (next_col = running write cursor per column); records the
+// source CSR position of each CSC entry in source_pos.
 __global__ void scatter_csr_to_csc(int n, const int* __restrict__ csr_row_ptr,
                                    const int* __restrict__ csr_col_idx,
                                    int* __restrict__ next_col, int* __restrict__ csc_row_idx,
@@ -41,6 +51,7 @@ __global__ void scatter_csr_to_csc(int n, const int* __restrict__ csr_row_ptr,
     }
 }
 
+// Per-column size of the permuted matrix: new column iperm[old] keeps old column's nnz.
 __global__ void count_permuted_columns(int n, const int* __restrict__ col_ptr,
                                        const int* __restrict__ iperm,
                                        int* __restrict__ shifted_counts)
@@ -51,6 +62,8 @@ __global__ void count_permuted_columns(int n, const int* __restrict__ col_ptr,
     shifted_counts[new_col + 1] = col_ptr[old_col + 1] - col_ptr[old_col];
 }
 
+// Copy old column old_col into new column iperm[old_col], remapping row indices through iperm and
+// carrying source_pos along. One block per column.
 __global__ void fill_permuted_csc(int n, const int* __restrict__ in_col_ptr,
                                   const int* __restrict__ in_row_idx,
                                   const int* __restrict__ in_source_pos,
@@ -111,6 +124,9 @@ __global__ void decode_edges(long m, long long N, const unsigned long long* __re
 
 }  // namespace
 
+// Build the symmetric (A+Aᵀ) adjacency graph METIS needs, on the GPU.
+//   In : device CSC pattern.  Out: host CSR-style xadj[n+1] / adjncy (deduped, diagonal removed).
+// Method: emit both directed edge keys per entry, sort+unique, decode key%N -> neighbor.
 Status build_symmetric_graph_device(const DeviceCscPattern& csc, std::vector<int>& xadj,
                                     std::vector<int>& adjncy)
 {
@@ -233,6 +249,8 @@ Status IntDeviceBuffer::upload(const std::vector<int>& values)
                                   cudaMemcpyHostToDevice));
 }
 
+// Convert a device CSR pattern to CSC (count -> scan -> scatter), recording source_pos.
+//   In : device CSR row_ptr/col_idx.  Out: csc (col_ptr/row_idx/source_pos on device).
 Status build_csc_from_csr_device(int n, int nnz, const int* d_csr_row_ptr,
                                  const int* d_csr_col_idx, DeviceCscPattern& csc)
 {
@@ -278,6 +296,8 @@ Status build_csc_from_csr_device(int n, int nnz, const int* d_csr_row_ptr,
     return cuda_status(cudaGetLastError());
 }
 
+// Apply the fill-reducing permutation to a device CSC pattern (count -> scan -> fill).
+//   In : csc + d_iperm (old->new index).  Out: ordered CSC with source_pos preserved.
 Status permute_csc_device(const DeviceCscPattern& csc, const int* d_iperm,
                           DeviceCscPattern& ordered)
 {

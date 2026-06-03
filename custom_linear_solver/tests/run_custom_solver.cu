@@ -28,6 +28,7 @@ struct Options {
     int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
     bool batch_only = false;  // skip the single-system factor/solve (e.g. nc>16 amalgamation)
     bool single_fp32 = false;
+    bool mixed = false;  // FP64 data, FP64-master + FP32-working LU
 };
 
 template <typename T>
@@ -135,7 +136,8 @@ Options parse_args(int argc, char** argv)
             const std::string value = argv[i];
             if (value == "fp64") options.single_fp32 = false;
             else if (value == "fp32") options.single_fp32 = true;
-            else throw std::runtime_error("--single-precision must be fp64 or fp32");
+            else if (value == "mixed") { options.single_fp32 = false; options.mixed = true; }
+            else throw std::runtime_error("--single-precision must be fp64, fp32 or mixed");
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -255,7 +257,9 @@ int main(int argc, char** argv)
 
         cls::SolverConfig solver_config;
         solver_config.single_precision =
-            options.single_fp32 ? cls::SinglePrecision::FP32 : cls::SinglePrecision::FP64;
+            options.single_fp32 ? cls::SinglePrecision::FP32
+                                : (options.mixed ? cls::SinglePrecision::Mixed
+                                                 : cls::SinglePrecision::FP64);
         cls::Solver solver(solver_config);
         cls::CsrMatrixView matrix_view;
         matrix_view.nrows = matrix.rows;

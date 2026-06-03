@@ -43,8 +43,9 @@ __global__ void mf_fwd_small_warp_b(int lbegin, int level_size, int B, int slab,
     const int nc = ncols[p];
     const FT* F = front + front_off[p];
     const int* fr = front_rows + s;
-    FT* sh_piv = slabs + (long)warp_in_blk * slab;
+    FT* sh_piv = slabs + (long)warp_in_blk * slab;  // this warp's resolved pivot values
 
+    // Resolve the nc pivot rows (selinv: GEMV with L_pp^-1; else lane-parallel substitution).
     if (selinv) {
         for (int k = lane; k < nc; k += 32) {
             FT v = y[fr[k]];
@@ -62,6 +63,8 @@ __global__ void mf_fwd_small_warp_b(int lbegin, int level_size, int B, int slab,
         }
     }
     __syncwarp();
+
+    // Subtract the pivots' effect from the CB / ancestor rows: y[anc] -= L * sh_piv.
     for (int i = nc + lane; i < fsz; i += 32) {
         FT upd = FT(0);
         for (int k = 0; k < nc; ++k) upd += F[(long)i * fsz + k] * sh_piv[k];
@@ -98,15 +101,20 @@ __global__ void mf_bwd_small_warp_b(int lbegin, int level_size, int B, int slab,
     FT* rhs = slabs + (long)warp_in_blk * slab;  // [0,nc)
     FT* xsh = rhs + 64;                           // [0,cb)
 
+    // Load pivot RHS and cache the ancestor x values (coalesced) in shared.
     for (int k = lane; k < nc; k += 32) rhs[k] = y[fr[k]];
     for (int j = lane; j < cb; j += 32) xsh[j] = y[fr[nc + j]];
     __syncwarp();
+
+    // Subtract the CB contribution: rhs[k] -= sum_j U[k][nc+j] * x[nc+j] (lane k owns one output).
     if (lane < nc) {
         FT pk = FT(0);
         for (int j = 0; j < cb; ++j) pk += F[(long)lane * fsz + (nc + j)] * xsh[j];
         rhs[lane] -= pk;
     }
     __syncwarp();
+
+    // Solve the nc pivot rows (selinv: GEMV with U_pp^-1; else lane-parallel back-substitution).
     if (selinv) {
         for (int k = lane; k < nc; k += 32) {
             FT v = FT(0);

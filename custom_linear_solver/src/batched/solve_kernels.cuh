@@ -58,7 +58,9 @@ __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plc
     const FT* F = front + front_off[p];
     const int* fr = front_rows + s;
     const int t = threadIdx.x, nt = blockDim.x;
-    __shared__ FT sh_piv[64];
+    __shared__ FT sh_piv[64];  // resolved pivot values, shared with the CB-update loop below
+
+    // Resolve this front's nc pivot rows into sh_piv (selinv: GEMV with L_pp^-1; else substitution).
     if (selinv) {
         for (int k = t; k < nc; k += nt) {
             FT v = y[fr[k]];
@@ -84,6 +86,8 @@ __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plc
         }
         __syncthreads();
     }
+
+    // Subtract the pivots' effect (L panel) from the CB / ancestor rows: y[anc] -= L * sh_piv.
     for (int i = nc + t; i < fsz; i += nt) {
         FT upd = FT(0);
         for (int k = 0; k < nc; ++k) upd += F[(long)i * fsz + k] * sh_piv[k];
@@ -131,6 +135,8 @@ __global__ void mf_bwd_level_b(int lbegin, int lend, const int* __restrict__ plc
         rhs[t] -= pk;
     }
     __syncthreads();
+
+    // Solve the nc pivot rows (selinv: GEMV with U_pp^-1; else warp-parallel back-substitution).
     if (selinv) {
         for (int k = t; k < nc; k += nt) {
             FT v = FT(0);

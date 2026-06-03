@@ -20,9 +20,9 @@
 namespace custom_linear_solver::batched {
 namespace {
 
-// ---- batched fused factor + extend-add. One block per (front, batch). FT = front type
-// (double = FP64 mode, float = pure-FP32 mode). The dense no-pivot LU + rank-nc trailing
-// update run in FT; the CB is extend-added into the parent front (atomicAdd). ----------
+// Batched fused factor + extend-add: one block per (front, batch). FT = front type
+// (double=FP64, float=pure-FP32).
+//   In : frontB[] assembled values (B copies, front-major).   Out: front holds L/U; parent gets CB.
 template <typename FT>
 __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __restrict__ plcols,
                                          const int* __restrict__ front_off,
@@ -33,6 +33,7 @@ __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __rest
                                          const int* __restrict__ asm_local, FT* frontB,
                                          long front_total, int* sing, int do_extend)
 {
+    // Locate this (front, batch): blockIdx.x -> front within the level, blockIdx.y -> batch.
     const int idx = lbegin + blockIdx.x;
     if (idx >= lend) return;
     FT* front = frontB + (long)blockIdx.y * front_total;
@@ -44,6 +45,8 @@ __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __rest
     const int t = threadIdx.x, nt = blockDim.x;
     const int uc = fsz - nc;
 
+    // Dense no-pivot LU: small fronts in one rank-1 sweep; larger fronts in 3 phases
+    // (panel factor -> U-panel solve -> rank-nc trailing update).
     if (fsz <= 48) {
         lu_small_front<FT>(F, fsz, nc, t, nt, sing);
     } else {
@@ -51,6 +54,8 @@ __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __rest
         u_panel_solve<FT>(F, fsz, nc, uc, t, nt);
         trailing_update_scalar<FT>(F, fsz, nc, uc, t, nt);
     }
+
+    // Extend-add the CB into the parent (race-free: the parent is a higher, unfactored level).
     const int par = panel_parent[p];
     if (par < 0 || !do_extend) return;
     __syncthreads();
@@ -60,7 +65,8 @@ __global__ void mf_factor_extend_level_b(int lbegin, int lend, const int* __rest
     extend_add<FT, FT>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
 }
 
-// ---- batched mixed factor: FP64 master assembly, FP32 working LU --------------------
+// Batched mixed factor: FP64 master assembly + FP32 working LU.
+//   In : masterB[] (FP64).  Out: master holds L/U; parent master gets CB.  workingB[]: FP32 scratch.
 __global__ void mf_factor_extend_mixed_b(int lbegin, int lend, const int* __restrict__ plcols,
                                          const int* __restrict__ front_off,
                                          const int* __restrict__ front_ptr,
@@ -85,6 +91,8 @@ __global__ void mf_factor_extend_mixed_b(int lbegin, int lend, const int* __rest
     const int t = threadIdx.x, nt = blockDim.x;
     const int uc = fsz - nc;
     const long fsz2 = (long)fsz * fsz;
+
+    // Narrow the FP64 master into the FP32 working copy, do the dense LU in FP32.
     cast_copy<float, double>(W, M, fsz2, t, nt);
     __syncthreads();
     if (fsz <= 48) {
@@ -95,6 +103,8 @@ __global__ void mf_factor_extend_mixed_b(int lbegin, int lend, const int* __rest
         trailing_update_scalar<float>(W, fsz, nc, uc, t, nt);
     }
     __syncthreads();
+
+    // Write the FP32 L/U back to the FP64 master, then extend-add the working CB into the parent master.
     writeback_factored<double, float>(M, W, fsz, nc, uc, t, nt);
     const int par = panel_parent[p];
     if (par < 0 || !do_extend) return;
@@ -107,15 +117,12 @@ __global__ void mf_factor_extend_mixed_b(int lbegin, int lend, const int* __rest
 
 constexpr int MF_REG_NC = 32;
 
-// ---- batched MIXED factor with FP16 TENSOR-CORE (WMMA) trailing update --------------
-// Same FP64-master / FP32-working design as mf_factor_extend_mixed_b, but the dense
-// rank-nc trailing update (the compute bulk of the big fronts) is a half-precision WMMA
-// GEMM: C(uc x uc) -= L(uc x nc) * U(nc x uc), with the nc(<=16) contraction zero-padded to
-// the 16x16x16 tensor-core tile (K=16). L/U are staged FP16 in shared (padded to UCP =
-// ceil(uc/16)*16); the FP32 accumulate is subtracted back into the working front. The FP16
-// inputs make the trailing ~1e-3 accurate -> recovered by batched iterative refinement. Small
-// fronts (fsz<=48, no full 16x16 tile) keep the FP32 path. One block per (front, batch),
-// blockDim=128 (4 warps cooperate on the output tiles).
+// Batched mixed factor, FP16 TENSOR-CORE (WMMA) trailing update.
+//   In/Out: same as mf_factor_extend_mixed_b, plus dyn shared (Lh/Uh halves + Csc) sized by ucp_max.
+// Same FP64-master/FP32-working design, but the rank-nc trailing C -= L*U (the compute bulk of big
+// fronts) is a half-precision WMMA GEMM (FP32 accumulate). The FP16 inputs make the trailing ~1e-3
+// (recovered by IR); small fronts and fronts too big for the tile keep the FP32 scalar path. See the
+// Phase-3 block below for the multi-K-step tiling.
 __global__ void mf_factor_extend_mixed_tc_b(int lbegin, int lend, const int* __restrict__ plcols,
                                             const int* __restrict__ front_off,
                                             const int* __restrict__ front_ptr,
@@ -233,9 +240,12 @@ __global__ void mf_invert_pivot_b(int npanels, const int* __restrict__ front_ptr
     const int fsz = front_ptr[p + 1] - s;
     const int nc = ncols[p];
     FT* F = front + front_off[p];
-    const int j = threadIdx.x;
+    const int j = threadIdx.x;  // one thread per inverse column j
     __shared__ double Ui[MF_REG_NC * MF_REG_NC];
     __shared__ double Li[MF_REG_NC * MF_REG_NC];
+
+    // Column j of the inverses (in double for stability): Uinv by back-substitution up the
+    // column, Linv by forward-substitution down it (unit diagonal).
     if (j < nc) {
         Ui[j * nc + j] = 1.0 / static_cast<double>(F[(long)j * fsz + j]);
         for (int i = j - 1; i >= 0; --i) {
@@ -251,6 +261,8 @@ __global__ void mf_invert_pivot_b(int npanels, const int* __restrict__ front_ptr
         }
     }
     __syncthreads();
+
+    // Overwrite the pivot block in place: upper triangle <- Uinv, strict-lower <- Linv.
     if (j < nc) {
         for (int i = 0; i <= j; ++i) F[(long)i * fsz + j] = static_cast<FT>(Ui[i * nc + j]);
         for (int i = j + 1; i < nc; ++i) F[(long)i * fsz + j] = static_cast<FT>(Li[i * nc + j]);

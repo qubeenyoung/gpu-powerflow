@@ -15,6 +15,9 @@ struct MultifrontalPlan {
     bool pure_fp32 = false;
     int *d_front_off = nullptr, *d_front_ptr = nullptr, *d_ncols = nullptr;
     int *d_plcols = nullptr, *d_panel_parent = nullptr;
+    int* d_plptr = nullptr;        // device copy of plptr (num_plevels+1) for fused cooperative kernels
+    int coop_grid_solve = 0;       // resident block count for the cooperative solve megakernel (0=use per-level path)
+    int coop_grid_factor = 0;      // resident block count for the cooperative factor megakernel
     int *d_asm_ptr = nullptr, *d_asm_local = nullptr;
     int* d_a_pos = nullptr;
     int* d_sing = nullptr;

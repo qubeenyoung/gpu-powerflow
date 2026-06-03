@@ -2,6 +2,9 @@
 
 namespace custom_linear_solver::symbolic {
 
+// Group columns into supernodes: merge a postorder node into the previous one when it is that
+// node's single child and its column structure nests (exact supernodes, no padding).
+//   In: etree parent + postorder + column counts.  Out: snode_of[n], sizes, num_supernodes.
 SupernodePartition supernodes(int n, const std::vector<int>& parent,
                               const std::vector<int>& post,
                               const std::vector<int>& colcount)
@@ -42,6 +45,9 @@ SupernodePartition supernodes(int n, const std::vector<int>& parent,
     return sp;
 }
 
+// Amalgamate etree chains into panels of up to `cap` columns (relaxed supernodes). A wider cap
+// means fewer fronts / fewer solve levels, paid for in padded fill (each panel's dense block is
+// sized to its widest member). In: etree parent + column counts + cap. Out: PanelPartition.
 PanelPartition relaxed_panels(int n, const std::vector<int>& parent,
                               const std::vector<int>& colcount, int cap)
 {

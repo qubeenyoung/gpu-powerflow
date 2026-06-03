@@ -5,6 +5,8 @@
 
 namespace custom_linear_solver::symbolic {
 
+// Elimination tree of a symmetric pattern: parent[j] = the node that inherits column j's fill
+// (-1 for roots). Liu 1986, path-compressed. In: CSC pattern. Out: parent[n].
 std::vector<int> etree(int n, const int* col_ptr, const int* row_idx)
 {
     std::vector<int> parent(n, -1);
@@ -27,6 +29,8 @@ std::vector<int> etree(int n, const int* col_ptr, const int* row_idx)
     return parent;
 }
 
+// Symmetric (A+Aᵀ) adjacency pattern in CSC, per column sorted + deduped, diagonal removed.
+// In: CSC pattern. Out: sym_col_ptr[n+1] / sym_row_idx.
 void symmetric_pattern(int n, const int* col_ptr, const int* row_idx,
                        std::vector<int>& sym_col_ptr, std::vector<int>& sym_row_idx)
 {
@@ -91,6 +95,7 @@ void symmetric_pattern(int n, const int* col_ptr, const int* row_idx,
     });
 }
 
+// Postorder of the etree (children emitted before parents). In: parent[n]. Out: post[n].
 std::vector<int> postorder(const std::vector<int>& parent, int n)
 {
     // Build reversed child lists, then iterative DFS (mirrors CXSparse cs_post).
@@ -155,6 +160,8 @@ int leaf(int i, int j, const std::vector<int>& first, std::vector<int>& maxfirst
 
 }  // namespace
 
+// Exact nonzero count of each column of the Cholesky factor L (CXSparse cs_counts).
+// In: CSC pattern + etree parent + postorder. Out: colcount[n] (= |struct(j)|).
 std::vector<int> column_counts(int n, const int* col_ptr, const int* row_idx,
                                const std::vector<int>& parent,
                                const std::vector<int>& post)
@@ -202,6 +209,7 @@ std::vector<int> column_counts(int n, const int* col_ptr, const int* row_idx,
     return delta;
 }
 
+// Predicted L+U fill of a pattern (for comparing orderings): 2*nnz(L) - n.
 long predicted_fill(int n, const int* col_ptr, const int* row_idx)
 {
     if (n <= 0) {
@@ -219,6 +227,7 @@ long predicted_fill(int n, const int* col_ptr, const int* row_idx)
     return 2 * lnz - n;  // L + U proxy (symmetric: U mirrors L; subtract shared diagonal)
 }
 
+// Relabel a CSC pattern by `perm` (out node iperm[c] = old node c). In/Out: CSC patterns.
 void permute_pattern(int n, const int* col_ptr, const int* row_idx,
                      const std::vector<int>& perm,
                      std::vector<int>& out_col_ptr, std::vector<int>& out_row_idx)
@@ -244,6 +253,7 @@ void permute_pattern(int n, const int* col_ptr, const int* row_idx,
     }
 }
 
+// predicted_fill after applying `perm` (compares a candidate ordering's fill).
 long predicted_fill_perm(int n, const int* col_ptr, const int* row_idx,
                          const std::vector<int>& perm)
 {
@@ -255,6 +265,8 @@ long predicted_fill_perm(int n, const int* col_ptr, const int* row_idx,
     return predicted_fill(n, pcp.data(), pri.data());
 }
 
+// Symbolic Cholesky: the nonzero structure of each column of L, exact-sized.
+// In: CSC pattern + etree parent. Out: Lp[n+1] / Li (per-column row indices, unsorted).
 void fill_pattern(int n, const int* col_ptr, const int* row_idx,
                   const std::vector<int>& parent,
                   std::vector<int>& Lp, std::vector<int>& Li)

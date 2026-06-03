@@ -25,6 +25,11 @@ void par_panels(int lo, int hi, Fn&& fn)
 }
 }  // namespace
 
+// Build the multifrontal symbolic structure from the fill pattern + panel partition.
+//   In : Lp/Li (symbolic Cholesky), panels (amalgamated supernodes).
+//   Out: per-panel front_ptr/front_rows (sorted member+CB rows), panel_parent, and the
+//        extend-add map asm_ptr/asm_idx (where each CB row lands in the parent's front).
+// Phases are parallelized across panels where independent (see the per-block notes).
 MultifrontalSymbolic multifrontal_symbolic(int n, const std::vector<int>& Lp,
                                            const std::vector<int>& Li,
                                            const PanelPartition& panels)

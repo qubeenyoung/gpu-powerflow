@@ -17,9 +17,19 @@
 #include "solve/multifrontal.hpp"
 #include "symbolic/elimination_tree.hpp"
 
+// ============================================================================
+// Public solver facade (cuDSS-style phase API). set_data/set_rhs/set_solution register
+// device buffers; analyze() does the one-time symbolic pipeline (ordering -> etree -> fill
+// -> multifrontal plan + CUDA graphs); factorize()/solve() run the numeric phases every
+// Newton iteration. The single-system path lives in factorize/ and solve/; the batched
+// (B systems) path in batched/. This file only validates inputs and dispatches by precision.
+// ============================================================================
+
 namespace custom_linear_solver {
 namespace {
 
+// Simple parallel-for over [lo,hi): runs serially below a threshold, else splits across up
+// to 12 threads. Used for the host-side pattern permutation in analyze().
 template <typename Fn>
 void par_for(int lo, int hi, Fn&& fn)
 {
@@ -39,6 +49,9 @@ void par_for(int lo, int hi, Fn&& fn)
     for (auto& x : th) x.join();
 }
 
+// Relabel a symmetric CSC pattern into the fill-reducing order: out column new_col is old
+// column perm[new_col], with each row index mapped through iperm. (Postorder reorder ->
+// fill-neutral, so the etree/fill built on this match the device-permuted matrix.)
 void permute_symmetric_pattern(int n, const std::vector<int>& col_ptr,
                                const std::vector<int>& row_idx,
                                const std::vector<int>& perm,
@@ -173,6 +186,7 @@ Status Solver::analyze()
         const auto* d_csr_row_ptr = static_cast<const int*>(impl_->matrix.row_offsets);
         const auto* d_csr_col_idx = static_cast<const int*>(impl_->matrix.col_indices);
 
+        // --- Ordering: device CSC -> symmetric (A+Aᵀ) graph -> METIS nested dissection -> perm/iperm.
         custom_linear_solver::matrix::DeviceCscPattern csc_device;
         Status st = custom_linear_solver::matrix::build_csc_from_csr_device(
             n, nnz, d_csr_row_ptr, d_csr_col_idx, csc_device);
@@ -203,6 +217,7 @@ Status Solver::analyze()
         if (st != Status::Success) return st;
         lap("upload_perm_iperm");
 
+        // --- Symbolic (in fill-reducing order): permute the matrix, build etree + fill pattern.
         custom_linear_solver::matrix::DeviceCscPattern ordered_device;
         st = custom_linear_solver::matrix::permute_csc_device(
             csc_device, impl_->d_iperm.ptr, ordered_device);
@@ -226,6 +241,7 @@ Status Solver::analyze()
                                                      parent, Lp, Li);
         lap("fill_pattern");
 
+        // --- Plan: relaxed panels (amalgamation) + multifrontal symbolic + arena + CUDA graphs.
         impl_->plan = custom_linear_solver::factorize::analyze_multifrontal(
             n, nnz, ordered_device.col_ptr.ptr, ordered_device.row_idx.ptr, Lp, Li, parent,
             impl_->config.panel_cap,
@@ -243,6 +259,8 @@ Status Solver::analyze()
     }
 }
 
+// Numeric factorization of the registered values; dispatches to the FP32 or FP64 single-system
+// path. kernel_ms (optional) receives the GPU graph time. Replayable every Newton iteration.
 Status Solver::factorize(double* kernel_ms)
 {
     if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::InvalidState;
@@ -269,6 +287,8 @@ Status Solver::factorize(double* kernel_ms)
     }
 }
 
+// Triangular solve against the registered RHS into the solution buffer; dispatches by the
+// rhs/solution value types (FP32 path allows FP64-rhs -> FP32-solution for cuPF's Mixed step).
 Status Solver::solve(double* kernel_ms)
 {
     if (!impl_ || !impl_->has_rhs || !impl_->has_solution || !impl_->analyzed)
