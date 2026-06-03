@@ -1,9 +1,6 @@
 #include "symbolic/elimination_tree.hpp"
 
 #include <algorithm>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <thread>
 
 namespace custom_linear_solver::symbolic {
@@ -277,15 +274,7 @@ void fill_pattern(int n, const int* col_ptr, const int* row_idx,
     // EXACT per-column size (|L(:,j)| == |struct(j)|), so Lp is prefix-summed up front and
     // each column's slice [Lp[j],Lp[j+1]) is filled in place. Consumers re-sort the
     // pattern, so per-column order is free -> output is set-identical to the old version.
-    const bool tmf = std::getenv("FILL_TIME") != nullptr;
-    auto fc = std::chrono::steady_clock::now();
-    auto flap = [&](const char* nm) {
-        if (!tmf) return;
-        const auto now = std::chrono::steady_clock::now();
-        std::fprintf(stderr, "    [fill] %-14s %.2f ms\n", nm,
-                     std::chrono::duration<double, std::milli>(now - fc).count());
-        fc = now;
-    };
+    auto flap = [](const char*) {};
     const std::vector<int> post = postorder(parent, n);
     flap("postorder");
     const std::vector<int> cc = column_counts(n, col_ptr, row_idx, parent, post);

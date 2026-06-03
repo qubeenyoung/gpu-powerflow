@@ -14,8 +14,7 @@ namespace custom_linear_solver::reordering {
 // cores, ~-40% A on large matrices, fill ~= serial so F kept competitive). NOTE: METIS's
 // RNG is a thread-unsafe global -> the parallel ordering is NON-deterministic run-to-run
 // (within a run / NR loop the ordering is computed once and fixed). Production enables it
-// for the A win; reproducible-benchmark callers leave it false (serial). The env PAR_ND
-// also forces parallel (depth = its value) for A/B sweeps.
+// for the A win; reproducible-benchmark callers leave it false (serial).
 bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& perm,
               bool parallel = false, std::vector<int>* sym_col_ptr = nullptr,
               std::vector<int>* sym_row_idx = nullptr);

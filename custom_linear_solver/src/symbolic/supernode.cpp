@@ -53,11 +53,9 @@ PanelPartition relaxed_panels(int n, const std::vector<int>& parent,
     if (cap < 1) {
         cap = 1;
     }
-    // Deep-K amalgamation for tensor cores (env MF_AMALG) is done CORRECTLY in the analyze path
-    // (Solver::analyze -> amalgamation_reorder): it merges each column into its etree-PARENT
-    // supernode and reorders columns so supernodes are contiguous. (A naive "merge any consecutive
-    // columns" version is invalid -- a child's contribution block must nest in one parent front --
-    // so it is not done here.) relaxed_panels itself only does the safe chain merge below.
+    // Tensor-core-oriented deep-K amalgamation belongs in the analyze path. A naive "merge any
+    // consecutive columns" version is invalid -- a child's contribution block must nest in one
+    // parent front -- so relaxed_panels itself only does the safe chain merge below.
     // Postorder index space: an etree chain is a run of consecutive columns with
     // parent[j]==j+1. Greedily extend a panel along such a chain until it would
     // exceed `cap` columns; the panel's dense block is padded to its widest member

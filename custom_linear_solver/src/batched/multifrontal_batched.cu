@@ -1,8 +1,5 @@
 #include "batched/multifrontal_batched.hpp"
 
-#include <cstdio>
-#include <cstdlib>
-
 #include <cuda_runtime.h>
 
 // Uniform-batch multifrontal factorize + solve. The batched kernels (all front-major:
@@ -162,7 +159,7 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
     st.front_total = plan.front_total;
     st.n = plan.n;
     st.prec = prec;
-    st.selinv = std::getenv("MF_NO_SELINV") == nullptr;
+    st.selinv = true;
     const bool pure_fp32 = (prec == BatchPrecision::FP32);
     const bool need_double = (prec != BatchPrecision::FP32);              // FP64 front or Mixed/TC master
     const bool need_float = (prec == BatchPrecision::FP32 || prec == BatchPrecision::Mixed ||

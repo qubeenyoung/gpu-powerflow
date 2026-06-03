@@ -1,12 +1,6 @@
 #include "factorize/multifrontal.hpp"
 
 #include <algorithm>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
-#include <queue>
-#include <thread>
-#include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -224,12 +218,12 @@ __global__ void mf_factor_extend_mixed(int lbegin, int lend, const int* __restri
     }
 }
 
-// ---- cy147: opt-in MULTI-BLOCK big-front factor (MF_BIGMULTI) ---------------------
+// ---- cy147: multi-block big-front factor ------------------------------------------
 // onetone2's 4.5x gap is its big fronts (>=257, 68.8% of work) run one-block-each ->
 // a handful of blocks on 82 SMs (massive under-utilization). Split each big-front level
 // into 3 graph-ordered kernels so the embarrassingly-parallel trailing update (the bulk)
 // spreads many blocks per front across the GPU. The default fused path is untouched;
-// this triple runs only for big-front levels when MF_BIGMULTI is set. FP64 master only.
+// this triple runs only for big-front levels. FP64 master only.
 // (A) panel (Phase 1) + U panel (Phase 2): one block per front, sequential phases.
 __global__ void mf_bigA_panelU(int lbegin, int lend, const int* __restrict__ plcols,
                                const int* __restrict__ front_off,
@@ -275,6 +269,12 @@ __global__ void mf_bigA_panelU(int lbegin, int lend, const int* __restrict__ plc
 // ncxTS U-tile into shared so each panel value is reused TS times. One block per (TSxTS output
 // tile, front); grid.x = ceil(maxfsz/TS)^2 (out-of-range tiles early-return). blockDim = TS*TS.
 constexpr int MF_BT_TS = 16;
+constexpr int kFactorTinyThreads = 128;
+constexpr int kFactorTinyFrontCount = 1024;
+constexpr int kFactorBigThreads = 768;
+constexpr int kFactorDefaultThreads = 384;
+constexpr int kBigMultiFrontThreshold = 81;
+constexpr int kBigExtendTiles = 16;
 __global__ void mf_bigB_trailing(int lbegin, int lend, const int* __restrict__ plcols,
                                  const int* __restrict__ front_off,
                                  const int* __restrict__ front_ptr,
@@ -456,36 +456,22 @@ __global__ void mf_invert_pivot(int npanels, const int* __restrict__ front_ptr,
 
 int factor_threads_for_level(const MultifrontalPlan& plan, int L)
 {
-    const char* ft_s = std::getenv("MF_FT");
-    const int ft_force = ft_s ? std::atoi(ft_s) : 0;
-    if (ft_force) return ft_force;
-    const char* fts_s = std::getenv("MF_FT_TINY");
-    const int ft_tiny = fts_s ? std::atoi(fts_s) : 128;
-    const char* ftc_s = std::getenv("MF_FT_TINY_CNT");
-    const int ft_tiny_cnt = ftc_s ? std::atoi(ftc_s) : 1024;
     const int cnt = plan.plptr[L + 1] - plan.plptr[L];
     int mx = 0;
     for (int q = plan.plptr[L]; q < plan.plptr[L + 1]; ++q) {
         const int pp = plan.h_plcols[q];
         mx = std::max(mx, plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp]);
     }
-    if (mx >= 257) return 768;
-    if (mx <= 48 && cnt >= ft_tiny_cnt) return ft_tiny;
-    return 384;
+    if (mx >= 257) return kFactorBigThreads;
+    if (mx <= 48 && cnt >= kFactorTinyFrontCount) return kFactorTinyThreads;
+    return kFactorDefaultThreads;
 }
 
 [[maybe_unused]] void issue_factor_levels(MultifrontalPlan& plan, cudaStream_t stream)
 {
-    const int do_extend = std::getenv("MF_SKIP_EXTEND") == nullptr ? 1 : 0;
-    const char* flo_s = std::getenv("MF_FLO");
-    const char* fhi_s = std::getenv("MF_FHI");
-    const int flo = flo_s ? std::atoi(flo_s) : 0;
-    const int fhi = fhi_s ? std::atoi(fhi_s) : plan.num_plevels;
-    const bool bigmulti = std::getenv("MF_NO_BIGMULTI") == nullptr;
-    const char* mbt_s = std::getenv("MB_THRESH");
-    const int mb_thresh = mbt_s ? std::atoi(mbt_s) : 81;
+    constexpr int do_extend = 1;
 
-    for (int L = flo; L < fhi; ++L) {
+    for (int L = 0; L < plan.num_plevels; ++L) {
         const int b = plan.plptr[L];
         const int e = plan.plptr[L + 1];
         if (e <= b) continue;
@@ -494,7 +480,7 @@ int factor_threads_for_level(const MultifrontalPlan& plan, int L)
         for (int q = b; q < e; ++q)
             mxf = std::max(mxf, plan.h_front_ptr[plan.h_plcols[q] + 1] -
                                     plan.h_front_ptr[plan.h_plcols[q]]);
-        if (bigmulti && !plan.fp32 && !plan.pure_fp32 && mxf >= mb_thresh) {
+        if (!plan.fp32 && !plan.pure_fp32 && mxf >= kBigMultiFrontThreshold) {
             mf_bigA_panelU<<<e - b, T, 0, stream>>>(b, e, plan.d_plcols, plan.d_front_off,
                 plan.d_front_ptr, plan.d_ncols, plan.d_front, plan.d_sing);
             const int mxtc = (mxf + MF_BT_TS - 1) / MF_BT_TS;
@@ -504,13 +490,9 @@ int factor_threads_for_level(const MultifrontalPlan& plan, int L)
             mf_bigB_trailing<<<dim3(mxtc * mxtc, e - b), MF_BT_TS * MF_BT_TS, bt_sh, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front);
-            if (do_extend) {
-                const char* xt_s = std::getenv("MF_XTILES");
-                const int xtiles = xt_s ? std::atoi(xt_s) : 16;
-                mf_bigC_extend<<<dim3(xtiles, e - b), T, 0, stream>>>(b, e, plan.d_plcols,
-                    plan.d_front_off, plan.d_front_ptr, plan.d_ncols, plan.d_panel_parent,
-                    plan.d_asm_ptr, plan.d_asm_local, plan.d_front);
-            }
+            mf_bigC_extend<<<dim3(kBigExtendTiles, e - b), T, 0, stream>>>(b, e,
+                plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, plan.d_front);
         } else if (plan.pure_fp32) {
             mf_factor_extend_level<float><<<e - b, T, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
@@ -529,16 +511,12 @@ int factor_threads_for_level(const MultifrontalPlan& plan, int L)
         }
     }
 
-    if (std::getenv("MF_NO_SELINV") == nullptr) {
-        if (plan.pure_fp32) {
-            mf_invert_pivot<float><<<plan.num_panels, 32, 0, stream>>>(
-                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols,
-                plan.d_frontf);
-        } else {
-            mf_invert_pivot<double><<<plan.num_panels, 32, 0, stream>>>(
-                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols,
-                plan.d_front);
-        }
+    if (plan.pure_fp32) {
+        mf_invert_pivot<float><<<plan.num_panels, 32, 0, stream>>>(
+            plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, plan.d_frontf);
+    } else {
+        mf_invert_pivot<double><<<plan.num_panels, 32, 0, stream>>>(
+            plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, plan.d_front);
     }
 }
 
@@ -552,26 +530,8 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
                                       bool pure_fp32)
 {
     namespace sym = custom_linear_solver::symbolic;
-    const bool tm = std::getenv("MF_TIME") != nullptr;  // analysis sub-phase profiling
-    const bool solve_f32 = std::getenv("MF_SOLVE_F32") != nullptr;  // cy170: FP32 solve A/B
-    // Single-system mixed factor (FP64-master / FP32-working LU). Default OFF: this single-system
-    // path is the FP64 reference; MF_MIXED opts into the mixed LU (the batched path selects
-    // precision explicitly via BatchPrecision, see multifrontal_batched). On consumer Ampere FP64
-    // is 1/64 FP32, so the mixed LU bulk is far cheaper while the FP64 master keeps the assembly
-    // precise; it helps small/medium fronts (large factor is launch-bound, not compute-bound).
-    if (!pure_fp32 && std::getenv("MF_MIXED") != nullptr &&
-        std::getenv("MF_NO_MIXED") == nullptr) {
-        fp32 = true;
-    }
-    auto tclk = std::chrono::steady_clock::now();
-    auto lap = [&](const char* nm) {
-        if (tm) {
-            const auto now = std::chrono::steady_clock::now();
-            std::fprintf(stderr, "  [analyze] %-22s %.2f ms\n", nm,
-                         std::chrono::duration<double, std::milli>(now - tclk).count());
-            tclk = now;
-        }
-    };
+    constexpr bool solve_f32 = false;
+    auto lap = [](const char*) {};
     MultifrontalPlan plan;
     plan.n = n;
     plan.nnz_a = nnz_a;
@@ -579,7 +539,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
 
     std::vector<int> colcount(n);
     for (int j = 0; j < n; ++j) colcount[j] = Lp[j + 1] - Lp[j];
-    // cy169: MF_CAP sweeps the amalgamation level. A bigger cap merges longer etree
+    // cy169: A bigger cap merges longer etree
     // chains into one panel -> fewer fronts -> fewer SOLVE levels (the dominant S cost:
     // 2*num_plevels serialized kernels). Trades padded fill (F flops) for S latency --
     // viable where we have F-margin. Clamp to MF_MAX_NC=64 (shared pivot-buffer bound;
@@ -591,21 +551,12 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // gain from amalgamation); larger ones amalgamate more (they have F headroom + deeper
     // spines). Swept (cy338): cap12 cuts S -4..-10% on the 16k-80k band with F still < cuDSS;
     // cap16 on the >80k band (huge F margin). cap16 breaks F on small power-grid / onetone2, so
-    // it is gated to the largest. MF_CAP env overrides for sweeps.
-    const char* cap_s = std::getenv("MF_CAP");
-    int eff_cap = cap_s ? std::atoi(cap_s)
-                        : (n >= 80000 ? 16 : (n >= 16000 ? 12 : panel_cap));
+    // it is gated to the largest.
+    int eff_cap = n >= 80000 ? 16 : (n >= 16000 ? 12 : panel_cap);
     if (eff_cap < 1) eff_cap = 1;
     if (eff_cap > 64) eff_cap = 64;
     const sym::PanelPartition panels =
         forced_panels ? *forced_panels : sym::relaxed_panels(n, parent, colcount, eff_cap);
-    if (tm) {
-        long tf = Lp[n];
-        std::fprintf(stderr, "  [amalg] cap=%d panels=%d padded_fill=%ld pad_ratio=%.2fx n/panels=%.1f\n",
-                     eff_cap, panels.num_panels, panels.padded_fill,
-                     tf > 0 ? (double)panels.padded_fill / tf : 0.0,
-                     panels.num_panels > 0 ? (double)n / panels.num_panels : 0.0);
-    }
     lap("relaxed_panels");
     const sym::MultifrontalSymbolic mf = sym::multifrontal_symbolic(n, Lp, Li, panels);
     lap("multifrontal_symbolic");
@@ -614,30 +565,6 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     plan.h_front_ptr = mf.front_ptr;   // host copies for batched dispatch / TC shared sizing
     plan.h_ncols = panels.ncols;
     // h_plcols filled after plcols is built below.
-
-    // Front-size-band profile (env MF_FRONTPROF): where the factor FLOPS live. Dense
-    // front work ~ fsz^2 * nc (panel factor) + uc^2 * nc (trailing). Buckets by fsz so
-    // tuning targets the real hotspot (cy123 plan target #1). Read-only diagnostic.
-    if (std::getenv("MF_FRONTPROF")) {
-        const int NB = 5;
-        const int lo[NB] = {0, 17, 49, 129, 257};
-        const int hi[NB] = {16, 48, 128, 256, 1 << 30};
-        long cnt[NB] = {0}, flops[NB] = {0};
-        long tot_flops = 0;
-        for (int p = 0; p < P; ++p) {
-            const long fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
-            const long nc = panels.ncols[p];
-            const long f = fsz * fsz * nc;  // ~dense LU work for this front
-            tot_flops += f;
-            for (int b = 0; b < NB; ++b)
-                if (fsz >= lo[b] && fsz <= hi[b]) { cnt[b] += 1; flops[b] += f; break; }
-        }
-        std::fprintf(stderr, "  MF_FRONTPROF P=%d tot_work=%.3gG\n", P, (double)tot_flops / 1e9);
-        for (int b = 0; b < NB; ++b)
-            std::fprintf(stderr, "    fsz[%4d..%-7d] cnt=%-8ld work=%-7.3gG (%.1f%%)\n", lo[b],
-                         hi[b] == (1 << 30) ? 999999 : hi[b], cnt[b], (double)flops[b] / 1e9,
-                         tot_flops ? 100.0 * flops[b] / tot_flops : 0.0);
-    }
 
     // Per-panel front offset (in doubles) into the front arena = prefix sum of fsz².
     std::vector<int> front_off(P + 1, 0);
@@ -671,81 +598,6 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         for (int p = 0; p < P; ++p) plcols[next[plevel[p]]++] = p;
     }
     plan.h_plcols = plcols;
-    if (tm) {
-        // cy171: solve is latency-bound (low BW utilization) -> profile per-level
-        // parallelism. A level with < ~82 fronts (RTX3090 SM count) under-fills the GPU.
-        // Report how much solve-work (Σ fsz*nc) sits in those occupancy-starved levels:
-        // that work is the upside a finer cross-level (DAG) schedule could overlap.
-        const int SM = 82;
-        int narrow_levels = 0;
-        long work_narrow = 0, work_total = 0, crit = 0;
-        for (int L = 0; L < num_plevels; ++L) {
-            const int cnt = plan.plptr[L + 1] - plan.plptr[L];
-            long wl = 0, wmax = 0;
-            for (int q = plan.plptr[L]; q < plan.plptr[L + 1]; ++q) {
-                const int p = plcols[q];
-                const long fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
-                const long w = fsz * (long)panels.ncols[p];
-                wl += w;
-                if (w > wmax) wmax = w;
-            }
-            work_total += wl;
-            crit += wmax;  // critical-path proxy: each level contributes its biggest front
-            if (cnt < SM) { ++narrow_levels; work_narrow += wl; }
-        }
-        std::fprintf(stderr,
-                     "  [solve-prof] levels=%d narrow(<%dSM)=%d work_in_narrow=%.0f%% "
-                     "crit_path/total=%.0f%% (finer-schedule floor)\n",
-                     num_plevels, SM, narrow_levels,
-                     work_total ? 100.0 * work_narrow / work_total : 0.0,
-                     work_total ? 100.0 * crit / work_total : 0.0);
-    }
-    if (std::getenv("MF_MS_PROFILE")) {
-        // cy173: size the IMPLEMENTABLE multi-subtree-solve prize. Partition the panel etree
-        // into independent subtrees (concurrent across streams) + a shared top of separators
-        // above them (sequential). The shared-top work fraction s bounds the single-solve
-        // speedup: makespan ~ s + (1-s)/G  ->  speedup ~ 1/(s+(1-s)/G). Greedy: split the
-        // heaviest frontier node into its children until the frontier has >= G subtrees.
-        std::vector<std::vector<int>> kids(P);
-        std::vector<int> roots;
-        for (int p = 0; p < P; ++p) {
-            const int par = mf.panel_parent[p];
-            if (par >= 0) kids[par].push_back(p); else roots.push_back(p);
-        }
-        std::vector<long> sw(P, 0), own(P, 0);
-        long W = 0;
-        for (int p = 0; p < P; ++p) {
-            const long w = (long)(mf.front_ptr[p + 1] - mf.front_ptr[p]) * panels.ncols[p];
-            own[p] = w; sw[p] = w; W += w;
-        }
-        for (int L = 0; L < num_plevels; ++L)  // children-before-parent (level order)
-            for (int q = plan.plptr[L]; q < plan.plptr[L + 1]; ++q) {
-                const int p = plcols[q], par = mf.panel_parent[p];
-                if (par >= 0) sw[par] += sw[p];
-            }
-        for (int G : {2, 4, 8}) {
-            std::priority_queue<std::pair<long, int>> heap;
-            for (int r : roots) heap.push({sw[r], r});
-            long shared = 0;
-            while ((int)heap.size() < G && !heap.empty()) {
-                auto [w, u] = heap.top();
-                if (kids[u].empty()) break;
-                heap.pop(); shared += own[u];
-                for (int c : kids[u]) heap.push({sw[c], c});
-            }
-            long maxsub = 0, sumsub = 0;
-            int nsub = heap.size();
-            while (!heap.empty()) { auto [w, u] = heap.top(); heap.pop(); maxsub = std::max(maxsub, w); sumsub += w; }
-            const double s = W ? (double)shared / W : 0.0;
-            const double sp = (s + (W ? (double)maxsub / W : 0.0));  // makespan frac ~ shared + slowest stream
-            std::fprintf(stderr,
-                         "  [ms-prof G=%d] subtrees=%d shared_top=%.0f%% max_subtree=%.0f%% "
-                         "balance=%.2f est_speedup~%.1fx\n",
-                         G, nsub, 100.0 * s, W ? 100.0 * maxsub / W : 0.0,
-                         sumsub ? (double)maxsub * nsub / sumsub : 0.0, sp > 0 ? 1.0 / sp : 0.0);
-        }
-    }
-
     // Parent-local extend-add map: asm_idx is a global front_rows index; subtract
     // the parent front's start so the kernel indexes into the parent's fsz x fsz.
     std::vector<int> asm_local(mf.asm_idx.size());
@@ -831,12 +683,6 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     cudaStreamCreate(&stream);
     plan.stream = stream;
     plan.owns_stream = true;
-    // 512 threads/block: the big fronts near the root (up to 214x214) sit on the
-    // sequential critical path and underutilize the GPU with one small block each;
-    // more threads/front cuts their dense-LU time. Swept 128/256/512/1024 ->
-    // 512 best (1024 over-allocates: fewer blocks/SM). 2.2-2.6x on large matrices.
-    const char* ft_s = std::getenv("MF_FT");  // factor block-size override (force/sweep)
-    const int ft_force = ft_s ? std::atoi(ft_s) : 0;
     // Per-level factor block size (cy140, measured under a HOST-locked 1395MHz clock ->
     // cross-process variance <0.1%, so these <5% deltas are real, not the cy125 artifact).
     // Medium fronts (fsz<=256: ALL power-grid + rajat27/memplus/rajat15) prefer 384
@@ -846,7 +692,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // clock) gives medium fronts 384 (beats 320/448/512 on every power-grid + rajat27/
     // memplus matrix) and onetone2's big fronts 768 (45.02@512 -> 44.33@768 = -1.5%;
     // 1024 over-allocates). onetone2 is the ONLY matrix with fronts >=257, so the 768
-    // branch touches nothing else. So: max front >=257 -> 768, else 384. MF_FT forces.
+    // branch touches nothing else. So: max front >=257 -> 768, else 384.
     // Tiny-front leaf levels (max fsz <=48) hold ~99% of the fronts but ~25% of work
     // (cy143 profiler). At the medium-front 384 they badly under-occupy (a fsz<=16 front
     // has <=256 elems but gets 384 threads -> ~5 blocks/SM). A 128-thread block packs
@@ -854,45 +700,34 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // every matrix. BUT only when the level has MANY tiny fronts (>=1024) to fill the GPU
     // with 128-blocks; a sparse tiny level under-utilizes at 128, so it keeps 384 (cy143
     // locked-clock sweep: a count guard flips the small-matrix regression into a win).
-    const char* fts_s = std::getenv("MF_FT_TINY");  // tiny-front-level block size (sweep)
-    const int ft_tiny = fts_s ? std::atoi(fts_s) : 128;
-    const char* ftc_s = std::getenv("MF_FT_TINY_CNT");  // min level front-count for tiny block
-    const int ft_tiny_cnt = ftc_s ? std::atoi(ftc_s) : 1024;
     auto level_ft = [&](int L) -> int {
-        if (ft_force) return ft_force;
         const int cnt = plan.plptr[L + 1] - plan.plptr[L];
         int mx = 0;
         for (int q = plan.plptr[L]; q < plan.plptr[L + 1]; ++q) {
             const int pp = plcols[q];
             mx = std::max(mx, mf.front_ptr[pp + 1] - mf.front_ptr[pp]);
         }
-        if (mx >= 257) return 768;   // onetone2 big serial fronts
-        if (mx <= 48 && cnt >= ft_tiny_cnt) return ft_tiny;  // MANY tiny fronts -> occupancy
-        return 384;  // medium hotspot 49-256 (cy146: splitting 49-128 off regresses; 384 best)
+        if (mx >= 257) return kFactorBigThreads;   // onetone2 big serial fronts
+        if (mx <= 48 && cnt >= kFactorTinyFrontCount)
+            return kFactorTinyThreads;  // MANY tiny fronts -> occupancy
+        return kFactorDefaultThreads;  // medium hotspot 49-256
     };
-    const int do_extend = std::getenv("MF_SKIP_EXTEND") == nullptr ? 1 : 0;  // diagnostic
-    const char* flo_s = std::getenv("MF_FLO");  // diagnostic: factor only levels [FLO,FHI)
-    const char* fhi_s = std::getenv("MF_FHI");
-    const int flo = flo_s ? std::atoi(flo_s) : 0;
-    const int fhi = fhi_s ? std::atoi(fhi_s) : num_plevels;
-    const bool bigmulti = std::getenv("MF_NO_BIGMULTI") == nullptr;  // cy147 DEFAULT ON
-    const char* mbt_s = std::getenv("MB_THRESH");  // cy148: multi-block max-front trigger
+    constexpr int do_extend = 1;
     // cy148: multi-block ALL levels whose max front >=81 (the medium-large 81-256 fronts are
     // FEW-per-level near the root -> one-block-each under-uses the 82 SMs). cy270: the trailing
     // is now a SHARED-MEM TILED rank-nc GEMM (mf_bigB_trailing) -- grid.x = ceil(maxfsz/TS)^2
     // output tiles per front, each block staging an L-/U-tile (reuse TS x). Widens the power F
     // win (SyntheticUSA 4.10->4.05, ACTIVSg25k 1.78->1.76); onetone2's gap is deep-etree (plev
     // 110) serialization not trailing-BW, so it stays ~neutral there.
-    const int mb_thresh = mbt_s ? std::atoi(mbt_s) : 81;
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-    for (int L = flo; L < fhi; ++L) {
+    for (int L = 0; L < num_plevels; ++L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
         const int T = level_ft(L);
         int mxf = 0;
         for (int q = b; q < e; ++q)
             mxf = std::max(mxf, mf.front_ptr[plcols[q] + 1] - mf.front_ptr[plcols[q]]);
-        if (bigmulti && !fp32 && !pure_fp32 && mxf >= mb_thresh) {  // big-front level -> multi-block triple
+        if (!fp32 && !pure_fp32 && mxf >= kBigMultiFrontThreshold) {
             mf_bigA_panelU<<<e - b, T, 0, stream>>>(b, e, plan.d_plcols, plan.d_front_off,
                 plan.d_front_ptr, plan.d_ncols, plan.d_front, plan.d_sing);
             // cy270/271: TILED trailing -- grid.x = ceil(maxfsz/TS)^2 tiles per front, blockDim=TS*TS,
@@ -903,17 +738,11 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
             const size_t bt_sh = (size_t)2 * MF_BT_TS * mxnc * sizeof(double);
             mf_bigB_trailing<<<dim3(mxtc * mxtc, e - b), MF_BT_TS * MF_BT_TS, bt_sh, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols, plan.d_front);
-            if (do_extend) {
-                // cy273: multi-block the extend (independent atomics) -> grid.x tiles x fronts.
-                // cy275: swept tile count -> 16 optimal (64/128 over-spread = atomic contention +
-                // launch overhead; <16 under-parallelizes). 16 beats cy273's 64/128 on all (onetone2
-                // 8.31->7.84, SyntheticUSA 3.19->3.10). MF_XTILES env overrides.
-                const char* xt_s = std::getenv("MF_XTILES");
-                const int xtiles = xt_s ? std::atoi(xt_s) : 16;
-                mf_bigC_extend<<<dim3(xtiles, e - b), T, 0, stream>>>(b, e, plan.d_plcols,
-                    plan.d_front_off, plan.d_front_ptr, plan.d_ncols, plan.d_panel_parent,
-                    plan.d_asm_ptr, plan.d_asm_local, plan.d_front);
-            }
+            // cy273: multi-block the extend (independent atomics) -> grid.x tiles x fronts.
+            // cy275: swept tile count -> 16 optimal.
+            mf_bigC_extend<<<dim3(kBigExtendTiles, e - b), T, 0, stream>>>(b, e,
+                plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, plan.d_front);
         } else if (pure_fp32)
             mf_factor_extend_level<float><<<e - b, T, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
@@ -932,16 +761,14 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     }
     // cy335 partitioned-inverse: invert each front's U_pp pivot block. The backward solve then uses
     // a parallel GEMV instead of a sequential triangular
-    // back-solve. Appended to the factor graph -> counted in factor time. Opt-out MF_NO_SELINV.
-    const bool selinv = std::getenv("MF_NO_SELINV") == nullptr;
-    if (selinv) {
-        if (pure_fp32)
-            mf_invert_pivot<float><<<plan.num_panels, 32, 0, stream>>>(
-                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, plan.d_frontf);
-        else
-            mf_invert_pivot<double><<<plan.num_panels, 32, 0, stream>>>(
-                plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, plan.d_front);
-    }
+    // back-solve. Appended to the factor graph -> counted in factor time.
+    constexpr bool selinv = true;
+    if (pure_fp32)
+        mf_invert_pivot<float><<<plan.num_panels, 32, 0, stream>>>(
+            plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, plan.d_frontf);
+    else
+        mf_invert_pivot<double><<<plan.num_panels, 32, 0, stream>>>(
+            plan.num_panels, plan.d_front_ptr, plan.d_front_off, plan.d_ncols, plan.d_front);
     cudaGraph_t graph;
     cudaStreamEndCapture(stream, &graph);
     cudaGraphExec_t exec;
