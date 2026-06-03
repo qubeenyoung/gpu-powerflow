@@ -1,6 +1,8 @@
 #include "factorize/multifrontal.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -552,7 +554,12 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // spines). Swept (cy338): cap12 cuts S -4..-10% on the 16k-80k band with F still < cuDSS;
     // cap16 on the >80k band (huge F margin). cap16 breaks F on small power-grid / onetone2, so
     // it is gated to the largest.
-    int eff_cap = n >= 80000 ? 16 : (n >= 16000 ? 12 : panel_cap);
+    // cy338 adaptive cap, retuned for the shared-resident mid/big-front batched kernels (which now
+    // handle wider fronts efficiently): the largest matrices amalgamate harder (cap20) -- fewer,
+    // denser fronts and fewer solve levels outweigh the extra padded fill now that big fronts run
+    // well -- while the mid band stays at 12 (cap16+ regressed it) and small at panel_cap.
+    int eff_cap = n >= 80000 ? 20 : (n >= 16000 ? 12 : panel_cap);
+    if (const char* ce = std::getenv("CLS_CAP")) eff_cap = std::atoi(ce);  // research override
     if (eff_cap < 1) eff_cap = 1;
     if (eff_cap > 64) eff_cap = 64;
     const sym::PanelPartition panels =
@@ -593,6 +600,36 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     for (int p = 0; p < P; ++p) ++plan.plptr[plevel[p] + 1];
     for (int L = 0; L < num_plevels; ++L) plan.plptr[L + 1] += plan.plptr[L];
     std::vector<int> plcols(P);
+
+    if (std::getenv("CLS_DUMP")) {  // research: front-size distribution + per-level structure
+        const int NB = 7;
+        const int edges[NB] = {16, 32, 48, 64, 96, 160, 1 << 30};
+        long cnt[NB] = {0}, sf2[NB] = {0};
+        double sf3[NB] = {0};
+        long tot2 = 0; double tot3 = 0;
+        for (int p = 0; p < P; ++p) {
+            const long fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+            int bck = 0; while (fsz > edges[bck]) ++bck;
+            cnt[bck]++; sf2[bck] += fsz * fsz; sf3[bck] += (double)fsz * fsz * fsz;
+            tot2 += fsz * fsz; tot3 += (double)fsz * fsz * fsz;
+        }
+        fprintf(stderr, "[CLS_DUMP] n=%d P=%d levels=%d cap=%d front_total(MB f32)=%.1f\n",
+                n, P, num_plevels, eff_cap, total * 4.0 / 1e6);
+        const int lo[NB] = {1, 17, 33, 49, 65, 97, 161};
+        for (int bk = 0; bk < NB; ++bk)
+            fprintf(stderr, "  fsz[%4d..%-9d] cnt=%-8ld f2%%=%5.1f f3%%=%5.1f\n", lo[bk],
+                    edges[bk] == (1 << 30) ? 999999 : edges[bk], cnt[bk],
+                    100.0 * sf2[bk] / std::max(1L, tot2), 100.0 * sf3[bk] / std::max(1e-9, tot3));
+        for (int L = 0; L < num_plevels && L < 40; ++L) {
+            long c = 0, m = 0, s2 = 0;
+            for (int p = 0; p < P; ++p)
+                if (plevel[p] == L) {
+                    const long fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+                    ++c; m = std::max(m, fsz); s2 += fsz * fsz;
+                }
+            fprintf(stderr, "  L%-2d cnt=%-7ld maxfsz=%-4ld f2=%ld\n", L, c, m, s2);
+        }
+    }
     {
         std::vector<int> next(plan.plptr.begin(), plan.plptr.end());
         for (int p = 0; p < P; ++p) plcols[next[plevel[p]]++] = p;

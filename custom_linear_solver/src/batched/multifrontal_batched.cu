@@ -19,11 +19,21 @@
 //         batched_set_stream) so the outer cudaStreamBeginCapture records them.
 #include "batched/scatter.cuh"        // scatter_batched<FT,VT>
 #include "batched/factor_kernels.cuh"  // mf_factor_extend_*_b, mf_invert_pivot_b<FT>
+#include "batched/factor_small.cuh"    // mf_factor_small_warp_b<FT> (tiny-front warp-per-front)
+#include "tc/factor_tc.cuh"            // mf_factor_extend_tc32_b (FP32-native tensor-core trailing)
 #include "batched/solve_kernels.cuh"   // gather_rhs_b, scatter_sol_b, mf_{fwd,bwd}_level_b
+#include "batched/solve_small.cuh"     // mf_{fwd,bwd}_small_warp_b<FT> (warp-packed small levels)
 
 namespace custom_linear_solver::batched {
 
 using custom_linear_solver::plan::MultifrontalPlan;
+
+// The front arena is FP32 (and the solve runs in float) for both the pure-FP32 path and the
+// FP32-native tensor-core path; FP64/Mixed/TC keep an FP64 front (or master).
+static inline bool is_fp32_front(BatchPrecision p)
+{
+    return p == BatchPrecision::FP32 || p == BatchPrecision::TC32;
+}
 
 BatchedState::~BatchedState()
 {
@@ -48,15 +58,107 @@ BatchedState::~BatchedState()
 static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, cudaStream_t stream)
 {
     const BatchPrecision prec = st.prec;
-    const bool pure_fp32 = (prec == BatchPrecision::FP32);
+    const bool pure_fp32 = is_fp32_front(prec);  // float front: pure-FP32 or FP32-native TC
     const int B = st.B;
     const int T = 128;
     const int do_extend = 1;
+    // Levels whose fronts are all small go to the warp-per-front kernel (one warp per (front,batch),
+    // many warps per block) instead of the per-front 128-thread block kernel; this is where the
+    // factor time concentrates (the tiny bottom-etree levels) and the block-barrier/idle-thread
+    // overhead is worst. Only the float-front (FP32 / TC32) and FP64 paths share the templated warp
+    // LU; Mixed/TC (FP64 master + FP32 working) keep the per-front kernel.
+    const int SMALL_THRESH = 32;       // route a level here when its max fsz <= this (warp kernel)
+    const int SMALL_WARPS = 8;         // warps per block for the small-front kernel
+    // Float-front levels up to MID_THRESH go to the shared-resident mid kernel. The whole front
+    // (fsz^2 floats) must fit the sm_86 99 KB shared cap: FP32 (no TC staging) reaches fsz~159;
+    // TC32 needs extra room for the FP16 L/U staging + warp scratch, so it is held lower.
+    const int MID_THRESH = (prec == BatchPrecision::TC32) ? 128 : 159;
+    const bool small_ok = pure_fp32 || prec == BatchPrecision::FP64;
     // Per level, gridDim=(level_size, B); kernel chosen by precision.
     for (int L = 0; L < plan.num_plevels; ++L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
-        dim3 grid(e - b, B);
+        const int level_size = e - b;
+        if (small_ok) {
+            int max_fsz = 0, max_uc = 1;
+            for (int q = b; q < e; ++q) {
+                const int pp = plan.h_plcols[q];
+                const int fsz = plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp];
+                const int uc = fsz - plan.h_ncols[pp];
+                if (fsz > max_fsz) max_fsz = fsz;
+                if (uc > max_uc && uc <= 256) max_uc = uc;
+            }
+            if (max_fsz <= SMALL_THRESH) {
+                const long warps = (long)level_size * B;
+                const int blk = SMALL_WARPS * 32;
+                const int gx = (int)((warps + SMALL_WARPS - 1) / SMALL_WARPS);
+                const int fsz2cap = max_fsz * max_fsz;
+                const size_t elt = (prec == BatchPrecision::FP64) ? sizeof(double) : sizeof(float);
+                const size_t shb = (size_t)SMALL_WARPS * fsz2cap * elt;
+                if (prec == BatchPrecision::FP64)
+                    mf_factor_small_warp_b<double><<<gx, blk, shb, stream>>>(
+                        b, level_size, B, fsz2cap, plan.d_plcols, plan.d_front_off,
+                        plan.d_front_ptr, plan.d_ncols, plan.d_panel_parent, plan.d_asm_ptr,
+                        plan.d_asm_local, st.d_frontB, plan.front_total, st.d_sing, do_extend);
+                else
+                    mf_factor_small_warp_b<float><<<gx, blk, shb, stream>>>(
+                        b, level_size, B, fsz2cap, plan.d_plcols, plan.d_front_off,
+                        plan.d_front_ptr, plan.d_ncols, plan.d_panel_parent, plan.d_asm_ptr,
+                        plan.d_asm_local, st.d_frontBf, plan.front_total, st.d_sing, do_extend);
+                continue;
+            }
+            // Float-front mid/large levels: shared-resident block-per-front kernel (FP32 scalar
+            // trailing, or FP16 tensor-core trailing for TC32). Shared sized to this level's fronts.
+            if (pure_fp32 && max_fsz <= MID_THRESH) {
+                const int fsz_cap = max_fsz;
+                const int ucp_max = ((max_uc + 15) / 16) * 16;
+                const bool use_tc = (prec == BatchPrecision::TC32);
+                size_t shb = (size_t)fsz_cap * fsz_cap * sizeof(float);
+                if (use_tc) shb += (size_t)2 * ucp_max * 32 * sizeof(__half) + 4 * 256 * sizeof(float);
+                // Block threads scale with the front size: small mid-fronts want fewer threads (more
+                // blocks/SM for latency hiding, less idle), big fronts want more (hide the sequential
+                // panel/U-solve dependency chain within the block). Swept: 256 best for the big
+                // separator fronts, smaller for the narrow mid levels.
+                const int mblk = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
+                dim3 grid(level_size, B);
+                if (use_tc)
+                    mf_factor_mid_tc32_b<true><<<grid, mblk, shb, stream>>>(
+                        b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.front_total, st.d_sing, do_extend, ucp_max, fsz_cap);
+                else
+                    mf_factor_mid_tc32_b<false><<<grid, mblk, shb, stream>>>(
+                        b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.front_total, st.d_sing, do_extend, ucp_max, fsz_cap);
+                continue;
+            }
+            // Float-front BIG separator fronts (fsz > MID_THRESH): too large for the shared cache.
+            // Run the global-memory kernel but with many threads -- these top levels have very few
+            // fronts (deep, low occupancy), so packing more warps per block hides the long
+            // sequential panel/U-solve dependency chain. (Swept: 1024 best for these.) FP64 is not
+            // a float front, so it skips this and falls through to the switch below.
+            if (pure_fp32) {
+                const int bigT = 1024;
+                dim3 bgrid(level_size, B);
+                if (prec == BatchPrecision::TC32) {
+                    const int ucp_max = ((max_uc + 15) / 16) * 16;
+                    const size_t shbytes =
+                        (size_t)2 * ucp_max * 32 * sizeof(__half) + (bigT / 32) * 256 * sizeof(float);
+                    mf_factor_extend_tc32_b<<<bgrid, bigT, shbytes, stream>>>(
+                        b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.front_total, st.d_sing, do_extend, ucp_max);
+                } else {
+                    mf_factor_extend_level_b<float><<<bgrid, bigT, 0, stream>>>(
+                        b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.front_total, st.d_sing, do_extend);
+                }
+                continue;
+            }
+        }
+        dim3 grid(level_size, B);
         switch (prec) {
             case BatchPrecision::FP64:
                 mf_factor_extend_level_b<double><<<grid, T, 0, stream>>>(
@@ -76,7 +178,8 @@ static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, 
                     plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,
                     plan.front_total, st.d_sing, do_extend);
                 break;
-            case BatchPrecision::TC: {
+            case BatchPrecision::TC:
+            case BatchPrecision::TC32: {
                 // per-level max uc (= dynamic-shared Uh stride) so small-front levels use little shared.
                 int max_uc = 1;  // only WMMA-eligible fronts (uc<=256, nc<=32) use the shared staging
                 for (int q = b; q < e; ++q) {
@@ -89,10 +192,16 @@ static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, 
                 const int ucp_max = ((max_uc + 15) / 16) * 16;
                 const size_t shbytes =
                     (size_t)2 * ucp_max * 32 * sizeof(__half) + 4 * 256 * sizeof(float);
-                mf_factor_extend_mixed_tc_b<<<grid, 128, shbytes, stream>>>(
-                    b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB, st.d_frontBf,
-                    plan.front_total, st.d_sing, do_extend, ucp_max);
+                if (prec == BatchPrecision::TC32)
+                    mf_factor_extend_tc32_b<<<grid, 128, shbytes, stream>>>(
+                        b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.front_total, st.d_sing, do_extend, ucp_max);
+                else
+                    mf_factor_extend_mixed_tc_b<<<grid, 128, shbytes, stream>>>(
+                        b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB,
+                        st.d_frontBf, plan.front_total, st.d_sing, do_extend, ucp_max);
                 break;
             }
         }
@@ -112,22 +221,55 @@ static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, 
 
 static void issue_solve_levels(const MultifrontalPlan& plan, BatchedState& st, cudaStream_t stream)
 {
-    const bool pure_fp32 = (st.prec == BatchPrecision::FP32);
+    const bool pure_fp32 = is_fp32_front(st.prec);  // float front: pure-FP32 or FP32-native TC
     const int B = st.B;
     const int sel = st.selinv ? 1 : 0;
-    // 32 threads (1 warp) per (front,batch): the warp-parallel pivot solve uses one warp anyway and
-    // smaller blocks pack more per SM -> higher occupancy across the many B*fronts blocks (swept).
-    const int TS = 32;
+    // Warp-packed small-level routing (mirrors the factor path): levels whose fronts are all small
+    // run WARPS_PER_BLOCK warps per block instead of one 32-thread block per (front,batch), cutting
+    // the block-launch/scheduling overhead of the tens of thousands of tiny leaf fronts that
+    // dominate the solve.
+    const int SMALL_THRESH = 32, SMALL_WARPS = 8;
+    const int selt = pure_fp32 ? (int)sizeof(float) : (int)sizeof(double);
+    auto level_max_fsz = [&](int b, int e) {
+        int m = 0;
+        for (int q = b; q < e; ++q) {
+            const int pp = plan.h_plcols[q];
+            const int fsz = plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp];
+            if (fsz > m) m = fsz;
+        }
+        return m;
+    };
     for (int L = 0; L < plan.num_plevels; ++L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
         if (e <= b) continue;
+        if (level_max_fsz(b, e) <= SMALL_THRESH) {
+            const long warps = (long)(e - b) * B;
+            const int blk = SMALL_WARPS * 32;
+            const int gx = (int)((warps + SMALL_WARPS - 1) / SMALL_WARPS);
+            const size_t shb = (size_t)SMALL_WARPS * 64 * selt;  // sh_piv[64] per warp
+            if (pure_fp32)
+                mf_fwd_small_warp_b<float><<<gx, blk, shb, stream>>>(
+                    b, e - b, B, 64, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
+                    plan.d_ncols, plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total,
+                    plan.n, sel);
+            else
+                mf_fwd_small_warp_b<double><<<gx, blk, shb, stream>>>(
+                    b, e - b, B, 64, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
+                    plan.d_ncols, plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total,
+                    plan.n, sel);
+            continue;
+        }
+        // Bigger-front block levels (few fronts, low occupancy) get more threads/block to hide the
+        // per-front latency and parallelize the CB update over more lanes.
+        const int mf = level_max_fsz(b, e);
+        const int tsb = mf <= 64 ? 64 : (mf <= 128 ? 128 : 256);
         const dim3 fg(e - b, B);
         if (pure_fp32)
-            mf_fwd_level_b<float><<<fg, TS, 0, stream>>>(
+            mf_fwd_level_b<float><<<fg, tsb, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total, plan.n, sel);
         else
-            mf_fwd_level_b<double><<<fg, TS, 0, stream>>>(
+            mf_fwd_level_b<double><<<fg, tsb, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
     }
@@ -140,13 +282,33 @@ static void issue_solve_levels(const MultifrontalPlan& plan, BatchedState& st, c
             const int cbq = (plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp]) - plan.h_ncols[pp];
             if (cbq > max_cb) max_cb = cbq;
         }
+        if (level_max_fsz(b, e) <= SMALL_THRESH) {
+            const long warps = (long)(e - b) * B;
+            const int blk = SMALL_WARPS * 32;
+            const int gx = (int)((warps + SMALL_WARPS - 1) / SMALL_WARPS);
+            const int slab = 64 + max_cb;
+            const size_t shb = (size_t)SMALL_WARPS * slab * selt;
+            if (pure_fp32)
+                mf_bwd_small_warp_b<float><<<gx, blk, shb, stream>>>(
+                    b, e - b, B, slab, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
+                    plan.d_ncols, plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total,
+                    plan.n, sel);
+            else
+                mf_bwd_small_warp_b<double><<<gx, blk, shb, stream>>>(
+                    b, e - b, B, slab, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
+                    plan.d_ncols, plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total,
+                    plan.n, sel);
+            continue;
+        }
+        const int mf = level_max_fsz(b, e);
+        const int tsb = mf <= 64 ? 64 : (mf <= 128 ? 128 : 256);
         const dim3 bg(e - b, B);
         if (pure_fp32)
-            mf_bwd_level_b<float><<<bg, TS, (size_t)max_cb * sizeof(float), stream>>>(
+            mf_bwd_level_b<float><<<bg, tsb, (size_t)max_cb * sizeof(float), stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total, plan.n, sel);
         else
-            mf_bwd_level_b<double><<<bg, TS, (size_t)max_cb * sizeof(double), stream>>>(
+            mf_bwd_level_b<double><<<bg, tsb, (size_t)max_cb * sizeof(double), stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n, sel);
     }
@@ -160,10 +322,10 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
     st.n = plan.n;
     st.prec = prec;
     st.selinv = true;
-    const bool pure_fp32 = (prec == BatchPrecision::FP32);
-    const bool need_double = (prec != BatchPrecision::FP32);              // FP64 front or Mixed/TC master
-    const bool need_float = (prec == BatchPrecision::FP32 || prec == BatchPrecision::Mixed ||
-                             prec == BatchPrecision::TC);                 // FP32 front or Mixed/TC working
+    const bool pure_fp32 = is_fp32_front(prec);                          // float front (FP32 / TC32)
+    const bool need_double = !pure_fp32;                                 // FP64 front or Mixed/TC master
+    const bool need_float = pure_fp32 || prec == BatchPrecision::Mixed ||
+                            prec == BatchPrecision::TC;                  // FP32 front or Mixed/TC working
     const long fe = (long)B * plan.front_total;
     if (need_double && cudaMalloc(&st.d_frontB, fe * sizeof(double)) != cudaSuccess) return false;
     if (need_float && cudaMalloc(&st.d_frontBf, fe * sizeof(float)) != cudaSuccess) return false;
@@ -174,6 +336,25 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
         if (cudaMalloc(&st.d_yB, (long)B * plan.n * sizeof(double)) != cudaSuccess) return false;
     }
     if (cudaMalloc(&st.d_sing, sizeof(int)) != cudaSuccess) return false;
+
+    // The warp-packed small-front kernel stages SMALL_WARPS fronts of up to 32x32 in shared; for the
+    // FP64 element type that is 8*1024*8 = 64 KB > the 48 KB default, so opt both instantiations in.
+    cudaFuncSetAttribute(mf_factor_small_warp_b<float>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+    cudaFuncSetAttribute(mf_factor_small_warp_b<double>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+    // The shared-resident mid kernels stage the whole front (up to MID_THRESH^2 floats) plus the TC
+    // staging into dynamic shared, which exceeds the 48 KB default; opt them in to the sm_86 cap.
+    if (is_fp32_front(prec)) {
+        cudaFuncSetAttribute(mf_factor_mid_tc32_b<true>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+        cudaFuncSetAttribute(mf_factor_mid_tc32_b<false>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+        // The TC32 big-separator path stages FP16 L/U + per-warp WMMA scratch for up to 32 warps,
+        // which can exceed the 48 KB default shared.
+        cudaFuncSetAttribute(mf_factor_extend_tc32_b,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+    }
 
 #ifdef CLS_INTERNAL_GRAPH
     // Internal-graph mode: own a private stream and capture the factor / solve kernel sequences
@@ -231,7 +412,7 @@ static bool batched_factorize_T(const MultifrontalPlan& plan, BatchedState& st, 
     // front / master (all other modes; the FP32 working arena is overwritten per front).
     auto issue_scatter = [&]() {
         cudaMemsetAsync(st.d_sing, 0, sizeof(int), stream);
-        if (st.prec == BatchPrecision::FP32) {
+        if (is_fp32_front(st.prec)) {
             cudaMemsetAsync(st.d_frontBf, 0, fe * sizeof(float), stream);
             scatter_batched<float, VT><<<sgrid, T, 0, stream>>>(plan.nnz_a, plan.front_total, d_o2c,
                                                                 plan.d_a_pos, d_valuesB, st.d_frontBf);
@@ -274,7 +455,7 @@ static bool batched_solve_T(const MultifrontalPlan& plan, BatchedState& st, cons
     const int n = plan.n;
     const int T = 256;
     const dim3 vg((n + T - 1) / T, st.B);
-    const bool pure_fp32 = (st.prec == BatchPrecision::FP32);
+    const bool pure_fp32 = is_fp32_front(st.prec);  // float front: pure-FP32 or FP32-native TC
     // The solve working vector matches the front the factor produced: float for pure-FP32, double
     // otherwise.
     auto issue_gather = [&]() {

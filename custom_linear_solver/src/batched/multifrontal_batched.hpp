@@ -22,7 +22,12 @@ namespace custom_linear_solver::batched {
 //           FP32, so the LU bulk is far cheaper while pivots/assembly stay precise (~1e-5..1e-3).
 //   TC    - like Mixed but the dense trailing update is an FP16 tensor-core (WMMA) GEMM; needs
 //           the deep-K amalgamation (Solver::analyze) to be worthwhile (~1e-3..1e-1).
-enum class BatchPrecision { FP64, FP32, Mixed, TC };
+//   TC32  - FP32-NATIVE tensor cores: the whole front is float (NO FP64 master, like FP32) but the
+//           dense trailing update is an FP16 WMMA GEMM (FP32 accumulate). Carries none of the
+//           FP64-master cast/writeback/double-atomic overhead that makes Mixed/TC lose to pure
+//           FP32 on the latency-bound power-grid fronts, so the tensor cores are pure upside on the
+//           big fronts. Accuracy tracks pure FP32 except the FP16 rounding of trailing contributions.
+enum class BatchPrecision { FP64, FP32, Mixed, TC, TC32 };
 
 struct BatchedState {
     int B = 0;

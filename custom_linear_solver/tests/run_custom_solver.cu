@@ -352,6 +352,7 @@ int main(int argc, char** argv)
             if (std::getenv("MF_FP32")) prec = BatchPrecision::FP32;
             if (std::getenv("MF_MIXED")) prec = BatchPrecision::Mixed;
             if (std::getenv("MF_TC")) prec = BatchPrecision::TC;
+            if (std::getenv("MF_TC32")) prec = BatchPrecision::TC32;
             // B identical copies (same pattern + values) -> each batch solves the same system,
             // so the per-batch residual must match the single-system solve (correctness check).
             std::vector<double> hvalB((std::size_t)B * nnz), hrhsB((std::size_t)B * n);
