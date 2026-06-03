@@ -1,7 +1,7 @@
 # STRUMPACK GPU — Nsight Systems 프로파일 (NR 2-iter 시뮬레이션)
 
 전력조류 Newton-Raphson 루프와 동일한 호출 패턴으로 STRUMPACK GPU를 한 번 더 profile.
-**`docs/strumpack-power-grid-analysis.md` §6.3** 의 *"factor wall 169 ms 중 GPU 21.5 ms (13%)"* 라는
+**`docs/strumpack-vs-cudss-power-grid-wall-vs-kernel.md` §6.3** 의 *"factor wall 169 ms 중 GPU 21.5 ms (13%)"* 라는
 주장의 GPU/CPU/launch 내역을 직접 보이는 것이 목적.
 
 ## 1. 시뮬레이션 패턴
@@ -82,7 +82,7 @@ iter1 vs iter2 비교:
 - factor: 53.5 → 26.3 ms (50% 빠름 — JIT 컴파일/MAGMA dispatch 캐시 등 first-iter cost)
 - solve: 25.3 → 22.9 ms (10% 빠름)
 
-→ **NR 정상상태 iter 비용은 49 ms** (factor+solve). `docs/strumpack-power-grid-analysis.md` §6.4 의 wall-clock factor 169 ms는 이것보다 큰 — 그 측정은 솔버 객체 매번 새로 생성 (analyze 포함), 본 측정은 객체 재사용 (analyze 한 번). iter 2 만 보는 게 NR 시나리오에 정확.
+→ **NR 정상상태 iter 비용은 49 ms** (factor+solve). `docs/strumpack-vs-cudss-power-grid-wall-vs-kernel.md` §6.4 의 wall-clock factor 169 ms는 이것보다 큰 — 그 측정은 솔버 객체 매번 새로 생성 (analyze 포함), 본 측정은 객체 재사용 (analyze 한 번). iter 2 만 보는 게 NR 시나리오에 정확.
 
 ## 4. GPU kernel-only 시간 (CUDA event 측정)
 
@@ -106,7 +106,7 @@ GPU kernel top (Time(%) 기준):
 ### 관찰
 - **MAGMA vbatched 가 GPU 시간의 50%+** — STRUMPACK이 small/medium fronts를 MAGMA의 vbatched-GETRF/TRSM/GEMM으로 처리
 - **STRUMPACK 자체 커널은 `extend_add_kernel` 과 `laswp_vbatch_kernel`** — vbatched로 처리 안 되는 부분(small-front extend-add, row swap)을 자체 작성
-- 큰 dense fronts용 `<32×32>` TRSM이 4번만 등장 (총 0.25 ms) — power-grid 야코비안에는 큰 front가 거의 없음을 확인 (`docs/related-work-and-contribution.md` §2 의 *"95% fronts have fsz ≤ 16"* 와 정확히 일치)
+- 큰 dense fronts용 `<32×32>` TRSM이 4번만 등장 (총 0.25 ms) — power-grid 야코비안에는 큰 front가 거의 없음을 확인 (`docs/related-work-and-novelty.md` §2 의 *"95% fronts have fsz ≤ 16"* 와 정확히 일치)
 
 ## 5. CUDA API summary — host-side overhead 정량
 
@@ -167,9 +167,9 @@ GPU kernel top (Time(%) 기준):
 
 (개략 — `cuda_api_sum` 의 시간은 호출 누적이고 그 중 일부는 GPU 실행과 겹치므로 1:1 합산은 안 됨. 비율은 대략적 추정)
 
-## 8. 결론 — `docs/strumpack-power-grid-analysis.md` §6.3 주장 검증
+## 8. 결론 — `docs/strumpack-vs-cudss-power-grid-wall-vs-kernel.md` §6.3 주장 검증
 
-`docs/strumpack-power-grid-analysis.md` §6.3 의 wall=169 vs kernel=21.5 ms 주장은 본 nsys 프로파일에서 직접 확인된다:
+`docs/strumpack-vs-cudss-power-grid-wall-vs-kernel.md` §6.3 의 wall=169 vs kernel=21.5 ms 주장은 본 nsys 프로파일에서 직접 확인된다:
 
 - NR iter 1 factor wall = **53.5 ms** (객체 재사용 시. 신규 객체 생성 시 169 ms — 1회성 init/alloc 차이)
 - GPU kernel 작업 시간 = **~10 ms** (vbatched + STRUMPACK 직접 합산, 본 iter의 절반 정도)
@@ -187,10 +187,10 @@ GPU kernel top (Time(%) 기준):
 cuDSS와 custom_linear_solver는 같은 카운트(launch 수)를 보지 않을 것이다 — cuDSS는 통합된 API 안에서 더 적은 launch 패턴, custom은 CUDA Graph로 **1번의 launch (graph replay)** 만 발생. 그게 wall-clock 차이의 본질.
 
 → 본 nsys 프로파일은 *"STRUMPACK은 small-front 도메인(power-grid)에서 GPU를 잘 못 쓴다"* 의 시각적 증거이며,
-`docs/related-work-and-contribution.md` §2 의 Spatula(MICRO'23) 주장 *"0.004% of V100 peak"* 의 정성적 매커니즘 — **수천 개의 작은 kernel launch + cudaLaunchKernel overhead** — 을 본 환경에서 직접 확인한다.
+`docs/related-work-and-novelty.md` §2 의 Spatula(MICRO'23) 주장 *"0.004% of V100 peak"* 의 정성적 매커니즘 — **수천 개의 작은 kernel launch + cudaLaunchKernel overhead** — 을 본 환경에서 직접 확인한다.
 
 ## 9. 다음 단계 (suggestion)
 
 - 같은 NR 패턴으로 cuDSS profile (`cudssExecute(REFACTORIZATION)` + `cudssExecute(SOLVE)` × 2). 이게 cuDSS의 wall 14 ms 중 cudssExecute API overhead 가 어디서 나오는지 직접 확인.
 - 같은 NR 패턴으로 custom_linear_solver profile (CUDA Graph replay). 이론적으로 launch 수가 graph 인스턴스화 후 1회 / iter 여야 함. 확인.
-- 위 셋의 nsys 파일을 모아 `docs/strumpack-power-grid-analysis.md` §6.3 의 "host overhead = 87%" 주장의 솔버별 메커니즘을 시각화.
+- 위 셋의 nsys 파일을 모아 `docs/strumpack-vs-cudss-power-grid-wall-vs-kernel.md` §6.3 의 "host overhead = 87%" 주장의 솔버별 메커니즘을 시각화.

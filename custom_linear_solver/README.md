@@ -48,5 +48,5 @@ build/custom_linear_solver/custom_linear_solver_run \
 ```
 
 See `docs/api-and-build-design.md` for the design and source inventory, and
-`docs/analyze-bottleneck-and-optimization.md` for the current analyze
+`docs/analyze-phase-optimization.md` for the current analyze
 bottleneck/optimization notes.

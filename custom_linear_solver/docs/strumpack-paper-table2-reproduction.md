@@ -4,7 +4,7 @@
 solver and preconditioner with block low rank compression"*, IJHPCA 2025.
 주요 주장: 논문 Table 2 — *"For a collection of SuiteSparse matrices, the STRUMPACK exact factorization on a single GPU is on average **1.87× faster** than NVIDIA's cuDSS solver."* (A100 기준)
 
-본 보고서는 같은 데이터셋(논문 Table 2)에서 같은 비교(STRUMPACK exact factorization vs cuDSS factorization, 단일 GPU)를 RTX 3090 위에서 재현 시도한 결과와, 같은 환경에서 본 저장소의 `custom_linear_solver`도 함께 돌렸을 때의 동작을 정리한다. **이 문서는 베이스라인 비교(`custom_linear_solver` vs STRUMPACK)가 아니라, 논문 Table 2 재현만을 다룬다**. 베이스라인 관계 분석은 `docs/baseline-vs-strumpack.md` 참고.
+본 보고서는 같은 데이터셋(논문 Table 2)에서 같은 비교(STRUMPACK exact factorization vs cuDSS factorization, 단일 GPU)를 RTX 3090 위에서 재현 시도한 결과와, 같은 환경에서 본 저장소의 `custom_linear_solver`도 함께 돌렸을 때의 동작을 정리한다. **이 문서는 베이스라인 비교(`custom_linear_solver` vs STRUMPACK)가 아니라, 논문 Table 2 재현만을 다룬다**. 베이스라인 관계 분석은 `docs/lineage-strumpack-not-the-baseline.md` 참고.
 
 ---
 
@@ -135,7 +135,7 @@ case_SyntheticUSA(N=156K, ~82K 버스, 본 저장소에 있는 가장 큰 전력
 
 핵심: 솔버는 자기 도메인(small-front sparse direct, 전력망 야코비안)에서는 ms 단위로 동작. 논문 도메인(large-front structural FEM)은 fundamentally 다른 매트릭스 클래스이며 솔버가 의도적으로 처리하지 않는다.
 
-이는 본 저장소의 `docs/related-work-and-contribution.md` §2 의 핵심 명제와 정확히 대칭:
+이는 본 저장소의 `docs/related-work-and-novelty.md` §2 의 핵심 명제와 정확히 대칭:
 
 > *"general GPU multifrontal libraries are engineered for matrices with **large dense fronts** (their FLOPs live there); power-grid Jacobians have **no large fronts**, so those libraries run at a tiny fraction of peak"*
 

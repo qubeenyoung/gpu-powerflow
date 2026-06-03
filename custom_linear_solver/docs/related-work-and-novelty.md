@@ -12,8 +12,8 @@ This document answers four things the team asked for:
 Method note: the external claims below come from a fan-out, adversarially-verified literature
 search (22 sources fetched, 108 claims extracted, 25 verified by 3-vote majority, 23 confirmed).
 Every external claim carries a citation. Claims about **our** solver come from this repo's measured
-runs (RTX 3090, sm_86, B=64–128; see `fp32-batched-factor-solve-optimization.md` and
-`fsa-optimization-report.md`). Where the literature is silent I say so explicitly.
+runs (RTX 3090, sm_86, B=64–128; see `fp32-batched-kernel-optimization.md` and
+`factor-solve-analyze-optimization.md`). Where the literature is silent I say so explicitly.
 
 ---
 

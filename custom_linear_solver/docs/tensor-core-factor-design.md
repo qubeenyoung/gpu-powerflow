@@ -300,4 +300,4 @@ Other knobs: `MF_AMALG=cap:ratio`, `MF_NO_SELINV`; runner `--batch B`, `--batch-
 **removed from the code**: each step costs ≈ one solve and the low-precision solve is not faster
 (latency-bound), so it never paid off end-to-end; where low precision helps (the factor) the
 small/medium result already passes 1e-3 without it. Only this note and the measurements in
-`fsa-optimization-report.md` remain. See that report for the full measurement log.
+`factor-solve-analyze-optimization.md` remain. See that report for the full measurement log.
