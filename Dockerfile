@@ -8,6 +8,7 @@ ARG MATLAB_INSTALL_LOCATION=/opt/matlab
 ARG LICENSE_SERVER
 ARG MATPOWER_REF=8.1
 ARG CUDSS_PACKAGE_VERSION=0.7.1.4-1
+ARG NSIGHT_SYSTEMS_PACKAGE_VERSION=12.8.1-1
 
 # 1. Base system packages (rarely changes)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libmetis-dev \
       libcudss0-cuda-12=${CUDSS_PACKAGE_VERSION} \
       libcudss0-dev-cuda-12=${CUDSS_PACKAGE_VERSION} \
+      cuda-nsight-systems-12-8=${NSIGHT_SYSTEMS_PACKAGE_VERSION} \
       zlib1g-dev tree jq \
       && rm -rf /var/lib/apt/lists/*
 
