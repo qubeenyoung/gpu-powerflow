@@ -47,6 +47,7 @@ build/custom_linear_solver/custom_linear_solver_run \
   --solution-out /tmp/case30_cls_solution.mtx
 ```
 
-See `docs/api-and-build-design.md` for the design and source inventory, and
-`docs/analyze-phase-optimization.md` for the current analyze
-bottleneck/optimization notes.
+Start from `docs/00-index.md` for the reorganized document map. See
+`docs/01-orientation/01-api-and-build-design.md` for the design and source
+inventory, and `docs/03-optimization-notes/03-analyze-phase-optimization.md`
+for the current analyze bottleneck/optimization notes.

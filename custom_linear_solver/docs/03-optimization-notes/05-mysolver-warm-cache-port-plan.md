@@ -117,5 +117,5 @@ hash, PAR_ND_BASE=4000)은 분석을 −13~29% 줄였다. 반복 solve가 많은
   compute=`fp64|mixed`. B=1에서 FP64는 단일-케이스, Mixed는 batched 경로를 탄다(코드:
   `cuda_custom_solver.cpp` 의 `CudaLinearSolveCustomFp64::factorize` 분기 vs
   `CudaLinearSolveCustomMixed::factorize` 항상 batched).
-- mysolver 기법 원문: `/workspace/cuDSS_reproduce_perf_warm_cache_stack/docs/
-  results-and-methodology.md` §4, `docs/cy348-recommended-config.md`.
+- mysolver 기법 원문: `/workspace/cuDSS_reproduce_perf_warm_cache_stack/docs/results-and-methodology.md` §4,
+  `/workspace/cuDSS_reproduce_perf_warm_cache_stack/docs/cy348-recommended-config.md`.

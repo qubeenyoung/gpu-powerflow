@@ -248,7 +248,7 @@ The remaining host/device transfers are analyze-only:
 - host-built symbolic/factor/solve maps to device
 
 For current analyze bottlenecks and optimization status, see
-`docs/analyze-phase-optimization.md`.
+`docs/03-optimization-notes/03-analyze-phase-optimization.md`.
 
 ## cuPF Integration Point
 

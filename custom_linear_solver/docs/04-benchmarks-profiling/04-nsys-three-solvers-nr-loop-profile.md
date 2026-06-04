@@ -39,7 +39,7 @@ cuDSS는 iter 2에 `CUDSS_PHASE_REFACTORIZATION` 사용 (이전 측정과 차이
 - cuDSS 2.5 ms (**20× faster than STRUMPACK**)
 - custom 2.0 ms (**25× faster than STRUMPACK, 1.24× faster than cuDSS**)
 
-이전 측정 (`docs/strumpack-vs-cudss-power-grid-wall-vs-kernel.md`) 의 *"custom 대 cuDSS 10× 빠름"* 은 매 호출 `cudssExecute(FACTORIZATION)` (first-time setup 포함) 을 비교한 결과로 NR 시나리오에 부정확. NR 사용자가 실제로 보는 차이는 **1.24×**.
+이전 측정 (`docs/04-benchmarks-profiling/02-strumpack-vs-cudss-power-grid-wall-vs-kernel.md`) 의 *"custom 대 cuDSS 10× 빠름"* 은 매 호출 `cudssExecute(FACTORIZATION)` (first-time setup 포함) 을 비교한 결과로 NR 시나리오에 부정확. NR 사용자가 실제로 보는 차이는 **1.24×**.
 
 ## 3. NSYS 핵심 metric 비교 (전체 2-iter run)
 
@@ -81,7 +81,7 @@ iter 2 factor 26.3 ms 분해:
 **원인 1: 알고리즘이 small-front 도메인과 mismatch**
 
 STRUMPACK GPU 경로는 **multifrontal LU + MAGMA `vbatched_dgetrf` 기반**. 이 설계의 sweet spot은 *"front 수십~수백 개, 각 front fsz ≥ 64"* 영역 (예: Janna 그룹 3D FEM). power-grid 야코비안은 정반대:
-- 95% of fronts have fsz ≤ 16 (`docs/related-work-and-novelty.md` §2)
+- 95% of fronts have fsz ≤ 16 (`docs/01-orientation/02-related-work-and-novelty.md` §2)
 - max front size 도 수백 수준
 - 깊은 etree (~72 levels on SyntheticUSA)
 
@@ -111,7 +111,7 @@ H2D 39 MB을 684 transfer로 (평균 57 KB / 청크). cuDSS는 13 MB / 21 transf
 
 **원인 5: Solve가 host fallback**
 
-`docs/strumpack-paper-table2-reproduction.md` 와 `docs/strumpack-vs-cudss-power-grid-wall-vs-kernel.md` 에서 확인된 *"Solve is performed on CPU"* 경고. nsys 에서도 solve 단계 GPU kernel time 작음 (대부분 cudssExecute(SOLVE) 처럼 GPU bound이지 않고 CPU에서 forward/backward substitution). solve 22.9 ms 의 대부분이 host CPU work + D2H/H2D 라운드트립.
+`docs/04-benchmarks-profiling/01-strumpack-paper-table2-reproduction.md` 와 `docs/04-benchmarks-profiling/02-strumpack-vs-cudss-power-grid-wall-vs-kernel.md` 에서 확인된 *"Solve is performed on CPU"* 경고. nsys 에서도 solve 단계 GPU kernel time 작음 (대부분 cudssExecute(SOLVE) 처럼 GPU bound이지 않고 CPU에서 forward/backward substitution). solve 22.9 ms 의 대부분이 host CPU work + D2H/H2D 라운드트립.
 
 ### 4.3 한 줄 정리
 
@@ -180,7 +180,7 @@ iter 2 factor 1.32 ms:
 
 → NR iter 당 host->device launch 비용 = **1 cudaGraphLaunch (~20 μs)**. STRUMPACK 1500회 × 6 μs = 9 ms 와 비교 **450× 적은 launch overhead**.
 
-**원인 2: small-front 전용 커널 라우팅** (`docs/lineage-strumpack-not-the-baseline.md` L2/L3/L8)
+**원인 2: small-front 전용 커널 라우팅** (`docs/01-orientation/03-lineage-strumpack-not-the-baseline.md` L2/L3/L8)
 
 custom은 front 크기에 따라 3가지 kernel:
 - fsz ≤ 32 → **warp-per-front kernel** (`mf_factor_small_warp_b`)
@@ -258,7 +258,7 @@ pivoting                      partial            partial            없음 (no-p
 
 ## 9. 한계 / 정직성 게이트
 
-- 본 측정은 single-system (B=1). custom의 batched 경로 (B=64+) 우위는 별도 측정 영역 (`docs/fp32-batched-kernel-optimization.md` 참고).
+- 본 측정은 single-system (B=1). custom의 batched 경로 (B=64+) 우위는 별도 측정 영역 (`docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md` 참고).
 - 본 NR iter 측정은 case_ACTIVSg25k 1개. 다른 power-grid 케이스에서도 같은 ratio가 나오는지 확인 필요.
 - cuDSS의 REFACTORIZATION이 실제 NR loop 시나리오에서 적합한지 (값 변화가 너무 크면 numerical reliability 이슈) 는 별도 검증.
 - custom 의 graph capture 는 sparsity pattern 고정 + no-pivot 가정 위에서만 안전. 도메인 외 fallback 없음.

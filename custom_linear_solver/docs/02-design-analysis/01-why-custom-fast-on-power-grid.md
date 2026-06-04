@@ -10,7 +10,7 @@
 
 ## 1. 출발 — 전력망 Jacobian 위의 *물리적* 측정 사실
 
-`docs/strumpack-vs-custom-multifrontal-case8387.md` §2.2 와 ncu 결과 종합:
+`docs/04-benchmarks-profiling/05-strumpack-vs-custom-multifrontal-case8387.md` §2.2 와 ncu 결과 종합:
 
 | 사실 | 측정값 (case8387pegase, N=14908) | 함의 |
 |---|---|---|
@@ -21,7 +21,7 @@
 | 본 솔버의 factor 본체 (`mf_factor_extend_level`) ncu | SM 4.4%, DRAM 1.8%, FP64 25.3% | **latency-bound** — GPU 어느 자원도 saturate 못 함 |
 | 본 솔버의 solve fwd/bwd ncu | SM 1.6~6.6%, DRAM 1.6~2.1% | **latency-bound** |
 
-다른 power-grid 케이스(ACTIVSg25k 등)도 정성적으로 같은 분포 (`docs/related-work-and-novelty.md` §2). 즉 *이 매트릭스 클래스의 본질*이다.
+다른 power-grid 케이스(ACTIVSg25k 등)도 정성적으로 같은 분포 (`docs/01-orientation/02-related-work-and-novelty.md` §2). 즉 *이 매트릭스 클래스의 본질*이다.
 
 → **GPU compute를 더 짜내는 것은 leverage 아님.** factor 본체가 SM 4.4% 인데, *"SM 100% 까지 끌어올린다"* 가 best case 인데도 그 자체로 22× 만 빠르게 만든다. 실제로는 latency-bound 에서 SM% 끌어올리기 자체가 매우 어렵다 (per-call work가 너무 작음). leverage는 다른 곳에 있다.
 
@@ -29,7 +29,7 @@
 
 ## 2. 그러면 leverage는 어디 — *"호출 경로의 host-side overhead 전체"*
 
-같은 case8387pegase 에서 STRUMPACK의 NR iter 2 factor wall=14.32 ms 의 분해 (`docs/strumpack-vs-custom-multifrontal-case8387.md` §5.1):
+같은 case8387pegase 에서 STRUMPACK의 NR iter 2 factor wall=14.32 ms 의 분해 (`docs/04-benchmarks-profiling/05-strumpack-vs-custom-multifrontal-case8387.md` §5.1):
 
 | 구성 | 시간 | 메커니즘 |
 |---|---:|---|
@@ -55,7 +55,7 @@
 
 **결정**: `analyze()` 단계에서 factor 와 solve 의 kernel 시퀀스를 각각 `cudaGraph` 로 capture. NR iter 마다는 `cudaGraphLaunch` 한 번씩 (`cudaGraphInstantiate` 는 2회, `cudaGraphLaunch` 는 NR iter 당 2회 = factor + solve).
 
-**측정 증거** (`docs/nsys-three-solvers-nr-loop-profile.md` §3 + nsys `/tmp/bench/nsys/custom_nr_8387.nsys-rep`):
+**측정 증거** (`docs/04-benchmarks-profiling/04-nsys-three-solvers-nr-loop-profile.md` §3 + nsys `/tmp/bench/nsys/custom_nr_8387.nsys-rep`):
 
 | 구성 | STRUMPACK | custom |
 |---|---:|---:|
@@ -68,7 +68,7 @@
 
 **가정**: max fsz < 160 — 본 도메인 측정 사실 (§1).
 
-**결정**: front 의 fsz 에 따라 세 가지 GPU kernel 중 하나로 dispatch (`docs/fp32-batched-kernel-optimization.md`):
+**결정**: front 의 fsz 에 따라 세 가지 GPU kernel 중 하나로 dispatch (`docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`):
 - **fsz ≤ 32**: warp-per-front kernel `mf_factor_small_warp_b` — 1 warp/front, 8 warps/block, per-warp shared memory, `__syncwarp()` 만 사용. block barrier 없음.
 - **32 < fsz ≤ 159**: shared-resident mid-front kernel `mf_factor_mid_tc32_b` — 프론트 전체를 dynamic shared memory(레벨별 최대 fsz²에 맞춰 sized) 에 한 번 로드, panel LU/U-solve/trailing/extend-add 가 모두 shared 위, L/U 만 write-back.
 - **fsz > 159**: 1024-thread/block big-separator kernel — 큰 separator (9~25 fronts/level) 에 다수 warp packing 으로 sequential dependency 은닉.
@@ -78,9 +78,9 @@ case8387pegase 에서:
 - 32 < fsz ≤ 96 fronts: 62 / 7,421 (0.8%) → shared-resident 경로
 - fsz > 159: 0 (사용 안 됨)
 
-**측정 증거** (`docs/fp32-batched-kernel-optimization.md`):
+**측정 증거** (`docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`):
 - ACTIVSg25k 의 dominant bottom level (fsz ≤ 16, 4114 fronts): 2.47 → **1.12 ms (compute-bound 76%)**
-- 같은 work 를 vbatched 로 처리하면 SM% 가 ~10% (`docs/strumpack-vs-custom-multifrontal-case8387.md` §3.2 의 STRUMPACK ncu 참고: `trsm_template_vbatched<8,64>` SM 19%, `<2,32>` SM 0%)
+- 같은 work 를 vbatched 로 처리하면 SM% 가 ~10% (`docs/04-benchmarks-profiling/05-strumpack-vs-custom-multifrontal-case8387.md` §3.2 의 STRUMPACK ncu 참고: `trsm_template_vbatched<8,64>` SM 19%, `<2,32>` SM 0%)
 
 → **dense LU sweet spot 밖 영역에서 warp-단위 / shared-resident 디자인이 vbatched 디자인보다 적합**. 가정의 정당성은 측정사실 §1 의 max fsz=96.
 
@@ -102,7 +102,7 @@ case8387pegase 에서:
 
 **결정**: dense LU 를 *no partial pivoting* 으로 진행. pivot row 가 안전하다고 가정 (singular이면 `Status::FactorizationFailed` 로 fail-fast).
 
-비교: STRUMPACK 은 partial pivoting 유지 → `laswp_vbatch_kernel` 47 launches/iter, **SM 0.1% / DRAM 0.2%** = 순수 overhead (`docs/strumpack-vs-custom-multifrontal-case8387.md` §3.2).
+비교: STRUMPACK 은 partial pivoting 유지 → `laswp_vbatch_kernel` 47 launches/iter, **SM 0.1% / DRAM 0.2%** = 순수 overhead (`docs/04-benchmarks-profiling/05-strumpack-vs-custom-multifrontal-case8387.md` §3.2).
 
 **측정 증거**: custom 의 ncu 에 `laswp` 같은 row-swap kernel 자체가 없음 — 카테고리 통째로 제거.
 
@@ -114,7 +114,7 @@ case8387pegase 에서:
 
 **결정** (`src/solve/multifrontal.cu`): solve forward/backward kernel 이 device 포인터를 그대로 받음. analyze 시점에 solve graph 도 함께 capture.
 
-비교: STRUMPACK 의 *"Solve is performed on CPU"* warning — solve 가 호스트 메모리 + CPU 경로 (`docs/strumpack-vs-cudss-power-grid-wall-vs-kernel.md` §관찰 2). 매 NR iter 마다 RHS H2D, 솔루션 D2H. solve 22.9 ms (case_ACTIVSg25k) vs cuDSS 0.7 ms 의 격차.
+비교: STRUMPACK 의 *"Solve is performed on CPU"* warning — solve 가 호스트 메모리 + CPU 경로 (`docs/04-benchmarks-profiling/02-strumpack-vs-cudss-power-grid-wall-vs-kernel.md` §관찰 2). 매 NR iter 마다 RHS H2D, 솔루션 D2H. solve 22.9 ms (case_ACTIVSg25k) vs cuDSS 0.7 ms 의 격차.
 
 **측정 증거** (case8387pegase, ncu):
 - custom solve fwd: 0.34 ms
@@ -129,7 +129,7 @@ case8387pegase 에서:
 
 **결정**: 모든 `cudaMalloc` 을 analyze 시점에 한 번. NR iter 중에는 새 alloc 없음, 모두 사전 할당된 arena 재사용.
 
-비교: STRUMPACK 의 NR iter 중 `cudaMallocHost` 344 calls + `cudaFreeHost` 344 calls per run (`docs/nsys-strumpack-nr-loop-profile.md` §5). 페이지락 풀 캐시 없음.
+비교: STRUMPACK 의 NR iter 중 `cudaMallocHost` 344 calls + `cudaFreeHost` 344 calls per run (`docs/04-benchmarks-profiling/03-nsys-strumpack-nr-loop-profile.md` §5). 페이지락 풀 캐시 없음.
 
 **측정 증거** (case8387pegase nsys):
 - custom: `cudaMalloc` 26 calls 전체, 모두 setup + analyze 단계. NR iter 자체에는 alloc 없음.
@@ -143,7 +143,7 @@ case8387pegase 에서:
 
 **결정** (`src/reordering/metis_nd.cpp` + `matrix::build_symmetric_graph_device`): METIS 입력 그래프 (`xadj`, `adjncy`) 를 GPU 에서 빌드 — `thrust::sort/unique` 로 directed edge keys → CSR 변환. CPU `build_symmetric_adjacency` 의 single-threaded 단계 제거.
 
-**측정 증거** (`docs/factor-solve-analyze-optimization.md`):
+**측정 증거** (`docs/03-optimization-notes/02-factor-solve-analyze-optimization.md`):
 - 9241 case analyze: 19 ms → 경감 (graph build 가 18.6 ms → 1 ms 수준)
 - 소/중규모 case 에서 **analyze −22~34%**
 
@@ -207,12 +207,12 @@ STRUMPACK 은 *general-purpose sparse direct* 로서 이 모든 가정을 깨야
 
 | 가정 깨짐 | 결과 |
 |---|---|
-| front_total > 8 GB doubles | analyze 가 `Status::AnalysisFailed` 로 fail-fast (`multifrontal.cu:583`). paper 행렬이 정확히 이 경우 (`docs/strumpack-paper-table2-reproduction.md` §3.4) |
+| front_total > 8 GB doubles | analyze 가 `Status::AnalysisFailed` 로 fail-fast (`multifrontal.cu:583`). paper 행렬이 정확히 이 경우 (`docs/04-benchmarks-profiling/01-strumpack-paper-table2-reproduction.md` §3.4) |
 | 매우 큰 단일 separator (fsz » 1024) | 1024-thread big-separator kernel 의 점진적 효율 저하 |
 | numerically ill-conditioned (pivot 0) | `Status::FactorizationFailed`, NR loop 가 fallback 필요 |
 | RHS/solution이 host memory | API 가 device 포인터만 받음 — 호출자가 변환 책임 |
 | 같은 pattern 위 batched 가 아닌 단발 (single) | graph capture 의 overhead 가 회수 안 됨 — 한 번만 푸는 시나리오엔 비최적 |
-| FP32 정확도 부족한 ill-conditioned grid | TC32 path 가 25k/70k 위에서 발산 보고 (`docs/fp32-batched-kernel-optimization.md`) |
+| FP32 정확도 부족한 ill-conditioned grid | TC32 path 가 25k/70k 위에서 발산 보고 (`docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`) |
 | sparsity pattern 변경 | NR loop 의 정의 위반 — re-analyze 필요 |
 
 본 솔버는 *"8가지 가정의 모든 적용 영역 안에서만"* 우세하다. 그 안에서는 leverage 가 곱셈으로 누적. 그 밖에서는 STRUMPACK/cuDSS/KLU 같은 general 솔버에 의존해야 함.
@@ -221,10 +221,10 @@ STRUMPACK 은 *general-purpose sparse direct* 로서 이 모든 가정을 깨야
 
 ## 7. 본 분석의 정직성 게이트
 
-- 측정은 case8387pegase 1 case 에서 NR iter 2 steady-state 단일 측정. case3120sp ~ ACTIVSg70k 의 다른 power-grid case 들 (`docs/fp32-batched-kernel-optimization.md`) 은 정성적으로 같은 분포지만, ncu kernel bound 분류 는 case8387pegase 만 수행.
+- 측정은 case8387pegase 1 case 에서 NR iter 2 steady-state 단일 측정. case3120sp ~ ACTIVSg70k 의 다른 power-grid case 들 (`docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`) 은 정성적으로 같은 분포지만, ncu kernel bound 분류 는 case8387pegase 만 수행.
 - ncu 측정에서 일부 kernel 의 SM% 가 0.0% 인 게 *"GPU 가 아무것도 안 함"* 의 직접적 의미는 아님 — kernel 이 너무 짧아서 ncu 의 sampling 해상도 밖일 수 있음. 다만 다른 측정 (warp%, FP64%) 도 모두 낮아서 latency-bound 결론은 robust.
-- vs cuDSS 의 차이 1.24× (`docs/nsys-three-solvers-nr-loop-profile.md`) 는 본 분석에 직접 들어가지 않음. 본 문서는 *"왜 custom 이 빠른가"* 의 메커니즘 분해.
-- 정성적으로 같은 분석을 GPU bus dim 30k+ 케이스 (SyntheticUSA n=156255) 에서 검증할 수는 있으나 본 솔버가 그 영역에서 별도 한계로 fail함 (`docs/strumpack-paper-table2-reproduction.md` §3.5). 더 강한 일반화는 별도 검증 필요.
+- vs cuDSS 의 차이 1.24× (`docs/04-benchmarks-profiling/04-nsys-three-solvers-nr-loop-profile.md`) 는 본 분석에 직접 들어가지 않음. 본 문서는 *"왜 custom 이 빠른가"* 의 메커니즘 분해.
+- 정성적으로 같은 분석을 GPU bus dim 30k+ 케이스 (SyntheticUSA n=156255) 에서 검증할 수는 있으나 본 솔버가 그 영역에서 별도 한계로 fail함 (`docs/04-benchmarks-profiling/01-strumpack-paper-table2-reproduction.md` §3.5). 더 강한 일반화는 별도 검증 필요.
 
 ---
 
@@ -239,18 +239,18 @@ STRUMPACK 은 *general-purpose sparse direct* 로서 이 모든 가정을 깨야
 ## 9. 출처
 
 본 저장소:
-- `docs/api-and-build-design.md` — 공개 API, 빌드, 복사한 파일 인벤토리 (D1 graph capture, D5 device API 의 출처)
-- `docs/related-work-and-novelty.md` — 외부 솔버 landscape, novelty 자체 평가
-- `docs/fp32-batched-kernel-optimization.md` — D2 (3-tier kernel routing) 의 측정 데이터
-- `docs/analyze-phase-optimization.md`, `docs/factor-solve-analyze-optimization.md` — D7 (GPU symmetric graph) 의 출처와 −22~34% 효과
-- `docs/tensor-core-factor-design.md` — TC32 negative result + small-front kernel 디자인
-- `docs/mysolver-warm-cache-port-plan.md` — 단일-케이스 vs cuDSS 측정
-- `docs/lineage-strumpack-not-the-baseline.md` — STRUMPACK GPU 의 9가지 한계 매핑
-- `docs/strumpack-paper-table2-reproduction.md` — STRUMPACK paper Table 2 매트릭스 재현 결과
-- `docs/strumpack-vs-cudss-power-grid-wall-vs-kernel.md` — wall-clock vs kernel-only 측정
-- `docs/nsys-strumpack-nr-loop-profile.md` — STRUMPACK NR profile (1500 launches/iter)
-- `docs/nsys-three-solvers-nr-loop-profile.md` — 3-way NR profile (STRUMPACK/cuDSS/custom)
-- `docs/strumpack-vs-custom-multifrontal-case8387.md` — case8387pegase ncu kernel bound 분류 + front 분포 + Janna paper 데이터셋 분석
+- `docs/01-orientation/01-api-and-build-design.md` — 공개 API, 빌드, 복사한 파일 인벤토리 (D1 graph capture, D5 device API 의 출처)
+- `docs/01-orientation/02-related-work-and-novelty.md` — 외부 솔버 landscape, novelty 자체 평가
+- `docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md` — D2 (3-tier kernel routing) 의 측정 데이터
+- `docs/03-optimization-notes/03-analyze-phase-optimization.md`, `docs/03-optimization-notes/02-factor-solve-analyze-optimization.md` — D7 (GPU symmetric graph) 의 출처와 −22~34% 효과
+- `docs/03-optimization-notes/04-tensor-core-factor-design.md` — TC32 negative result + small-front kernel 디자인
+- `docs/03-optimization-notes/05-mysolver-warm-cache-port-plan.md` — 단일-케이스 vs cuDSS 측정
+- `docs/01-orientation/03-lineage-strumpack-not-the-baseline.md` — STRUMPACK GPU 의 9가지 한계 매핑
+- `docs/04-benchmarks-profiling/01-strumpack-paper-table2-reproduction.md` — STRUMPACK paper Table 2 매트릭스 재현 결과
+- `docs/04-benchmarks-profiling/02-strumpack-vs-cudss-power-grid-wall-vs-kernel.md` — wall-clock vs kernel-only 측정
+- `docs/04-benchmarks-profiling/03-nsys-strumpack-nr-loop-profile.md` — STRUMPACK NR profile (1500 launches/iter)
+- `docs/04-benchmarks-profiling/04-nsys-three-solvers-nr-loop-profile.md` — 3-way NR profile (STRUMPACK/cuDSS/custom)
+- `docs/04-benchmarks-profiling/05-strumpack-vs-custom-multifrontal-case8387.md` — case8387pegase ncu kernel bound 분류 + front 분포 + Janna paper 데이터셋 분석
 
 외부:
 - Spatula (MICRO 2023) — STRUMPACK 0.004% peak on FullChip

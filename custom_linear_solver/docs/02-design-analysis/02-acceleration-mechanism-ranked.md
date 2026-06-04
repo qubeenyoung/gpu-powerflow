@@ -2,7 +2,7 @@
 
 ## 0. 정정
 
-`docs/why-custom-fast-on-power-grid.md` 가 8개의 설계 결정 (D1~D8) 을 *나열* 한다. 그러나 *주된 leverage 가 무엇인가* 의 순위는 명시적이지 않다. 본 문서는 동일 측정 데이터를 **rank-ordered breakdown** 으로 정리한다. 그리고 흔히 잘못 framing 되는 두 가지를 명시적으로 정정한다:
+`docs/02-design-analysis/01-why-custom-fast-on-power-grid.md` 가 8개의 설계 결정 (D1~D8) 을 *나열* 한다. 그러나 *주된 leverage 가 무엇인가* 의 순위는 명시적이지 않다. 본 문서는 동일 측정 데이터를 **rank-ordered breakdown** 으로 정리한다. 그리고 흔히 잘못 framing 되는 두 가지를 명시적으로 정정한다:
 
 - ❌ *"작은 front 가 많아서 빠르다"* — 부분적으로만 참 (factor 의 ~15%)
 - ❌ *"pivoting 안 해서 빠르다"* — 직접 기여는 미미 (~1%)
@@ -14,7 +14,7 @@
 
 ## 1. 측정 데이터 — 26× 격차의 구성 (case8387pegase, NR iter 2 steady-state)
 
-`docs/strumpack-vs-custom-multifrontal-case8387.md` §5 + `docs/nsys-three-solvers-nr-loop-profile.md`:
+`docs/04-benchmarks-profiling/05-strumpack-vs-custom-multifrontal-case8387.md` §5 + `docs/04-benchmarks-profiling/04-nsys-three-solvers-nr-loop-profile.md`:
 
 | 구성요소 | STRUMPACK [ms] | custom [ms] | 차이 [ms] | 차이 비율 |
 |---|---:|---:|---:|---:|
@@ -153,7 +153,7 @@ cudaGraphLaunch(plan.graph_exec, ...); // pre-built graph replay
 ### 4.1 직접 contribution
 
 **작은 front** (D2, D3, D8) 의 직접 기여:
-- warp-per-front kernel (`mf_factor_small_warp_b`) 이 fsz ≤ 32 영역에서 SM% 4% 가능 (`docs/strumpack-vs-custom-multifrontal-case8387.md` §3.1 의 ncu)
+- warp-per-front kernel (`mf_factor_small_warp_b`) 이 fsz ≤ 32 영역에서 SM% 4% 가능 (`docs/04-benchmarks-profiling/05-strumpack-vs-custom-multifrontal-case8387.md` §3.1 의 ncu)
 - STRUMPACK 의 `gemm_template_vbatched<16,16,48>` 가 같은 영역에서 SM% 10% 이지만 **kernel launch 가 146 instances** (vs custom 의 31 levels × 1 fused kernel = 31 instances + graph 안에 들어가 0)
 - 정량: GPU kernel work 차이 5 → 0.6 ms = **4.4 ms 절약**, factor wall 의 ~15%
 
@@ -239,11 +239,11 @@ cudaGraphLaunch(plan.graph_exec, ...); // pre-built graph replay
 ## 9. 출처
 
 본 저장소:
-- `docs/why-custom-fast-on-power-grid.md` — 8가지 설계 결정 (D1~D8) 의 나열. 본 문서가 그 위의 *순위* 를 명시
-- `docs/strumpack-vs-custom-multifrontal-case8387.md` §5 — wall-clock 분해의 측정 데이터 출처
-- `docs/nsys-three-solvers-nr-loop-profile.md` — cudaLaunchKernel / cudaMalloc / cudaGraphLaunch 측정의 출처
-- `docs/nsys-strumpack-nr-loop-profile.md` — STRUMPACK 의 1500 launches/iter + 344 cudaMallocHost 의 측정 출처
-- `docs/no-pivoting-empirical-proof.md` — 무피벗 가정의 정당성 (가설 H1~H4)
+- `docs/02-design-analysis/01-why-custom-fast-on-power-grid.md` — 8가지 설계 결정 (D1~D8) 의 나열. 본 문서가 그 위의 *순위* 를 명시
+- `docs/04-benchmarks-profiling/05-strumpack-vs-custom-multifrontal-case8387.md` §5 — wall-clock 분해의 측정 데이터 출처
+- `docs/04-benchmarks-profiling/04-nsys-three-solvers-nr-loop-profile.md` — cudaLaunchKernel / cudaMalloc / cudaGraphLaunch 측정의 출처
+- `docs/04-benchmarks-profiling/03-nsys-strumpack-nr-loop-profile.md` — STRUMPACK 의 1500 launches/iter + 344 cudaMallocHost 의 측정 출처
+- `docs/02-design-analysis/03-no-pivoting-empirical-proof.md` — 무피벗 가정의 정당성 (가설 H1~H4)
 
 원시 데이터:
 - `/tmp/bench/nsys/custom_nr_8387.nsys-rep` — custom solver 의 cuda_api_sum, cuda_gpu_kern_sum

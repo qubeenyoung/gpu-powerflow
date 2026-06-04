@@ -2,7 +2,7 @@
 
 ## 0. 출발 — 문제
 
-`custom_linear_solver`는 **numerical pivoting이 없다** (partial pivoting도, MC64 matching도, scaling도; `docs/why-custom-fast-on-power-grid.md` D4 + 본 저장소 grep 검증). 그럼에도 power-grid NR Jacobian에서 정확한 해를 낸다 (forward error ≤ 1e-13). 왜?
+`custom_linear_solver`는 **numerical pivoting이 없다** (partial pivoting도, MC64 matching도, scaling도; `docs/02-design-analysis/01-why-custom-fast-on-power-grid.md` D4 + 본 저장소 grep 검증). 그럼에도 power-grid NR Jacobian에서 정확한 해를 낸다 (forward error ≤ 1e-13). 왜?
 
 본 문서는 *"power-grid NR Jacobian은 normal operating point 근방에서 LU pivoting이 필요 없다"* 라는 주장을 **가설로 명시하고 실측으로 증명**한다. 추측이 아닌 측정.
 
@@ -201,7 +201,7 @@ H4 (backward error = O(ε_m))
 | **R/X ≫ 1 인 distribution network** (저전압 배전망) | $|G_{ij}| > |B_{ij}|$ 가 되어 weak DD 깨짐 → H2 깨짐 | σ 가 0.5 미만, no-pivot 위험 |
 | **Mesh-heavy 또는 mal-conditioned grid** | 일부 row 의 $\sigma$ 가 매우 작음 | numerical safety 없음 — partial pivot 가 필요 |
 
-custom_linear_solver 는 이 모든 경우에 대해 **silently garbage solution** 을 반환 (`docs/why-custom-fast-on-power-grid.md` §6 의 한계와 정확히 일치). singular 검출 코드 (`d_sing` flag) 는 있지만 호스트가 읽지 않음 — 의도적으로 *"normal operating point 만 처리"* 라는 contract.
+custom_linear_solver 는 이 모든 경우에 대해 **silently garbage solution** 을 반환 (`docs/02-design-analysis/01-why-custom-fast-on-power-grid.md` §6 의 한계와 정확히 일치). singular 검출 코드 (`d_sing` flag) 는 있지만 호스트가 읽지 않음 — 의도적으로 *"normal operating point 만 처리"* 라는 contract.
 
 → caller (cuPF) 가:
 1. Pre-NR 단계에서 *"이 case 가 normal operating point 근방인가"* 검증
@@ -256,6 +256,6 @@ python3 /tmp/bench/no_pivot_proof.py \
 - Wilkinson, J. H., *"Error Analysis of Direct Methods of Matrix Inversion"*, J. ACM 1961 — growth factor 분석의 원전
 - Bergen & Vittal, *"Power Systems Analysis"*, 2/e — power-flow Jacobian 의 블록 구조와 normal operating point
 - Davis, *"Direct Methods for Sparse Linear Systems"*, SIAM 2006 — sparse direct LU 의 stability 분석
-- 본 저장소 `docs/why-custom-fast-on-power-grid.md` D4 — no-pivot 가정과 그 결과 (kernel 제거, launch 감소)
-- 본 저장소 `docs/lineage-strumpack-not-the-baseline.md` L7 — STRUMPACK 이 partial pivoting 을 maintain하는 이유와 그 cost
-- 본 저장소 `docs/strumpack-vs-custom-multifrontal-case8387.md` §3.2 — STRUMPACK 의 `laswp_vbatch_kernel` (row swap) 이 ncu SM 0.1% 로 측정된 결과 (no-pivot 가정 도입의 직접적 leverage)
+- 본 저장소 `docs/02-design-analysis/01-why-custom-fast-on-power-grid.md` D4 — no-pivot 가정과 그 결과 (kernel 제거, launch 감소)
+- 본 저장소 `docs/01-orientation/03-lineage-strumpack-not-the-baseline.md` L7 — STRUMPACK 이 partial pivoting 을 maintain하는 이유와 그 cost
+- 본 저장소 `docs/04-benchmarks-profiling/05-strumpack-vs-custom-multifrontal-case8387.md` §3.2 — STRUMPACK 의 `laswp_vbatch_kernel` (row swap) 이 ncu SM 0.1% 로 측정된 결과 (no-pivot 가정 도입의 직접적 leverage)
