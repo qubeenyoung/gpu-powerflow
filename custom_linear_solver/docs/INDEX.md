@@ -68,7 +68,11 @@ front-size 분포 (96.2% fsz ≤ 16, max fsz = 96), ncu 커널 bound 분류 (둘
 
 ### [why-custom-fast-on-power-grid.md](why-custom-fast-on-power-grid.md)
 *비교 분석 없이 `custom_linear_solver` 자체의 8가지 설계 결정 (D1~D8) 만으로 *"왜 빠른가"* 를 분해*
-D1 CUDA Graph capture, D2 3-tier kernel routing, D3 fused factor+extend, D4 no pivot, D5 device-resident solve, D6 analyze-time memory closure, D7 GPU symmetric graph build, D8 단일 kernel value scatter. 각각의 가정 + 측정 증거 + 제거한 cost. **솔버 자체의 설계 분해**.
+D1 CUDA Graph capture, D2 3-tier kernel routing, D3 fused factor+extend, D4 no pivot, D5 device-resident solve, D6 analyze-time memory closure, D7 GPU symmetric graph build, D8 단일 kernel value scatter. 각각의 가정 + 측정 증거 + 제거한 cost. **솔버 자체의 설계 분해**. (각 결정의 *순위* 는 `acceleration-mechanism-ranked.md` 참조.)
+
+### [acceleration-mechanism-ranked.md](acceleration-mechanism-ranked.md)
+*D1~D8 중 *주된* leverage 는 무엇인가 — 순위 있는 분해*
+factor 차이 26× 의 80% 가 **D1 (CUDA Graph) + D6 (hot-loop 사전 할당)** 으로부터. 작은 front + 무피벗 (D2, D4) 은 직접 기여 17% + CUDA Graph 의 precondition 역할. *"메모리 종결"* 용어를 *"hot-loop 사전 할당"* 으로 정정. **"진짜 가속의 원인이 무엇인가" 의 명확한 답**.
 
 ---
 
