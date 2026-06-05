@@ -49,9 +49,11 @@ if(CLS_BUILD_CUDA_OPS)
     src/plan/multifrontal_plan.cu
     src/factorize/multifrontal.cu
     src/batched/multifrontal_batched.cu
+    src/tc/multifrontal_tc.cu
     src/solve/multifrontal.cu
     src/symbolic/elimination_tree.cpp
     src/symbolic/supernode.cpp
+    src/symbolic/amalgamate.cpp
     src/symbolic/multifrontal.cpp
     src/reordering/metis_nd.cpp
   )
@@ -63,6 +65,7 @@ if(CLS_BUILD_CUDA_OPS)
   )
   target_link_libraries(custom_linear_solver_ops PUBLIC
     CUDA::cudart
+    CUDA::cublas
     ${METIS_LIBRARY}
   )
   if(CLS_INTERNAL_GRAPH)

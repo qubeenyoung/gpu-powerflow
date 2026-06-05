@@ -21,6 +21,8 @@
 #include "batched/factor_kernels.cuh"  // mf_factor_extend_*_b, mf_invert_pivot_b<FT>
 #include "batched/factor_small.cuh"    // mf_factor_small_warp_b<FT> (tiny-front warp-per-front)
 #include "tc/factor_tc.cuh"            // mf_factor_extend_tc32_b (FP32-native tensor-core trailing)
+#include "tc/trailing_tiled.cuh"       // Σ.14: mf_factor_mid_tiled_b (shared-staged scalar trailing)
+#include "tc/factor_no_trailing.cuh"   // Σ.16: NT (no-trailing) clones for direct GEMM-time profiling
 #include "batched/solve_kernels.cuh"   // gather_rhs_b, scatter_sol_b, mf_{fwd,bwd}_level_b
 #include "batched/solve_small.cuh"     // mf_{fwd,bwd}_small_warp_b<FT> (warp-packed small levels)
 
@@ -44,6 +46,11 @@ BatchedState::~BatchedState()
     if (d_yB) cudaFree(d_yB);
     if (d_yBf) cudaFree(d_yBf);
     if (d_sing) cudaFree(d_sing);
+    if (fork_event) cudaEventDestroy(static_cast<cudaEvent_t>(fork_event));
+    for (int k = 0; k < num_subtree_streams; ++k) {
+        if (join_events[k]) cudaEventDestroy(static_cast<cudaEvent_t>(join_events[k]));
+        if (subtree_streams[k]) cudaStreamDestroy(static_cast<cudaStream_t>(subtree_streams[k]));
+    }
     // Only destroy the stream the solver itself created (internal-graph mode). In external mode the
     // stream is owned by the caller (e.g. cuPF's capture stream) and must outlive this state.
     if (stream && owns_stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
@@ -55,30 +62,31 @@ BatchedState::~BatchedState()
 // directly onto a caller stream). Pure kernel launches only — no graph / host-sync here, so they
 // are safe both to capture into a graph and to record into an outer stream capture.
 // ---------------------------------------------------------------------------
-static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, cudaStream_t stream)
+// Issue one contiguous range [b, e) of plcols positions to `stream`. Used both by the original
+// single-stream factor loop and the Σ.11 multi-stream subtree dispatch (each subtree's panels
+// at level L are a contiguous plcols slice after analyze re-sorts by subtree id).
+static void issue_factor_level_range(const MultifrontalPlan& plan, BatchedState& st,
+                                     cudaStream_t stream, int b, int e)
 {
     const BatchPrecision prec = st.prec;
-    const bool pure_fp32 = is_fp32_front(prec);  // float front: pure-FP32 or FP32-native TC
+    const bool pure_fp32 = is_fp32_front(prec);
     const int B = st.B;
     const int T = 128;
     const int do_extend = 1;
-    // Levels whose fronts are all small go to the warp-per-front kernel (one warp per (front,batch),
-    // many warps per block) instead of the per-front 128-thread block kernel; this is where the
-    // factor time concentrates (the tiny bottom-etree levels) and the block-barrier/idle-thread
-    // overhead is worst. Only the float-front (FP32 / TC32) and FP64 paths share the templated warp
-    // LU; Mixed/TC (FP64 master + FP32 working) keep the per-front kernel.
-    const int SMALL_THRESH = 32;       // route a level here when its max fsz <= this (warp kernel)
-    const int SMALL_WARPS = 8;         // warps per block for the small-front kernel
-    // Float-front levels up to MID_THRESH go to the shared-resident mid kernel. The whole front
-    // (fsz^2 floats) must fit the sm_86 99 KB shared cap: FP32 (no TC staging) reaches fsz~159;
-    // TC32 needs extra room for the FP16 L/U staging + warp scratch, so it is held lower.
+    const int SMALL_THRESH = 32;
+    const int SMALL_WARPS = 8;
     const int MID_THRESH = (prec == BatchPrecision::TC32) ? 128 : 159;
     const bool small_ok = pure_fp32 || prec == BatchPrecision::FP64;
-    // Per level, gridDim=(level_size, B); kernel chosen by precision.
-    for (int L = 0; L < plan.num_plevels; ++L) {
-        const int b = plan.plptr[L], e = plan.plptr[L + 1];
-        if (e <= b) continue;
-        const int level_size = e - b;
+    // Σ.16-PROFILE: when CLS_PROFILE_NO_TRAILING=1, dispatch the NT clones (no rank-nc trailing
+    // update). Measurement only — produces wrong factor. Subtract NT wall from original wall to
+    // get the actual trailing-GEMM wall time.
+    static const bool s_skip_trailing = []() {
+        const char* on = std::getenv("CLS_PROFILE_NO_TRAILING");
+        return on && on[0] && on[0] != '0';
+    }();
+    if (e <= b) return;
+    const int level_size = e - b;
+    do {
         if (small_ok) {
             int max_fsz = 0, max_uc = 1;
             for (int q = b; q < e; ++q) {
@@ -100,6 +108,11 @@ static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, 
                         b, level_size, B, fsz2cap, plan.d_plcols, plan.d_front_off,
                         plan.d_front_ptr, plan.d_ncols, plan.d_panel_parent, plan.d_asm_ptr,
                         plan.d_asm_local, st.d_frontB, plan.front_total, st.d_sing, do_extend);
+                else if (s_skip_trailing)
+                    mf_factor_small_warp_NT_b<<<gx, blk, shb, stream>>>(
+                        b, level_size, B, fsz2cap, plan.d_plcols, plan.d_front_off,
+                        plan.d_front_ptr, plan.d_ncols, plan.d_panel_parent, plan.d_asm_ptr,
+                        plan.d_asm_local, st.d_frontBf, plan.front_total, st.d_sing, do_extend);
                 else
                     mf_factor_small_warp_b<float><<<gx, blk, shb, stream>>>(
                         b, level_size, B, fsz2cap, plan.d_plcols, plan.d_front_off,
@@ -115,22 +128,62 @@ static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, 
                 const bool use_tc = (prec == BatchPrecision::TC32);
                 size_t shb = (size_t)fsz_cap * fsz_cap * sizeof(float);
                 if (use_tc) shb += (size_t)2 * ucp_max * 32 * sizeof(__half) + 4 * 256 * sizeof(float);
-                // Block threads scale with the front size: small mid-fronts want fewer threads (more
-                // blocks/SM for latency hiding, less idle), big fronts want more (hide the sequential
-                // panel/U-solve dependency chain within the block). Swept: 256 best for the big
-                // separator fronts, smaller for the narrow mid levels.
                 const int mblk = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
                 dim3 grid(level_size, B);
-                if (use_tc)
+                if (use_tc) {
                     mf_factor_mid_tc32_b<true><<<grid, mblk, shb, stream>>>(
                         b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                         plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
                         plan.front_total, st.d_sing, do_extend, ucp_max, fsz_cap);
-                else
+                    continue;
+                }
+                // Σ.14: pure-FP32 path also uses the Σ.1 shared-staged trailing (mid_tiled_b)
+                // when shared budget fits. Otherwise falls back to mid_tc32_b<false>. This was
+                // previously TC-only; applying it here closes the kernel-level gap that was
+                // making TC look 17% faster at B=1 (it was just the staged kernel difference).
+                // CLS_NO_TILED_TRAILING=1 reverts to legacy non-staged kernel for A/B testing.
+                static const bool s_use_tiled_fp32 = []() {
+                    const char* off = std::getenv("CLS_NO_TILED_TRAILING");
+                    return !(off && off[0] && off[0] != '0');
+                }();
+                if (s_use_tiled_fp32 && max_fsz >= 48) {
+                    int level_max_nc = 1, level_max_uc = 1;
+                    for (int q = b; q < e; ++q) {
+                        const int pp = plan.h_plcols[q];
+                        const int fsz_p = plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp];
+                        const int nc_p = plan.h_ncols[pp];
+                        if (nc_p > level_max_nc) level_max_nc = nc_p;
+                        if ((fsz_p - nc_p) > level_max_uc) level_max_uc = fsz_p - nc_p;
+                    }
+                    const size_t shb_tiled =
+                        (size_t)fsz_cap * fsz_cap * sizeof(float)
+                        + 2 * (size_t)level_max_nc * level_max_uc * sizeof(float);
+                    if (shb_tiled <= 96 * 1024) {
+                        if (s_skip_trailing) {
+                            custom_linear_solver::tc::mf_factor_mid_tiled_NT_b<<<grid, 256, shb_tiled, stream>>>(
+                                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                                plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
+                        } else {
+                            custom_linear_solver::tc::mf_factor_mid_tiled_b<<<grid, 256, shb_tiled, stream>>>(
+                                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                                plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
+                        }
+                        continue;
+                    }
+                }
+                if (s_skip_trailing) {
+                    mf_factor_mid_tc32_NT_b<<<grid, mblk, shb, stream>>>(
+                        b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.front_total, st.d_sing, do_extend, ucp_max, fsz_cap);
+                } else {
                     mf_factor_mid_tc32_b<false><<<grid, mblk, shb, stream>>>(
                         b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                         plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
                         plan.front_total, st.d_sing, do_extend, ucp_max, fsz_cap);
+                }
                 continue;
             }
             // Float-front BIG separator fronts (fsz > MID_THRESH): too large for the shared cache.
@@ -149,6 +202,11 @@ static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, 
                         b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                         plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
                         plan.front_total, st.d_sing, do_extend, ucp_max);
+                } else if (s_skip_trailing) {
+                    mf_factor_extend_level_NT_b<<<bgrid, bigT, 0, stream>>>(
+                        b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.front_total, st.d_sing, do_extend);
                 } else {
                     mf_factor_extend_level_b<float><<<bgrid, bigT, 0, stream>>>(
                         b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
@@ -205,7 +263,59 @@ static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, 
                 break;
             }
         }
+    } while (false);
+}
+
+// Σ.11 — wrapper: iterates levels, either single-stream (legacy) or multi-stream subtree
+// dispatch (default for batched fp32/fp64/mixed/TC paths). selinv runs on main stream after join.
+static void issue_factor_levels(const MultifrontalPlan& plan, BatchedState& st, cudaStream_t stream)
+{
+    const int B = st.B;
+    const BatchPrecision prec = st.prec;
+    const bool pure_fp32 = is_fp32_front(prec);
+
+    const char* multi_no = std::getenv("CLS_NO_MULTISTREAM");
+    const bool disable_multi = multi_no && multi_no[0] && multi_no[0] != '0';
+    const bool use_multistream = !disable_multi && st.num_subtree_streams > 1 &&
+                                 plan.num_subtrees == st.num_subtree_streams &&
+                                 !plan.h_subtree_level_off.empty();
+
+    if (use_multistream) {
+        // Identify spine_lo (lowest spine level); spine work runs on main after join.
+        const int spine_lo = (plan.spine_start_level >= 0) ? plan.spine_start_level : plan.num_plevels;
+        cudaEventRecord(static_cast<cudaEvent_t>(st.fork_event), stream);
+        for (int k = 0; k < st.num_subtree_streams; ++k) {
+            cudaStreamWaitEvent(static_cast<cudaStream_t>(st.subtree_streams[k]),
+                                static_cast<cudaEvent_t>(st.fork_event), 0);
+        }
+        for (int k = 0; k < st.num_subtree_streams; ++k) {
+            cudaStream_t ks = static_cast<cudaStream_t>(st.subtree_streams[k]);
+            const int* off = plan.h_subtree_level_off.data() + (long)k * plan.num_plevels;
+            const int* cnt = plan.h_subtree_level_cnt.data() + (long)k * plan.num_plevels;
+            for (int L = 0; L < plan.num_plevels; ++L) {
+                if (L >= spine_lo) break;
+                if (cnt[L] == 0) continue;
+                issue_factor_level_range(plan, st, ks, off[L], off[L] + cnt[L]);
+            }
+            cudaEventRecord(static_cast<cudaEvent_t>(st.join_events[k]), ks);
+        }
+        for (int k = 0; k < st.num_subtree_streams; ++k) {
+            cudaStreamWaitEvent(stream, static_cast<cudaEvent_t>(st.join_events[k]), 0);
+        }
+        // Spine levels (if any) on main stream.
+        if (plan.spine_start_level >= 0) {
+            for (int L = plan.spine_start_level; L < plan.num_plevels; ++L) {
+                const int b = plan.plptr[L], e = plan.plptr[L + 1];
+                issue_factor_level_range(plan, st, stream, b, e);
+            }
+        }
+    } else {
+        for (int L = 0; L < plan.num_plevels; ++L) {
+            const int b = plan.plptr[L], e = plan.plptr[L + 1];
+            issue_factor_level_range(plan, st, stream, b, e);
+        }
     }
+
     if (st.selinv) {
         const dim3 ig(plan.num_panels, B);
         if (pure_fp32)
@@ -321,7 +431,13 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
     st.front_total = plan.front_total;
     st.n = plan.n;
     st.prec = prec;
-    st.selinv = true;
+    // selinv = partitioned-inverse trick: factorize end에서 pivot block을 미리 역행렬화해 두면
+    // solve의 trsv가 GEMV (완벽히 병렬)로 바뀜. MF_NO_SELINV=1로 끄면 solve는 sequential trsv로
+    // 회귀 -- factor side의 mf_invert_pivot_b cost는 사라지지만 solve가 느려짐. trade-off 측정용.
+    // selinv = partitioned-inverse trades factor time for solve time. Default OFF for the
+    // 1-factor-1-solve power-flow workload; CLS_USE_SELINV=1 to re-enable.
+    st.selinv = (std::getenv("CLS_USE_SELINV") != nullptr) &&
+                (std::getenv("MF_NO_SELINV") == nullptr);
     const bool pure_fp32 = is_fp32_front(prec);                          // float front (FP32 / TC32)
     const bool need_double = !pure_fp32;                                 // FP64 front or Mixed/TC master
     const bool need_float = pure_fp32 || prec == BatchPrecision::Mixed ||
@@ -354,6 +470,17 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
         // which can exceed the 48 KB default shared.
         cudaFuncSetAttribute(mf_factor_extend_tc32_b,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+        // Σ.14 — staged trailing kernel for FP32 batched path (was TC-only). Shared usage =
+        // fsz_cap^2 + 2*nc*uc floats, up to ~96 KB for the largest mid fronts.
+        cudaFuncSetAttribute(custom_linear_solver::tc::mf_factor_mid_tiled_b,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+        // Σ.16-PROFILE — NT (no-trailing) clones for direct GEMM-time measurement.
+        cudaFuncSetAttribute(custom_linear_solver::tc::mf_factor_mid_tiled_NT_b,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+        cudaFuncSetAttribute(mf_factor_mid_tc32_NT_b,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+        cudaFuncSetAttribute(mf_factor_small_warp_NT_b,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
     }
 
 #ifdef CLS_INTERNAL_GRAPH
@@ -363,6 +490,25 @@ bool batched_setup(const MultifrontalPlan& plan, int B, BatchPrecision prec, Bat
     cudaStreamCreate(&stream);
     st.stream = stream;
     st.owns_stream = true;
+
+    // Σ.11 — allocate subtree streams + fork/join events for multi-stream dispatch (default
+    // ON; gated by CLS_NO_MULTISTREAM=1).
+    const char* multi_no_su = std::getenv("CLS_NO_MULTISTREAM");
+    const bool disable_multi_su = multi_no_su && multi_no_su[0] && multi_no_su[0] != '0';
+    if (!disable_multi_su && plan.num_subtrees > 1 && plan.num_subtrees <= 8) {
+        st.num_subtree_streams = plan.num_subtrees;
+        for (int k = 0; k < st.num_subtree_streams; ++k) {
+            cudaStream_t ks;
+            cudaStreamCreateWithFlags(&ks, cudaStreamNonBlocking);
+            st.subtree_streams[k] = ks;
+            cudaEvent_t je;
+            cudaEventCreateWithFlags(&je, cudaEventDisableTiming);
+            st.join_events[k] = je;
+        }
+        cudaEvent_t fe;
+        cudaEventCreateWithFlags(&fe, cudaEventDisableTiming);
+        st.fork_event = fe;
+    }
 
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     issue_factor_levels(plan, st, stream);

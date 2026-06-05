@@ -12,8 +12,10 @@ MultifrontalPlan::~MultifrontalPlan()
     if (solve_graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(solve_graph_exec));
     if (solve_graph) cudaGraphDestroy(static_cast<cudaGraph_t>(solve_graph));
     if (stream && owns_stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
+    if (d_spine_panels) cudaFree(d_spine_panels);
     if (d_yf) cudaFree(d_yf);
     if (d_frontf) cudaFree(d_frontf);
+    if (d_pivot_offset) cudaFree(d_pivot_offset);
     if (arena) cudaFree(arena);
 }
 
@@ -27,6 +29,7 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
             cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(solve_graph_exec));
         if (solve_graph) cudaGraphDestroy(static_cast<cudaGraph_t>(solve_graph));
         if (stream && owns_stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
+        if (d_spine_panels) cudaFree(d_spine_panels);
         if (d_yf) cudaFree(d_yf);
         if (d_frontf) cudaFree(d_frontf);
         if (arena) cudaFree(arena);
@@ -59,6 +62,20 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         h_front_ptr = std::move(o.h_front_ptr);
         h_ncols = std::move(o.h_ncols);
         h_plcols = std::move(o.h_plcols);
+        h_front_off = std::move(o.h_front_off);
+        h_pivot_offset = std::move(o.h_pivot_offset);
+        d_pivot_offset = o.d_pivot_offset;
+        total_pivots = o.total_pivots;
+        o.d_pivot_offset = nullptr;
+        h_spine_panels = std::move(o.h_spine_panels);
+        spine_start_level = o.spine_start_level;
+        num_subtrees = o.num_subtrees;
+        h_subtree_roots = std::move(o.h_subtree_roots);
+        h_subtree_of_panel = std::move(o.h_subtree_of_panel);
+        h_subtree_level_off = std::move(o.h_subtree_level_off);
+        h_subtree_level_cnt = std::move(o.h_subtree_level_cnt);
+        d_spine_panels = o.d_spine_panels;
+        o.d_spine_panels = nullptr;
         stream = o.stream;
         owns_stream = o.owns_stream;
         graph_exec = o.graph_exec;

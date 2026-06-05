@@ -456,6 +456,177 @@ __global__ void mf_invert_pivot(int npanels, const int* __restrict__ front_ptr,
     }
 }
 
+// Warp-per-front factor for tiny-front levels (cy* ported from batched/factor_small.cuh into the
+// single-batch path). The block kernel above is 1 block / front with 128–384 threads even when fsz≤16
+// (256 elem fits in 8 lanes), so SM% on the wide-base levels (L0–L2 in case8387) is 1–4 %. Packing W
+// warps per block, one warp per front, runs the no-pivot LU lane-parallel with __syncwarp() (cheaper
+// than a multi-warp __syncthreads) and stages the front in per-warp shared. Used only when the level's
+// maxfsz fits comfortably in one warp's working set.
+constexpr int kFactorSmallWarpsPerBlock = 8;       // 8 fronts packed per block (256 threads)
+constexpr int kFactorSmallWarpFszCap = 32;         // fsz>32 levels hand back to the block kernel
+constexpr int kFactorSmallWarpMinCnt = 32;         // need enough fronts to amortize block start
+constexpr int kFactorSmallWarpOptInShared = 96 * 1024;  // sm_86 max dyn-shared per block
+
+template <typename FT>
+__device__ __forceinline__ void lu_small_warp_inplace(FT* F, int fsz, int nc, int lane, int* sing)
+{
+    for (int k = 0; k < nc; ++k) {
+        FT piv = F[(long)k * fsz + k];
+        if (piv == FT(0)) {
+            if (lane == 0) *sing = 1;
+            piv = FT(1);
+        }
+        for (int i = k + 1 + lane; i < fsz; i += 32) F[(long)i * fsz + k] /= piv;
+        __syncwarp();
+        const int m = fsz - k - 1;
+        for (int e = lane; e < m * m; e += 32) {
+            const int ii = k + 1 + e / m, jj = k + 1 + e % m;
+            F[(long)ii * fsz + jj] -= F[(long)ii * fsz + k] * F[(long)k * fsz + jj];
+        }
+        __syncwarp();
+    }
+}
+
+template <typename FT>
+__device__ __forceinline__ void writeback_lu_warp(FT* M, const FT* W, int fsz, int nc, int uc,
+                                                  int lane)
+{
+    // Pivot rows (rows 0..nc, full width) + L panel (rows >= nc, cols < nc). The CB
+    // (trailing uc x uc) stays in W and is extend-added into the parent below.
+    for (long e = lane; e < (long)nc * fsz; e += 32) M[e] = W[e];
+    for (int e = lane; e < uc * nc; e += 32) {
+        const long id2 = (long)(nc + e / nc) * fsz + (e % nc);
+        M[id2] = W[id2];
+    }
+}
+
+// Shared-staged variant of mf_factor_extend_level for mid fronts (fsz roughly 33-72). Stages the
+// whole front into block-shared at start, runs the fused factor+extend in shared, writes back L/U
+// at the end, and lets the parent's extend-add read CB from shared. Targets the same code path as
+// the existing block kernel but with all rank-1 updates resolved against shared memory rather than
+// global, killing the strided F[ii*fsz+k] reads. Dynamic shared = fsz_cap² doubles.
+template <typename FT>
+__global__ void mf_factor_extend_level_shared(int lbegin, int lend, int fsz2cap,
+                                              const int* __restrict__ plcols,
+                                              const int* __restrict__ front_off,
+                                              const int* __restrict__ front_ptr,
+                                              const int* __restrict__ ncols,
+                                              const int* __restrict__ panel_parent,
+                                              const int* __restrict__ asm_ptr,
+                                              const int* __restrict__ asm_local, FT* front,
+                                              int* sing, int do_extend)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const int p = plcols[idx];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const int nc = ncols[p];
+    FT* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    const int fsz2 = fsz * fsz;
+
+    extern __shared__ unsigned char ext_sh_raw[];
+    FT* Fs = reinterpret_cast<FT*>(ext_sh_raw);
+
+    // Stage-in (coalesced)
+    for (int e = t; e < fsz2; e += nt) Fs[e] = F[e];
+    __syncthreads();
+
+    // Rank-1 LU in shared
+    for (int k = 0; k < nc; ++k) {
+        FT piv = Fs[(long)k * fsz + k];
+        if (piv == FT(0)) {
+            if (t == 0) *sing = 1;
+            piv = FT(1);
+        }
+        for (int i = k + 1 + t; i < fsz; i += nt) Fs[(long)i * fsz + k] /= piv;
+        __syncthreads();
+        const int m = fsz - k - 1;
+        for (int e = t; e < m * m; e += nt) {
+            const int ii = k + 1 + e / m, jj = k + 1 + e % m;
+            Fs[(long)ii * fsz + jj] -= Fs[(long)ii * fsz + k] * Fs[(long)k * fsz + jj];
+        }
+        __syncthreads();
+    }
+
+    // Writeback only the L/U (CB stays in shared for the extend-add below).
+    for (long e = t; e < (long)nc * fsz; e += nt) F[e] = Fs[e];
+    for (int e = t; e < uc * nc; e += nt) {
+        const long id2 = (long)(nc + e / nc) * fsz + (e % nc);
+        F[id2] = Fs[id2];
+    }
+
+    const int par = panel_parent[p];
+    if (par < 0 || !do_extend) return;
+    __syncthreads();
+    FT* Fp = front + front_off[par];
+    const int pfsz = front_ptr[par + 1] - front_ptr[par];
+    const int abase = asm_ptr[p];
+    for (int e = t; e < uc * uc; e += nt) {
+        const int a = e / uc, b = e % uc;
+        atomicAdd(&Fp[(long)asm_local[abase + a] * pfsz + asm_local[abase + b]],
+                  Fs[(long)(nc + a) * fsz + (nc + b)]);
+    }
+}
+
+constexpr int kFactorSharedFszMin = 33;            // overlap with warp upper bound (32)
+constexpr int kFactorSharedFszMax = 72;            // 72^2 * 8 = 41KB, fits default shared
+
+bool use_shared_factor(int maxfsz, int cnt)
+{
+    if (const char* off = std::getenv("CLS_NO_SHARED_FACTOR")) {
+        if (off[0] && off[0] != '0') return false;
+    }
+    return maxfsz >= kFactorSharedFszMin && maxfsz <= kFactorSharedFszMax && cnt >= 2;
+}
+
+template <typename FT>
+__global__ void mf_factor_small_warp(int lbegin, int lend, int fsz2cap,
+                                     const int* __restrict__ plcols,
+                                     const int* __restrict__ front_off,
+                                     const int* __restrict__ front_ptr,
+                                     const int* __restrict__ ncols,
+                                     const int* __restrict__ panel_parent,
+                                     const int* __restrict__ asm_ptr,
+                                     const int* __restrict__ asm_local, FT* front, int* sing,
+                                     int do_extend)
+{
+    extern __shared__ unsigned char smem_sw_raw[];
+    FT* smem_sw = reinterpret_cast<FT*>(smem_sw_raw);
+    const int warp_in_blk = threadIdx.x >> 5;
+    const int warp_global = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    const int lane = threadIdx.x & 31;
+    const int level_size = lend - lbegin;
+    if (warp_global >= level_size) return;
+    const int p = plcols[lbegin + warp_global];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const int nc = ncols[p];
+    FT* F = front + front_off[p];
+    const int uc = fsz - nc;
+    const int fsz2 = fsz * fsz;
+    FT* Fs = smem_sw + (long)warp_in_blk * fsz2cap;
+
+    for (int e = lane; e < fsz2; e += 32) Fs[e] = F[e];
+    __syncwarp();
+    lu_small_warp_inplace<FT>(Fs, fsz, nc, lane, sing);
+    __syncwarp();
+    writeback_lu_warp<FT>(F, Fs, fsz, nc, uc, lane);
+
+    const int par = panel_parent[p];
+    if (par < 0 || !do_extend) return;
+    FT* Fp = front + front_off[par];
+    const int pfsz = front_ptr[par + 1] - front_ptr[par];
+    const int abase = asm_ptr[p];
+    for (int e = lane; e < uc * uc; e += 32) {
+        const int a = e / uc, b = e % uc;
+        atomicAdd(&Fp[(long)asm_local[abase + a] * pfsz + asm_local[abase + b]],
+                  Fs[(long)(nc + a) * fsz + (nc + b)]);
+    }
+}
+
 int factor_threads_for_level(const MultifrontalPlan& plan, int L)
 {
     const int cnt = plan.plptr[L + 1] - plan.plptr[L];
@@ -467,6 +638,19 @@ int factor_threads_for_level(const MultifrontalPlan& plan, int L)
     if (mx >= 257) return kFactorBigThreads;
     if (mx <= 48 && cnt >= kFactorTinyFrontCount) return kFactorTinyThreads;
     return kFactorDefaultThreads;
+}
+
+// Warp-per-front routing for tiny-fsz levels. OFF by default in single-batch: 8-trial sweep on
+// case8387 (FP64) showed +3.4% factor regression vs the block kernel for the levels that match
+// (L0,L1: cnt ~ 4000/1500, fsz ≤ 20). Reason: the block kernel at 128 threads already saturates
+// the grid (>1000 blocks → SM 38%, occupancy 78%), so warp packing reduces total threads in flight
+// without freeing meaningful resources. Kept as opt-in (CLS_USE_SMALL_WARP=1) for research and
+// for matrices with different shape where it might pay off.
+bool use_small_warp_factor(int maxfsz, int cnt)
+{
+    const char* on = std::getenv("CLS_USE_SMALL_WARP");
+    if (!on || !on[0] || on[0] == '0') return false;
+    return maxfsz > 0 && maxfsz <= kFactorSmallWarpFszCap && cnt >= kFactorSmallWarpMinCnt;
 }
 
 [[maybe_unused]] void issue_factor_levels(MultifrontalPlan& plan, cudaStream_t stream)
@@ -586,6 +770,16 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     }
     front_off[P] = static_cast<int>(total);
     plan.front_total = total;
+    plan.h_front_off = front_off;  // host mirror for per-panel cuBLAS dispatch (Phase Σ.6)
+
+    // Phase Σ.8: per-panel pivot offsets for within-panel partial pivoting (CLS_USE_PIVOTING=1).
+    plan.h_pivot_offset.assign(P + 1, 0);
+    for (int p = 0; p < P; ++p) plan.h_pivot_offset[p + 1] = plan.h_pivot_offset[p] + panels.ncols[p];
+    plan.total_pivots = plan.h_pivot_offset[P];  // = n
+    if (cudaMalloc(&plan.d_pivot_offset, (size_t)(P + 1) * sizeof(int)) == cudaSuccess) {
+        cudaMemcpy(plan.d_pivot_offset, plan.h_pivot_offset.data(),
+                   (size_t)(P + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    }
 
     // Panel-etree levels (parent id > child in postorder -> single forward pass).
     std::vector<int> plevel(P, 0);
@@ -601,6 +795,14 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     for (int L = 0; L < num_plevels; ++L) plan.plptr[L + 1] += plan.plptr[L];
     std::vector<int> plcols(P);
 
+    if (std::getenv("CLS_PANEL_DUMP")) {  // per-panel (fsz, nc) for GEMM-fraction analysis
+        fprintf(stderr, "[CLS_PANEL_DUMP] panel,fsz,nc,uc\n");
+        for (int p = 0; p < P; ++p) {
+            const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+            const int nc = panels.ncols[p];
+            fprintf(stderr, "%d,%d,%d,%d\n", p, fsz, nc, fsz - nc);
+        }
+    }
     if (std::getenv("CLS_DUMP")) {  // research: front-size distribution + per-level structure
         const int NB = 7;
         const int edges[NB] = {16, 32, 48, 64, 96, 160, 1 << 30};
@@ -635,6 +837,175 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         for (int p = 0; p < P; ++p) plcols[next[plevel[p]]++] = p;
     }
     plan.h_plcols = plcols;
+
+    // --- Spine + K-subtree partition (Phase 1 of tree-restructuring research) ---
+    // Spine = contiguous "cnt=1 chain" at the top of the panel etree.
+    // Below the spine: K subtree roots = panels at the level just below the spine bottom.
+    // Each subtree is the closure of one of those roots (all descendants by panel_parent).
+    {
+        // Compute cnt-per-level (we already have plptr which gives cnt = plptr[L+1] - plptr[L]).
+        auto level_cnt = [&](int L) { return plan.plptr[L + 1] - plan.plptr[L]; };
+
+        // Spine: walk down from the top level while cnt == 1.
+        int spine_top = num_plevels - 1;
+        int spine_bot = spine_top;
+        while (spine_bot >= 0 && level_cnt(spine_bot) == 1) --spine_bot;
+        ++spine_bot;  // now spine_bot = lowest L with cnt=1 in the chain (start of spine)
+        if (spine_bot <= spine_top) {
+            plan.spine_start_level = spine_bot;
+            // Collect spine panels in factor order (bottom -> top).
+            plan.h_spine_panels.clear();
+            for (int L = spine_bot; L <= spine_top; ++L) {
+                for (int q = plan.plptr[L]; q < plan.plptr[L + 1]; ++q) {
+                    plan.h_spine_panels.push_back(plan.h_plcols[q]);
+                }
+            }
+        } else {
+            // No spine at all (root level has cnt > 1).
+            plan.spine_start_level = -1;
+            plan.h_spine_panels.clear();
+        }
+
+        // Phase Σ.11 — correct subtree partition. The previous version assumed every below-
+        // spine panel is reachable from some panel at level (spine_start_level - 1). But the
+        // panel etree can have a panel at L<spine_start_level whose parent is in the spine
+        // *directly* (skipping the "expected root level"). Those panels were stranded,
+        // causing multi-stream dispatch to lose them and producing relres ~ 1e+28 garbage.
+        //
+        // Correct definition: a panel p's subtree root is the highest ancestor whose
+        // panel_parent is in the spine (or is -1, i.e. p is its own root). All panels with
+        // the same subtree-root form one subtree. Subtree roots = the set of such anchors.
+        plan.h_subtree_of_panel.assign(P, -1);
+        // Mark spine panels (those with subtree_of remaining -1 == spine).
+        std::vector<char> is_spine(P, 0);
+        if (plan.spine_start_level >= 0) {
+            for (int sp : plan.h_spine_panels) is_spine[sp] = 1;
+        }
+        // For each non-spine panel, find its subtree root: walk up panel_parent until we
+        // hit a panel whose parent is in spine (or -1). Topological order (parent id > child id)
+        // means we can dynamic-program in increasing id with one pass.
+        std::vector<int> subtree_root_of(P, -1);
+        for (int p = 0; p < P; ++p) {
+            if (is_spine[p]) continue;
+            const int par = mf.panel_parent[p];
+            if (par < 0 || is_spine[par]) {
+                subtree_root_of[p] = p;  // p itself is the subtree root
+            } else {
+                subtree_root_of[p] = subtree_root_of[par];  // inherit (parent already processed)
+            }
+        }
+        // (Note: parent id > child id holds for postorder panel ids, so subtree_root_of[par]
+        // is set before we read it... wait, parent id > child id means par > p, so when we
+        // process p we haven't processed par yet! Fix: iterate in REVERSE id order. Parent
+        // comes before child in REVERSE, so subtree_root_of[par] is set first.)
+        std::fill(subtree_root_of.begin(), subtree_root_of.end(), -1);
+        for (int p = P - 1; p >= 0; --p) {
+            if (is_spine[p]) continue;
+            const int par = mf.panel_parent[p];
+            if (par < 0 || is_spine[par]) {
+                subtree_root_of[p] = p;
+            } else {
+                subtree_root_of[p] = subtree_root_of[par];
+            }
+        }
+        // Collect distinct subtree roots with their member counts.
+        std::vector<int> root_member_count(P, 0);
+        for (int p = 0; p < P; ++p) {
+            if (subtree_root_of[p] >= 0) ++root_member_count[subtree_root_of[p]];
+        }
+        std::vector<int> distinct_roots;
+        for (int p = 0; p < P; ++p) {
+            if (root_member_count[p] > 0) distinct_roots.push_back(p);
+        }
+        // Sort by member count desc.
+        std::sort(distinct_roots.begin(), distinct_roots.end(),
+                  [&](int a, int b) { return root_member_count[a] > root_member_count[b]; });
+
+        // Cap to MAX_SUBTREES (matches TCState.subtree_streams[8]). When more distinct roots
+        // exist (case8387 fix: K=29 of which only 2 are large), keep the top (K_cap-1)
+        // largest as separate subtrees and merge ALL remaining roots' members into one
+        // "spillover" subtree (id K_cap-1). The spillover subtree is processed on its own
+        // stream level-by-level; correctness holds because within one stream the level
+        // dispatch order respects panel-etree dependencies.
+        constexpr int MAX_SUBTREES = 8;
+        plan.h_subtree_roots.clear();
+        std::vector<int> root_to_id(P, -1);
+        const int kept = std::min((int)distinct_roots.size(), MAX_SUBTREES - 1);
+        for (int i = 0; i < kept; ++i) {
+            root_to_id[distinct_roots[i]] = i;
+            plan.h_subtree_roots.push_back(distinct_roots[i]);
+        }
+        // If there are more roots, all "extra" roots map to id = kept (spillover bin).
+        if ((int)distinct_roots.size() > kept) {
+            for (int i = kept; i < (int)distinct_roots.size(); ++i) {
+                root_to_id[distinct_roots[i]] = kept;
+            }
+            // The spillover bin needs a representative root for h_subtree_roots[kept]; use
+            // the first "extra" root (member count smaller but valid panel id).
+            plan.h_subtree_roots.push_back(distinct_roots[kept]);
+        }
+        plan.num_subtrees = (int)plan.h_subtree_roots.size();
+        // Assign subtree id per panel via its subtree_root_of.
+        for (int p = 0; p < P; ++p) {
+            const int r = subtree_root_of[p];
+            if (r < 0) continue;
+            plan.h_subtree_of_panel[p] = root_to_id[r];
+        }
+
+        // Phase 3 — Re-sort plcols within each level so panels of the same subtree are
+        // contiguous (subtree 0 first, then subtree 1, ..., then -1=spine). After this,
+        // for subtree k at level L the range is [off, off+cnt) inside plcols.
+        if (plan.num_subtrees > 0) {
+            plan.h_subtree_level_off.assign((long)plan.num_subtrees * num_plevels, 0);
+            plan.h_subtree_level_cnt.assign((long)plan.num_subtrees * num_plevels, 0);
+            // For each level: bucket-sort panels by subtree_of_panel (spine=-1 goes last)
+            for (int L = 0; L < num_plevels; ++L) {
+                const int lo = plan.plptr[L], hi = plan.plptr[L + 1];
+                std::vector<int> bucketed;
+                bucketed.reserve(hi - lo);
+                // First, subtree 0..K-1
+                for (int k = 0; k < plan.num_subtrees; ++k) {
+                    plan.h_subtree_level_off[(long)k * num_plevels + L] = (int)bucketed.size() + lo;
+                    int cnt = 0;
+                    for (int q = lo; q < hi; ++q) {
+                        const int p = plcols[q];
+                        if (plan.h_subtree_of_panel[p] == k) {
+                            bucketed.push_back(p);
+                            ++cnt;
+                        }
+                    }
+                    plan.h_subtree_level_cnt[(long)k * num_plevels + L] = cnt;
+                }
+                // Then spine panels (subtree_of_panel == -1) at the end
+                for (int q = lo; q < hi; ++q) {
+                    const int p = plcols[q];
+                    if (plan.h_subtree_of_panel[p] == -1) bucketed.push_back(p);
+                }
+                // Write back to plcols
+                for (size_t i = 0; i < bucketed.size(); ++i) plcols[lo + i] = bucketed[i];
+            }
+            // h_plcols was already assigned from plcols above; refresh.
+            plan.h_plcols = plcols;
+        }
+
+        if (std::getenv("CLS_TREE_INFO")) {
+            fprintf(stderr, "[CLS_TREE_INFO] P=%d levels=%d  spine=[L%d..L%d] (%zu panels)  K=%d\n",
+                    P, num_plevels, plan.spine_start_level, num_plevels - 1,
+                    plan.h_spine_panels.size(), plan.num_subtrees);
+            for (int k = 0; k < plan.num_subtrees; ++k) {
+                int sz = 0;
+                for (int p = 0; p < P; ++p) if (plan.h_subtree_of_panel[p] == k) ++sz;
+                fprintf(stderr, "  subtree %d: root panel %d, %d panels\n",
+                        k, plan.h_subtree_roots[k], sz);
+                // Per-level breakdown for this subtree
+                for (int L = 0; L < num_plevels && L < 12; ++L) {
+                    const int c = plan.h_subtree_level_cnt[(long)k * num_plevels + L];
+                    if (c > 0) fprintf(stderr, "    sub%d L%d cnt=%d\n", k, L, c);
+                }
+            }
+        }
+    }
+
     // Parent-local extend-add map: asm_idx is a global front_rows index; subtract
     // the parent front's start so the kernel indexes into the parent's fsz x fsz.
     std::vector<int> asm_local(mf.asm_idx.size());
@@ -702,6 +1073,12 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     H2D(plan.d_asm_ptr, mf.asm_ptr);
     H2D(plan.d_asm_local, asm_local);
     H2D(plan.d_front_rows, mf.front_rows);
+    // Upload spine panel list (Phase 4). Separate allocation so it survives plan moves.
+    if (!plan.h_spine_panels.empty()) {
+        cudaMalloc(&plan.d_spine_panels, plan.h_spine_panels.size() * sizeof(int));
+        cudaMemcpy(plan.d_spine_panels, plan.h_spine_panels.data(),
+                   plan.h_spine_panels.size() * sizeof(int), cudaMemcpyHostToDevice);
+    }
     lap("arena_malloc+H2D");
     H2D(d_panel_first, panels.first);
     H2D(d_panel_of, panels.panel_of);
@@ -756,6 +1133,18 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // output tiles per front, each block staging an L-/U-tile (reuse TS x). Widens the power F
     // win (SyntheticUSA 4.10->4.05, ACTIVSg25k 1.78->1.76); onetone2's gap is deep-etree (plev
     // 110) serialization not trailing-BW, so it stays ~neutral there.
+    // Opt-in to >48KB dynamic shared once: only the FP64 warp-per-front kernel may exceed it
+    // (maxfsz=32 with W=8 -> 64KB). Safe to call before capture; applies for graph launch.
+    {
+        cudaError_t aerr = cudaFuncSetAttribute(mf_factor_small_warp<double>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kFactorSmallWarpOptInShared);
+        (void)aerr;
+        // Shared-staged block kernel uses fsz_cap² doubles per block (up to 72² = ~41KB, default OK).
+        // Bump the carveout anyway so wider sweeps work.
+        aerr = cudaFuncSetAttribute(mf_factor_extend_level_shared<double>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kFactorSmallWarpOptInShared);
+        (void)aerr;
+    }
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     for (int L = 0; L < num_plevels; ++L) {
         const int b = plan.plptr[L], e = plan.plptr[L + 1];
@@ -780,6 +1169,35 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
             mf_bigC_extend<<<dim3(kBigExtendTiles, e - b), T, 0, stream>>>(b, e,
                 plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, plan.d_front);
+        } else if (!fp32 && !pure_fp32 && use_small_warp_factor(mxf, e - b)) {
+            // Warp-per-front: W warps per block, dynamic shared = W * mxf^2 doubles. W shrinks as
+            // fsz grows so that the per-block shared stays under the sm_86 opt-in limit while still
+            // packing enough warps for SM occupancy.
+            int W;
+            if (mxf <= 24) W = 8;        // 25KB shared at fsz=24, default-shared OK
+            else if (mxf <= 32) W = 8;   // 64KB shared at fsz=32, needs opt-in
+            else W = 4;                  // 73KB at fsz=48, needs opt-in
+            const int n_blocks = ((e - b) + W - 1) / W;
+            const int fsz2cap = mxf * mxf;
+            const size_t sh_bytes = (size_t)W * fsz2cap * sizeof(double);
+            if (std::getenv("CLS_WARP_DBG"))
+                fprintf(stderr, "[WARP] L=%d cnt=%d mxf=%d W=%d nb=%d sh=%zuB\n",
+                        L, e - b, mxf, W, n_blocks, sh_bytes);
+            mf_factor_small_warp<double><<<n_blocks, W * 32, sh_bytes, stream>>>(
+                b, e, fsz2cap, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
+                plan.d_ncols, plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local,
+                plan.d_front, plan.d_sing, do_extend);
+        } else if (!fp32 && !pure_fp32 && use_shared_factor(mxf, e - b)) {
+            // Shared-staged mid-front kernel (one block / front but front resident in shared).
+            const int fsz2cap = mxf * mxf;
+            const size_t sh_bytes = (size_t)fsz2cap * sizeof(double);
+            if (std::getenv("CLS_WARP_DBG"))
+                fprintf(stderr, "[SHARED] L=%d cnt=%d mxf=%d T=%d sh=%zuB\n",
+                        L, e - b, mxf, T, sh_bytes);
+            mf_factor_extend_level_shared<double><<<e - b, T, sh_bytes, stream>>>(
+                b, e, fsz2cap, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
+                plan.d_ncols, plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local,
+                plan.d_front, plan.d_sing, do_extend);
         } else if (pure_fp32)
             mf_factor_extend_level<float><<<e - b, T, 0, stream>>>(
                 b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,

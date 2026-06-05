@@ -11,11 +11,16 @@
 
 #include "factorize/multifrontal.hpp"
 #include "batched/multifrontal_batched.hpp"
+#include "tc/multifrontal_tc.hpp"
 #include "matrix/pattern_kernels.hpp"
 #include "symbolic/supernode.hpp"
+#include "symbolic/amalgamate.hpp"
 #include "reordering/metis_nd.hpp"
 #include "solve/multifrontal.hpp"
 #include "symbolic/elimination_tree.hpp"
+
+#include <cstdio>
+#include <cstdlib>
 
 namespace custom_linear_solver {
 namespace {
@@ -83,6 +88,7 @@ struct Solver::Impl {
     custom_linear_solver::matrix::IntDeviceBuffer d_iperm;
     custom_linear_solver::plan::MultifrontalPlan plan;
     custom_linear_solver::batched::BatchedState batched;
+    custom_linear_solver::tc::TCState tc;
 };
 
 Solver::Solver(const SolverConfig& config) : impl_(new Impl{config}) {}
@@ -226,11 +232,122 @@ Status Solver::analyze()
                                                      parent, Lp, Li);
         lap("fill_pattern");
 
+        // ---- Etree-aware amalgamation + repostorder (CLS_USE_AMAL=1, opt-in) -------------
+        // Default (no env): existing chain-merge `relaxed_panels` runs inside
+        // analyze_multifrontal -- avg 2 cols/panel, panel-etree depth 30/39 (case8387 / USA),
+        // 3-4× deeper than cuDSS. With CLS_USE_AMAL=1 we run a second amalgamation pass that
+        // greedily merges chain panels with their etree parent (bottom-up, union-find) up to
+        // `amal_cap` columns, then re-postorders the supernode etree so each merged panel's
+        // cols are a contiguous range in the new ordering. Python prototype
+        // (tests/depth_analysis_v2.py) shows case8387 depth 30->12 (cap=32), USA 39->27.
+        //
+        // amal_cap defaults to 32 (matches batched MF_REG_NC); CLS_AMAL_CAP overrides.
+        const char* amal_env = std::getenv("CLS_USE_AMAL");
+        const bool use_amal = amal_env && amal_env[0] && amal_env[0] != '0';
+        custom_linear_solver::symbolic::PanelPartition amal_panels;
+        custom_linear_solver::symbolic::PanelPartition* forced_panels_ptr = nullptr;
+        std::vector<int> amal_Lp, amal_Li, amal_parent;
+        custom_linear_solver::matrix::DeviceCscPattern amal_ordered_device;
+        const int* analyze_col_ptr = ordered_device.col_ptr.ptr;
+        const int* analyze_row_idx = ordered_device.row_idx.ptr;
+        const std::vector<int>* analyze_Lp = &Lp;
+        const std::vector<int>* analyze_Li = &Li;
+        const std::vector<int>* analyze_parent = &parent;
+        if (use_amal) {
+            // Match the eff_cap adaptive logic in analyze_multifrontal so we get the same
+            // chain panels (and thus the same starting structure to amalgamate from).
+            int chain_cap = impl_->config.panel_cap;
+            if (n >= 80000) chain_cap = 20;
+            else if (n >= 16000) chain_cap = 12;
+            if (const char* ce = std::getenv("CLS_CAP")) chain_cap = std::atoi(ce);
+            if (chain_cap < 1) chain_cap = 1;
+            int amal_cap = 32;
+            if (const char* ac = std::getenv("CLS_AMAL_CAP")) amal_cap = std::atoi(ac);
+            if (amal_cap < chain_cap) amal_cap = chain_cap;
+
+            std::vector<int> colcount(n);
+            for (int j = 0; j < n; ++j) colcount[j] = Lp[j + 1] - Lp[j];
+            const auto chain_panels = custom_linear_solver::symbolic::relaxed_panels(
+                n, parent, colcount, chain_cap);
+            const auto amal = custom_linear_solver::symbolic::amalgamate_and_repostorder(
+                n, parent, chain_panels, amal_cap);
+            lap("amalgamate_and_repostorder");
+
+            // Compose perm/iperm: final perm = METIS perm ∘ amalgamation perm
+            std::vector<int> composed_perm(n);
+            for (int new_idx = 0; new_idx < n; ++new_idx) {
+                composed_perm[new_idx] = impl_->perm[amal.perm[new_idx]];
+            }
+            impl_->perm = std::move(composed_perm);
+            impl_->iperm.assign(n, 0);
+            for (int k = 0; k < n; ++k) impl_->iperm[impl_->perm[k]] = k;
+            st = impl_->d_perm.upload(impl_->perm);
+            if (st != Status::Success) return st;
+            st = impl_->d_iperm.upload(impl_->iperm);
+            if (st != Status::Success) return st;
+            lap("amal_compose_perm");
+
+            // Re-permute the device CSC matrix using the composed iperm.
+            st = custom_linear_solver::matrix::permute_csc_device(
+                csc_device, impl_->d_iperm.ptr, amal_ordered_device);
+            if (st != Status::Success) return st;
+            impl_->d_ordered_value_to_csr = std::move(amal_ordered_device.source_pos);
+            lap("amal_permute_csc");
+
+            // Permute Lp/Li to the new index space (avoids a second fill_pattern).
+            // new_col_k = amal.perm[k] in OLD (METIS) index space.
+            amal_Lp.assign(n + 1, 0);
+            for (int k = 0; k < n; ++k) {
+                const int old_col = amal.perm[k];
+                amal_Lp[k + 1] = amal_Lp[k] + (Lp[old_col + 1] - Lp[old_col]);
+            }
+            amal_Li.assign(amal_Lp[n], 0);
+            for (int k = 0; k < n; ++k) {
+                const int old_col = amal.perm[k];
+                int w = amal_Lp[k];
+                for (int p = Lp[old_col]; p < Lp[old_col + 1]; ++p) {
+                    amal_Li[w++] = amal.iperm[Li[p]];
+                }
+                std::sort(amal_Li.begin() + amal_Lp[k], amal_Li.begin() + amal_Lp[k + 1]);
+            }
+            lap("amal_permute_Lp_Li");
+
+            amal_parent = amal.new_parent;
+            amal_panels = amal.panels;
+            // Populate panel widths from the fill colcount (in new index space).
+            amal_panels.width.assign(amal_panels.num_panels, 0);
+            for (int p = 0; p < amal_panels.num_panels; ++p) {
+                int wmax = 0;
+                const int first_col = amal_panels.first[p];
+                const int ncols = amal_panels.ncols[p];
+                for (int c = first_col; c < first_col + ncols; ++c) {
+                    const int cc = amal_Lp[c + 1] - amal_Lp[c];
+                    if (cc > wmax) wmax = cc;
+                }
+                amal_panels.width[p] = wmax;
+            }
+            forced_panels_ptr = &amal_panels;
+            analyze_col_ptr = amal_ordered_device.col_ptr.ptr;
+            analyze_row_idx = amal_ordered_device.row_idx.ptr;
+            analyze_Lp = &amal_Lp;
+            analyze_Li = &amal_Li;
+            analyze_parent = &amal_parent;
+
+            if (std::getenv("CLS_AMAL_INFO")) {
+                fprintf(stderr,
+                        "[CLS_AMAL_INFO] chain_cap=%d amal_cap=%d  chain_P=%d -> amal_P=%d  "
+                        "(avg cols/panel %.2f -> %.2f)\n",
+                        chain_cap, amal_cap, chain_panels.num_panels, amal_panels.num_panels,
+                        (double)n / chain_panels.num_panels,
+                        (double)n / amal_panels.num_panels);
+            }
+        }
+
         impl_->plan = custom_linear_solver::factorize::analyze_multifrontal(
-            n, nnz, ordered_device.col_ptr.ptr, ordered_device.row_idx.ptr, Lp, Li, parent,
+            n, nnz, analyze_col_ptr, analyze_row_idx, *analyze_Lp, *analyze_Li, *analyze_parent,
             impl_->config.panel_cap,
             impl_->config.single_precision == SinglePrecision::Mixed,
-            nullptr,
+            forced_panels_ptr,
             impl_->config.single_precision == SinglePrecision::FP32);
         lap("analyze_multifrontal");
         if (impl_->plan.num_panels == 0) return Status::AnalysisFailed;
@@ -374,6 +491,40 @@ Status Solver::batched_solve(const float* d_rhsB, float* d_solB, double* kernel_
     if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
     return custom_linear_solver::batched::batched_solve(impl_->plan, impl_->batched, d_rhsB,
                                                           d_solB, impl_->d_perm.ptr, kernel_ms)
+               ? Status::Success
+               : Status::SolveFailed;
+}
+
+// ---- TC-dedicated path ------------------------------------------------------------------------
+
+Status Solver::tc_setup(int batch)
+{
+    if (!impl_ || !impl_->analyzed) return Status::InvalidState;
+    return custom_linear_solver::tc::tc_setup(impl_->plan, batch, impl_->tc) ? Status::Success
+                                                                              : Status::InvalidState;
+}
+
+Status Solver::tc_set_stream(void* stream)
+{
+    if (!impl_ || !impl_->analyzed || impl_->tc.B == 0) return Status::InvalidState;
+    custom_linear_solver::tc::tc_set_stream(impl_->tc, stream);
+    return Status::Success;
+}
+
+Status Solver::tc_factorize(const float* d_valuesB, double* kernel_ms)
+{
+    if (!impl_ || !impl_->analyzed || impl_->tc.B == 0) return Status::InvalidState;
+    return custom_linear_solver::tc::tc_factorize(
+               impl_->plan, impl_->tc, d_valuesB, impl_->d_ordered_value_to_csr.ptr, kernel_ms)
+               ? Status::Success
+               : Status::FactorizationFailed;
+}
+
+Status Solver::tc_solve(const float* d_rhsB, float* d_solB, double* kernel_ms)
+{
+    if (!impl_ || !impl_->analyzed || impl_->tc.B == 0) return Status::InvalidState;
+    return custom_linear_solver::tc::tc_solve(impl_->plan, impl_->tc, d_rhsB, d_solB,
+                                              impl_->d_perm.ptr, kernel_ms)
                ? Status::Success
                : Status::SolveFailed;
 }

@@ -91,6 +91,65 @@ __global__ void mf_fwd_level_b(int lbegin, int lend, const int* __restrict__ plc
     }
 }
 
+// Forward solve with within-panel pivot application (Phase Σ.8). selinv path NOT supported
+// here (CLS_USE_PIVOTING implies the no-selinv default).
+template <typename FT>
+__global__ void mf_fwd_level_pp_b(int lbegin, int lend, const int* __restrict__ plcols,
+                                  const int* __restrict__ front_off,
+                                  const int* __restrict__ front_ptr,
+                                  const int* __restrict__ ncols,
+                                  const int* __restrict__ front_rows,
+                                  const FT* frontB, FT* yB, long front_total, int n,
+                                  const int* __restrict__ pivotsB,
+                                  const int* __restrict__ pivot_offset, int total_pivots)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const int bb = blockIdx.y;
+    const FT* front = frontB + (long)bb * front_total;
+    FT* y = yB + (long)bb * n;
+    const int p = plcols[idx];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const int nc = ncols[p];
+    const FT* F = front + front_off[p];
+    const int* fr = front_rows + s;
+    const int* piv = pivotsB + (long)bb * total_pivots + pivot_offset[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    __shared__ FT sh_piv[64];
+
+    // Gather RHS + apply pivot swaps (sequential, thread 0).
+    for (int k = t; k < nc; k += nt) sh_piv[k] = y[fr[k]];
+    __syncthreads();
+    if (t == 0) {
+        for (int k = 0; k < nc; ++k) {
+            const int pk = piv[k];
+            if (pk != k) {
+                FT tmp = sh_piv[k]; sh_piv[k] = sh_piv[pk]; sh_piv[pk] = tmp;
+            }
+        }
+    }
+    __syncthreads();
+    if (t < 32) {
+        const int lane = t;
+        const unsigned mask = 0xffffffffu;
+        FT part = FT(0), sk = FT(0);
+        for (int k = 0; k < nc; ++k) {
+            if (lane == k) { sk = sh_piv[k] + part; sh_piv[k] = sk; }
+            sk = __shfl_sync(mask, sk, k);
+            if (lane > k && lane < nc) part -= F[(long)lane * fsz + k] * sk;
+        }
+    }
+    __syncthreads();
+    for (int k = t; k < nc; k += nt) y[fr[k]] = sh_piv[k];
+    __syncthreads();
+    for (int i = nc + t; i < fsz; i += nt) {
+        FT upd = FT(0);
+        for (int k = 0; k < nc; ++k) upd += F[(long)i * fsz + k] * sh_piv[k];
+        atomicAdd(&y[fr[i]], -upd);
+    }
+}
+
 constexpr int MF_MAX_NC = 64;
 
 // Backward solve level (U x = y). FT = front type AND working/accumulation type (see fwd: FP32

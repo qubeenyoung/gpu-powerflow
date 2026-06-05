@@ -76,6 +76,14 @@ public:
     Status batched_solve(const double* d_rhsB, float* d_solB, double* kernel_ms = nullptr);
     Status batched_solve(const float* d_rhsB, float* d_solB, double* kernel_ms = nullptr);
 
+    // TC-dedicated path (research). Mirrors the batched API but hard-wires the precision to
+    // TC32 (FP32 front + FP16 WMMA trailing). See docs/tc-dedicated-path-plan.md. Call after
+    // analyze() (with panel_cap=16 recommended).
+    Status tc_setup(int batch);
+    Status tc_set_stream(void* stream);
+    Status tc_factorize(const float* d_valuesB, double* kernel_ms = nullptr);
+    Status tc_solve(const float* d_rhsB, float* d_solB, double* kernel_ms = nullptr);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

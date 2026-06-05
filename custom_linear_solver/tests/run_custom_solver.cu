@@ -12,6 +12,7 @@
 #include "batched/multifrontal_batched.hpp"
 #include "io.hpp"
 #include "solver.hpp"
+#include "tc/multifrontal_tc.hpp"
 
 namespace cls = custom_linear_solver;
 namespace scripts = custom_linear_solver::scripts;
@@ -28,6 +29,7 @@ struct Options {
     int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
     bool batch_only = false;  // skip the single-system factor/solve (e.g. nc>16 amalgamation)
     bool single_fp32 = false;
+    bool tc = false;  // use TC-dedicated path (src/tc/) instead of batched path
 };
 
 template <typename T>
@@ -136,6 +138,8 @@ Options parse_args(int argc, char** argv)
             if (value == "fp64") options.single_fp32 = false;
             else if (value == "fp32") options.single_fp32 = true;
             else throw std::runtime_error("--single-precision must be fp64 or fp32");
+        } else if (arg == "--tc") {
+            options.tc = true;
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -215,6 +219,9 @@ int main(int argc, char** argv)
 {
     try {
         const Options options = parse_args(argc, argv);
+        // Pre-init cuBLAS (~10 ms cublasCreate driver-init) at program start so subsequent
+        // tc_setup calls reuse the cached handle.
+        if (options.tc) custom_linear_solver::tc::tc_warmup();
         const auto t0 = std::chrono::steady_clock::now();
         scripts::CsrMatrix matrix = scripts::read_matrix_market_csr(options.matrix_path);
         scripts::DenseVector rhs = scripts::read_matrix_market_vector(options.rhs_path);
@@ -361,10 +368,34 @@ int main(int argc, char** argv)
                 std::copy(rhs.values.begin(), rhs.values.end(), hrhsB.begin() + (std::size_t)b * n);
             }
             DeviceBuffer<double> d_valB, d_rhsB, d_solB;
-            d_valB.upload(hvalB);
-            d_rhsB.upload(hrhsB);
-            d_solB.allocate((std::size_t)B * n);
-            require_success(solver.batched_setup(B, prec), "batched_setup");
+            DeviceBuffer<float> d_valBf, d_rhsBf, d_solBf;
+            if (options.tc) {
+                // TC-dedicated path: FP32 inputs/outputs throughout.
+                std::vector<float> hvalBf((std::size_t)B * nnz), hrhsBf((std::size_t)B * n);
+                for (std::size_t k = 0; k < hvalBf.size(); ++k) hvalBf[k] = (float)hvalB[k];
+                for (std::size_t k = 0; k < hrhsBf.size(); ++k) hrhsBf[k] = (float)hrhsB[k];
+                d_valBf.upload(hvalBf);
+                d_rhsBf.upload(hrhsBf);
+                d_solBf.allocate((std::size_t)B * n);
+                cudaDeviceSynchronize();
+                const auto t_setup0 = std::chrono::steady_clock::now();
+                require_success(solver.tc_setup(B), "tc_setup");
+                cudaDeviceSynchronize();
+                const double setup_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t_setup0).count();
+                std::cout << "setup_ms=" << setup_ms << " (one-time, outside Newton loop)\n";
+            } else {
+                d_valB.upload(hvalB);
+                d_rhsB.upload(hrhsB);
+                d_solB.allocate((std::size_t)B * n);
+                cudaDeviceSynchronize();
+                const auto t_setup0 = std::chrono::steady_clock::now();
+                require_success(solver.batched_setup(B, prec), "batched_setup");
+                cudaDeviceSynchronize();
+                const double setup_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t_setup0).count();
+                std::cout << "setup_ms=" << setup_ms << " (one-time, outside Newton loop)\n";
+            }
             std::vector<double> bf, bs;
             if (std::getenv("MF_EXT_CAPTURE") != nullptr) {
                 // External/capturable path (lib built with CLS_INTERNAL_GRAPH=OFF): capture the
@@ -393,8 +424,13 @@ int main(int argc, char** argv)
             } else {
                 for (int r = 0; r < options.repeat; ++r) {
                     double kf = 0, ks = 0;
-                    require_success(solver.batched_factorize(d_valB.get(), &kf), "batched_factorize");
-                    require_success(solver.batched_solve(d_rhsB.get(), d_solB.get(), &ks), "batched_solve");
+                    if (options.tc) {
+                        require_success(solver.tc_factorize(d_valBf.get(), &kf), "tc_factorize");
+                        require_success(solver.tc_solve(d_rhsBf.get(), d_solBf.get(), &ks), "tc_solve");
+                    } else {
+                        require_success(solver.batched_factorize(d_valB.get(), &kf), "batched_factorize");
+                        require_success(solver.batched_solve(d_rhsB.get(), d_solB.get(), &ks), "batched_solve");
+                    }
                     bf.push_back(kf);
                     bs.push_back(ks);
                 }
@@ -402,8 +438,15 @@ int main(int argc, char** argv)
             batch_factor_per_ms = median(bf) / B;
             batch_solve_per_ms = median(bs) / B;
             std::vector<double> solB((std::size_t)B * n);
+            if (options.tc) {
+                std::vector<float> solBf((std::size_t)B * n);
+                cuda_check(cudaMemcpy(solBf.data(), d_solBf.get(), solBf.size() * sizeof(float),
+                                      cudaMemcpyDeviceToHost), "D2H batch tc sol");
+                for (std::size_t k = 0; k < solBf.size(); ++k) solB[k] = (double)solBf[k];
+            } else {
             cuda_check(cudaMemcpy(solB.data(), d_solB.get(), (std::size_t)B * n * sizeof(double),
                                   cudaMemcpyDeviceToHost), "D2H batch sol");
+            }
             // max relres over ALL B batches (catches per-batch indexing bugs, not just batch 0)
             for (int b = 0; b < B; ++b) {
                 std::vector<double> xb(solB.begin() + (std::size_t)b * n,

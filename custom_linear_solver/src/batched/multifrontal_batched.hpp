@@ -44,6 +44,12 @@ struct BatchedState {
     bool owns_stream = false;     // true only when the solver created `stream` (internal-graph mode)
     void* factor_graph_exec = nullptr;
     void* solve_graph_exec = nullptr;
+    // Σ.11 — multi-stream subtree dispatch. Same partition info as TCState; default ON
+    // (gated by CLS_NO_MULTISTREAM=1 to disable). Streams allocated per BatchedState.
+    int num_subtree_streams = 0;
+    void* subtree_streams[8] = {nullptr};
+    void* fork_event = nullptr;
+    void* join_events[8] = {nullptr};
     BatchedState() = default;
     ~BatchedState();
     BatchedState(const BatchedState&) = delete;
