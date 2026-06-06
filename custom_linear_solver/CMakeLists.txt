@@ -47,13 +47,10 @@ if(CLS_BUILD_CUDA_OPS)
     src/solver.cpp
     src/matrix/pattern_kernels.cu
     src/plan/multifrontal_plan.cu
-    src/factorize/multifrontal.cu
-    src/batched/multifrontal_batched.cu
-    src/tc/multifrontal_tc.cu
-    src/solve/multifrontal.cu
+    src/plan/analyze.cu
+    src/multifrontal.cu
     src/symbolic/elimination_tree.cpp
     src/symbolic/supernode.cpp
-    src/symbolic/amalgamate.cpp
     src/symbolic/multifrontal.cpp
     src/reordering/metis_nd.cpp
   )

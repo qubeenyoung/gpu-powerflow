@@ -9,10 +9,9 @@
 #include <string>
 #include <vector>
 
-#include "batched/multifrontal_batched.hpp"
+#include "multifrontal.hpp"
 #include "io.hpp"
 #include "solver.hpp"
-#include "tc/multifrontal_tc.hpp"
 
 namespace cls = custom_linear_solver;
 namespace scripts = custom_linear_solver::scripts;
@@ -27,9 +26,11 @@ struct Options {
     bool write_solution = false;
     int repeat = 1;
     int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
-    bool batch_only = false;  // skip the single-system factor/solve (e.g. nc>16 amalgamation)
+    bool batch_only = false;  // skip the single-system factor/solve
     bool single_fp32 = false;
-    bool tc = false;  // use TC-dedicated path (src/tc/) instead of batched path
+    // Batched-mode precision (FP64 default). FP32 trades accuracy for ~2x throughput.
+    // TC is FP32 with FP16 WMMA trailing GEMM.
+    cls::Precision precision = cls::Precision::FP64;
 };
 
 template <typename T>
@@ -102,8 +103,10 @@ void usage(const char* argv0)
 {
     std::cerr
         << "Usage:\n"
-        << "  " << argv0 << " <case-dir> [--repeat N] [--single-precision fp64|fp32] [--solution-out x.mtx]\n"
-        << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [--repeat N] [--single-precision fp64|fp32] [--solution-out x.mtx]\n";
+        << "  " << argv0 << " <case-dir> [--repeat N] [--single-precision fp64|fp32]"
+                              " [--batch B [--batch-only]] [--precision fp64|fp32|tc]"
+                              " [--solution-out x.mtx]\n"
+        << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [other options]\n";
 }
 
 Options parse_args(int argc, char** argv)
@@ -138,8 +141,14 @@ Options parse_args(int argc, char** argv)
             if (value == "fp64") options.single_fp32 = false;
             else if (value == "fp32") options.single_fp32 = true;
             else throw std::runtime_error("--single-precision must be fp64 or fp32");
-        } else if (arg == "--tc") {
-            options.tc = true;
+        } else if (arg == "--precision") {
+            if (++i >= argc) throw std::runtime_error("--precision requires fp64, fp32, or tc");
+            const std::string value = argv[i];
+            using cls::Precision;
+            if      (value == "fp64") options.precision = Precision::FP64;
+            else if (value == "fp32") options.precision = Precision::FP32;
+            else if (value == "tc")   options.precision = Precision::TC;
+            else throw std::runtime_error("--precision must be fp64, fp32, or tc");
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -219,9 +228,6 @@ int main(int argc, char** argv)
 {
     try {
         const Options options = parse_args(argc, argv);
-        // Pre-init cuBLAS (~10 ms cublasCreate driver-init) at program start so subsequent
-        // tc_setup calls reuse the cached handle.
-        if (options.tc) custom_linear_solver::tc::tc_warmup();
         const auto t0 = std::chrono::steady_clock::now();
         scripts::CsrMatrix matrix = scripts::read_matrix_market_csr(options.matrix_path);
         scripts::DenseVector rhs = scripts::read_matrix_market_vector(options.rhs_path);
@@ -261,8 +267,7 @@ int main(int argc, char** argv)
         const auto t_upload = std::chrono::steady_clock::now();
 
         cls::SolverConfig solver_config;
-        solver_config.single_precision =
-            options.single_fp32 ? cls::SinglePrecision::FP32 : cls::SinglePrecision::FP64;
+        solver_config.precision = options.precision;
         cls::Solver solver(solver_config);
         cls::CsrMatrixView matrix_view;
         matrix_view.nrows = matrix.rows;
@@ -307,29 +312,22 @@ int main(int argc, char** argv)
 
         std::vector<double> factor_ms;
         std::vector<double> solve_ms;
-        std::vector<double> factor_kms;
-        std::vector<double> solve_kms;
         factor_ms.reserve(static_cast<std::size_t>(options.repeat));
         solve_ms.reserve(static_cast<std::size_t>(options.repeat));
-        const bool kernel_time = std::getenv("CLS_KERNEL_TIME") != nullptr;
         if (options.batch_only) { factor_ms.push_back(0); solve_ms.push_back(0); }
 
         for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
-            double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
-            require_success(solver.factorize(kernel_time ? &kms : nullptr), "factorize");
+            require_success(solver.factorize(), "factorize");
             const auto stop = std::chrono::steady_clock::now();
             factor_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
-            if (kernel_time) factor_kms.push_back(kms);
         }
 
         for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
-            double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
-            require_success(solver.solve(kernel_time ? &kms : nullptr), "solve");
+            require_success(solver.solve(), "solve");
             const auto stop = std::chrono::steady_clock::now();
             solve_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
-            if (kernel_time) solve_kms.push_back(kms);
         }
         const auto t_solve = std::chrono::steady_clock::now();
 
@@ -351,15 +349,7 @@ int main(int argc, char** argv)
         if (options.batch > 0) {
             const int B = options.batch;
             const int n = matrix.rows, nnz = matrix.nnz();
-            // Map env knobs to the batch precision mode. Default: Mixed for small/medium (it passes
-            // 1e-3 without refinement), FP64 for large. MF_TC / MF_FP32 / MF_MIXED / MF_NO_MIXED force.
-            using cls::batched::BatchPrecision;
-            BatchPrecision prec = (n < 24000) ? BatchPrecision::Mixed : BatchPrecision::FP64;
-            if (std::getenv("MF_NO_MIXED")) prec = BatchPrecision::FP64;
-            if (std::getenv("MF_FP32")) prec = BatchPrecision::FP32;
-            if (std::getenv("MF_MIXED")) prec = BatchPrecision::Mixed;
-            if (std::getenv("MF_TC")) prec = BatchPrecision::TC;
-            if (std::getenv("MF_TC32")) prec = BatchPrecision::TC32;
+            const cls::Precision prec = options.precision;
             // B identical copies (same pattern + values) -> each batch solves the same system,
             // so the per-batch residual must match the single-system solve (correctness check).
             std::vector<double> hvalB((std::size_t)B * nnz), hrhsB((std::size_t)B * n);
@@ -368,85 +358,50 @@ int main(int argc, char** argv)
                 std::copy(rhs.values.begin(), rhs.values.end(), hrhsB.begin() + (std::size_t)b * n);
             }
             DeviceBuffer<double> d_valB, d_rhsB, d_solB;
-            DeviceBuffer<float> d_valBf, d_rhsBf, d_solBf;
-            if (options.tc) {
-                // TC-dedicated path: FP32 inputs/outputs throughout.
-                std::vector<float> hvalBf((std::size_t)B * nnz), hrhsBf((std::size_t)B * n);
-                for (std::size_t k = 0; k < hvalBf.size(); ++k) hvalBf[k] = (float)hvalB[k];
-                for (std::size_t k = 0; k < hrhsBf.size(); ++k) hrhsBf[k] = (float)hrhsB[k];
-                d_valBf.upload(hvalBf);
-                d_rhsBf.upload(hrhsBf);
-                d_solBf.allocate((std::size_t)B * n);
-                cudaDeviceSynchronize();
-                const auto t_setup0 = std::chrono::steady_clock::now();
-                require_success(solver.tc_setup(B), "tc_setup");
-                cudaDeviceSynchronize();
-                const double setup_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t_setup0).count();
-                std::cout << "setup_ms=" << setup_ms << " (one-time, outside Newton loop)\n";
-            } else {
-                d_valB.upload(hvalB);
-                d_rhsB.upload(hrhsB);
-                d_solB.allocate((std::size_t)B * n);
-                cudaDeviceSynchronize();
-                const auto t_setup0 = std::chrono::steady_clock::now();
-                require_success(solver.batched_setup(B, prec), "batched_setup");
-                cudaDeviceSynchronize();
-                const double setup_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t_setup0).count();
-                std::cout << "setup_ms=" << setup_ms << " (one-time, outside Newton loop)\n";
-            }
+            d_valB.upload(hvalB);
+            d_rhsB.upload(hrhsB);
+            d_solB.allocate((std::size_t)B * n);
+
+            // Register the batched buffers (size = B * nnz / B * n) and run the phase API.
+            cls::CsrMatrixView batched_matrix = matrix_view;
+            batched_matrix.values = d_valB.get();
+            cls::DenseVectorView batched_rhs;
+            batched_rhs.size = (std::size_t)B * n;
+            batched_rhs.location = cls::DataLocation::Device;
+            batched_rhs.value_type = cls::ValueType::Float64;
+            batched_rhs.values = d_rhsB.get();
+            cls::DenseVectorView batched_sol = batched_rhs;
+            batched_sol.values = d_solB.get();
+            require_success(solver.set_data(batched_matrix), "set_data(batched)");
+            require_success(solver.set_rhs(batched_rhs), "set_rhs(batched)");
+            require_success(solver.set_solution(batched_sol), "set_solution(batched)");
+
+            cudaDeviceSynchronize();
+            const auto t_setup0 = std::chrono::steady_clock::now();
+            require_success(solver.analyze(), "analyze(batched)");
+            require_success(solver.setup(B), "setup(batched)");
+            cudaDeviceSynchronize();
+            const double setup_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_setup0).count();
+            std::cout << "setup_ms=" << setup_ms << " (one-time, outside Newton loop)\n";
+
             std::vector<double> bf, bs;
-            if (std::getenv("MF_EXT_CAPTURE") != nullptr) {
-                // External/capturable path (lib built with CLS_INTERNAL_GRAPH=OFF): capture the
-                // batched factorize+solve into ONE graph on our own stream and replay it -- the
-                // same way cuPF folds the solve into its whole-iteration graph. Verifies the OFF
-                // mode issues a capturable kernel sequence and replays to the right answer.
-                cudaStream_t cap_stream;
-                cuda_check(cudaStreamCreate(&cap_stream), "capture stream create");
-                require_success(solver.batched_set_stream(cap_stream), "batched_set_stream");
-                cudaGraph_t cg;
-                cudaGraphExec_t cge;
-                cuda_check(cudaStreamBeginCapture(cap_stream, cudaStreamCaptureModeGlobal),
-                           "begin capture");
-                require_success(solver.batched_factorize(d_valB.get()), "batched_factorize(capture)");
-                require_success(solver.batched_solve(d_rhsB.get(), d_solB.get()), "batched_solve(capture)");
-                cuda_check(cudaStreamEndCapture(cap_stream, &cg), "end capture");
-                cuda_check(cudaGraphInstantiate(&cge, cg, nullptr, nullptr, 0), "graph instantiate");
-                for (int r = 0; r < options.repeat; ++r)
-                    cuda_check(cudaGraphLaunch(cge, cap_stream), "graph launch");
-                cuda_check(cudaStreamSynchronize(cap_stream), "graph sync");
-                cudaGraphExecDestroy(cge);
-                cudaGraphDestroy(cg);
-                cudaStreamDestroy(cap_stream);
-                bf.push_back(0.0);
-                bs.push_back(0.0);  // per-op timing is unavailable under capture
-            } else {
-                for (int r = 0; r < options.repeat; ++r) {
-                    double kf = 0, ks = 0;
-                    if (options.tc) {
-                        require_success(solver.tc_factorize(d_valBf.get(), &kf), "tc_factorize");
-                        require_success(solver.tc_solve(d_rhsBf.get(), d_solBf.get(), &ks), "tc_solve");
-                    } else {
-                        require_success(solver.batched_factorize(d_valB.get(), &kf), "batched_factorize");
-                        require_success(solver.batched_solve(d_rhsB.get(), d_solB.get(), &ks), "batched_solve");
-                    }
-                    bf.push_back(kf);
-                    bs.push_back(ks);
-                }
+            for (int r = 0; r < options.repeat; ++r) {
+                const auto sf = std::chrono::steady_clock::now();
+                require_success(solver.factorize(), "factorize(batched)");
+                cudaDeviceSynchronize();
+                const auto ef = std::chrono::steady_clock::now();
+                require_success(solver.solve(), "solve(batched)");
+                cudaDeviceSynchronize();
+                const auto es = std::chrono::steady_clock::now();
+                bf.push_back(std::chrono::duration<double, std::milli>(ef - sf).count());
+                bs.push_back(std::chrono::duration<double, std::milli>(es - ef).count());
             }
             batch_factor_per_ms = median(bf) / B;
             batch_solve_per_ms = median(bs) / B;
             std::vector<double> solB((std::size_t)B * n);
-            if (options.tc) {
-                std::vector<float> solBf((std::size_t)B * n);
-                cuda_check(cudaMemcpy(solBf.data(), d_solBf.get(), solBf.size() * sizeof(float),
-                                      cudaMemcpyDeviceToHost), "D2H batch tc sol");
-                for (std::size_t k = 0; k < solBf.size(); ++k) solB[k] = (double)solBf[k];
-            } else {
             cuda_check(cudaMemcpy(solB.data(), d_solB.get(), (std::size_t)B * n * sizeof(double),
                                   cudaMemcpyDeviceToHost), "D2H batch sol");
-            }
             // max relres over ALL B batches (catches per-batch indexing bugs, not just batch 0)
             for (int b = 0; b < B; ++b) {
                 std::vector<double> xb(solB.begin() + (std::size_t)b * n,
@@ -469,10 +424,6 @@ int main(int argc, char** argv)
                   << "analyze_ms=" << ms(t_set, t_analyze) << '\n'
                   << "factorize_ms=" << median(factor_ms) << '\n'
                   << "solve_ms=" << median(solve_ms) << '\n';
-        if (kernel_time) {
-            std::cout << "factorize_kernel_ms=" << median(factor_kms) << '\n'
-                      << "solve_kernel_ms=" << median(solve_kms) << '\n';
-        }
         if (options.batch > 0) {
             std::cout << "batch=" << options.batch << '\n'
                       << "batch_factor_per_sys_ms=" << batch_factor_per_ms << '\n'

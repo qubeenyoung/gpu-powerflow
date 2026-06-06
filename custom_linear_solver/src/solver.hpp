@@ -6,7 +6,7 @@
 
 namespace custom_linear_solver {
 
-namespace batched { enum class BatchPrecision; }  // FP64 / FP32 / Mixed / TC (defined in batched hdr)
+enum class Precision;  // FP64 / FP32 / TC (defined in multifrontal.hpp)
 
 enum class Status {
     Success,
@@ -18,21 +18,27 @@ enum class Status {
     SolveFailed,
 };
 
-enum class SinglePrecision {
-    FP64,
-    FP32,
-    Mixed,
-};
-
 struct SolverConfig {
     bool use_matching = false;
     bool use_parallel_nested_dissection = true;
     bool enable_shift_retry = true;
     double shift_retry_epsilon = 1.0e-8;
     int panel_cap = 8;
-    SinglePrecision single_precision = SinglePrecision::FP64;
+    Precision precision = static_cast<Precision>(0);  // FP64 by default (enum value 0)
 };
 
+// Phase API. Typical sequence:
+//
+//   set_data(...)        // register A (sparsity + values pointer)
+//   set_rhs(...)         // register b
+//   set_solution(...)    // register x
+//   analyze()            // one-time symbolic + plan build
+//   setup(B = 1)         // allocate per-system runtime state for B systems
+//   factorize()          // numeric factor using the registered values
+//   solve()              // y = A^{-1} * b using registered rhs / solution
+//
+// For B > 1 the registered buffers are batch-strided: values[b*nnz + ·], rhs[b*n + ·],
+// solution[b*n + ·]. Caller measures kernel time externally (cudaEvent or wall clock).
 class Solver {
 public:
     explicit Solver(const SolverConfig& config = {});
@@ -53,36 +59,14 @@ public:
     Status get_solution(DenseVectorView* solution) const;
 
     Status analyze();
-    Status factorize(double* kernel_ms = nullptr);
-    Status solve(double* kernel_ms = nullptr);
+    Status setup(int batch_size = 1);
+    Status factorize();
+    Status solve();
+
+    // External / capturable mode (CLS_INTERNAL_GRAPH off in CMake): bind a caller-owned
+    // cudaStream_t (passed as void*) so factor / solve issue their kernels onto it for an
+    // outer stream capture. Call after setup(), before factorize() / solve().
     Status set_stream(void* stream);
-
-    // Uniform-batch path (research): B systems sharing this analyzed sparsity pattern.
-    // setup once after analyze(); then factorize/solve all B at once. Device buffers are
-    // batch-strided: valuesB[b*nnz + .], rhsB[b*n + .], solB[b*n + .].
-    Status batched_setup(int batch, batched::BatchPrecision prec);
-    // External/capturable mode (lib built with CLS_INTERNAL_GRAPH=OFF): bind a caller-owned CUDA
-    // stream (cudaStream_t passed as void*) so batched_factorize/solve issue their kernels onto it
-    // for an outer stream capture. Call after batched_setup, before batched_factorize/solve.
-    Status batched_set_stream(void* stream);
-    Status batched_factorize(const double* d_valuesB, double* kernel_ms = nullptr);
-    Status batched_solve(const double* d_rhsB, double* d_solB, double* kernel_ms = nullptr);
-
-    // FP32-input overloads for callers whose Jacobian/step buffers are single precision (e.g.
-    // cuPF's Mixed profile: float Jacobian, double RHS, float step). Values are scattered
-    // straight into the factor working buffers (no FP64 staging); the internal solve vector
-    // stays FP64 for accuracy.
-    Status batched_factorize(const float* d_valuesB, double* kernel_ms = nullptr);
-    Status batched_solve(const double* d_rhsB, float* d_solB, double* kernel_ms = nullptr);
-    Status batched_solve(const float* d_rhsB, float* d_solB, double* kernel_ms = nullptr);
-
-    // TC-dedicated path (research). Mirrors the batched API but hard-wires the precision to
-    // TC32 (FP32 front + FP16 WMMA trailing). See docs/tc-dedicated-path-plan.md. Call after
-    // analyze() (with panel_cap=16 recommended).
-    Status tc_setup(int batch);
-    Status tc_set_stream(void* stream);
-    Status tc_factorize(const float* d_valuesB, double* kernel_ms = nullptr);
-    Status tc_solve(const float* d_rhsB, float* d_solB, double* kernel_ms = nullptr);
 
 private:
     struct Impl;

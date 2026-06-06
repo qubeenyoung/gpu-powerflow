@@ -1,6 +1,6 @@
 #pragma once
 
-// Internal — included only by batched/multifrontal_batched.cu (single TU). TINY-FRONT factor
+// Internal — included only by multifrontal.cu (single TU). TINY-FRONT factor
 // kernel for the batched path.
 //
 // Why: ncu on the power-grid Jacobians shows batched factor time is dominated by the bottom etree
@@ -18,7 +18,7 @@
 
 #include <cuda_runtime.h>
 
-namespace custom_linear_solver::batched {
+namespace custom_linear_solver {
 namespace {
 
 // Warp-parallel fused no-pivot LU for a small front F (row-major, ld=fsz), nc pivot columns.
@@ -53,7 +53,7 @@ __device__ __forceinline__ void lu_small_warp(FT* F, int fsz, int nc, int lane, 
 // lanes i is stride-fsz in global) and keeps the nc repeated passes in low-latency shared. The
 // dynamic shared is sized WARPS_PER_BLOCK * fsz2cap elements (fsz2cap = the level's max fsz^2).
 template <typename FT>
-__global__ void mf_factor_small_warp_b(int lbegin, int level_size, int B, int fsz2cap,
+__global__ void factor_small(int lbegin, int level_size, int B, int fsz2cap,
                                        const int* __restrict__ plcols,
                                        const int* __restrict__ front_off,
                                        const int* __restrict__ front_ptr,
@@ -101,4 +101,4 @@ __global__ void mf_factor_small_warp_b(int lbegin, int level_size, int B, int fs
 }
 
 }  // namespace
-}  // namespace custom_linear_solver::batched
+}  // namespace custom_linear_solver

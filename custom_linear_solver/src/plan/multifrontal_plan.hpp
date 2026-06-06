@@ -23,15 +23,15 @@ struct MultifrontalPlan {
     float* d_yf = nullptr;
     int front_store = 0;
     std::vector<int> plptr;
-    std::vector<int> h_front_ptr;  // host copy of front_ptr (per-panel front size), for batched dispatch
-    std::vector<int> h_ncols;      // host copy of panel ncols, for batched tensor-core shared sizing
+    std::vector<int> h_front_ptr;  // host copy of front_ptr (per-panel front size), for kernel dispatch
+    std::vector<int> h_ncols;      // host copy of panel ncols, for tensor-core shared sizing
     std::vector<int> h_plcols;     // host copy of panels-by-level order (indexes into h_front_ptr)
     std::vector<int> h_front_off;  // host copy of front_off (per-panel arena offset), for per-panel cuBLAS dispatch
 
     // Phase Σ.8 — within-panel partial pivoting infrastructure (CLS_USE_PIVOTING=1).
     // pivot_offset[p] = prefix sum of ncols[0..p-1], giving the start of panel p's pivots in
     // the per-system pivot array (length = sum_p ncols[p] = n). Total per-batch pivot storage
-    // is therefore B * n ints. Allocated/owned by per-state (TCState/BatchedState).
+    // is therefore B * n ints. Allocated/owned by per-state (per State allocation).
     std::vector<int> h_pivot_offset;  // P+1 entries
     int* d_pivot_offset = nullptr;    // device mirror
     int total_pivots = 0;             // = h_pivot_offset[P] = n

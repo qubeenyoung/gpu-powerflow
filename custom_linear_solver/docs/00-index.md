@@ -31,6 +31,9 @@
 3. [Lineage: STRUMPACK Is Not the Baseline](01-orientation/03-lineage-strumpack-not-the-baseline.md)
    코드 lineage 정정, STRUMPACK 한계 L1-L9와 본 솔버의 대응 매핑.
 
+4. [Batched Precision and Dispatch Map](01-orientation/04-batched-precision-and-dispatch-map.md)
+   5개 정밀도 모드 × front-size tier × env/CMake lever 의 단일 dispatch 표. 리팩토링 베이스라인.
+
 ## 02. Design Analysis
 
 1. [Why Custom Is Fast on Power Grid](02-design-analysis/01-why-custom-fast-on-power-grid.md)
@@ -99,6 +102,12 @@
 
 8. [Batched Throughput FP32 case8387 B=2..1024](04-benchmarks-profiling/08-batched-throughput-fp32-case8387-b2-b1024.md)
    FP32 batched factorize throughput saturation, SM/DRAM sweep, small/mid kernel 병목.
+
+9. [Batched Memory-Bound case8387/USA B=4,64,256 (FP64)](04-benchmarks-profiling/09-batched-membound-case8387-usa-b4-b64-b256.md)
+   FP64 강제, case8387 / SyntheticUSA × B=4/64/256 의 dominant 커널 bound 분류 (memory / compute / latency) 와 메모리 바운드 완화 후보 (M1-M6).
+
+10. [Batched Memory-Bound case8387/USA B=4,64,256 (FP32)](04-benchmarks-profiling/10-batched-membound-case8387-usa-b4-b64-b256-fp32.md)
+    pure FP32, 같은 (case × B) 위의 bound 재분류. FP64 의 memory wall 이 FP32 에서 어떻게 *invert_pivot 의 FP64 compute* 로 이동하는지 직접 비교.
 
 ## 05. Reports
 
