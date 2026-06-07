@@ -53,9 +53,9 @@ void symmetric_pattern(int n, const int* col_ptr, const int* row_idx,
             adj[next[row]++] = col;
             adj[next[col]++] = row;
         }
-    // cy181: parallelize the per-node sort+dedup+compact (~14ms single-threaded on SyntheticUSA;
-    // shared symbolic path -> helps production A). Each node's slice is independent -> output is
-    // byte-identical to serial (sort+dedup per col, concatenated in col order via prefix-sum).
+    // Parallelize the per-node sort+dedup+compact. On large power-grid Jacobians the serial
+    // pass is non-trivial (tens of ms on n ~ 10^6). Each node's slice is independent → output
+    // is byte-identical to serial (sort+dedup per col, concatenated in col order via prefix-sum).
     auto par_for = [](int lo, int hi, auto&& fn) {
         unsigned hw = std::thread::hardware_concurrency();
         const int nth = static_cast<int>(std::max(1u, std::min(hw ? hw : 1u, 12u)));
@@ -269,10 +269,10 @@ void fill_pattern(int n, const int* col_ptr, const int* row_idx,
     // ∪ over etree-children c of (struct(c) \ {c}). parent[j] > j, so children
     // are computed before j.
     //
-    // cy261: write the merge DIRECTLY into a FLAT Li (no vector<vector> col/head with
-    // 156k small-vector allocs + regrowth. column_counts (proven cs_counts) gives the
-    // EXACT per-column size (|L(:,j)| == |struct(j)|), so Lp is prefix-summed up front and
-    // each column's slice [Lp[j],Lp[j+1]) is filled in place. Consumers re-sort the
+    // Write the merge DIRECTLY into a FLAT Li (no vector<vector> col/head with per-column
+    // small-vector allocs + regrowth). column_counts (proven cs_counts) gives the EXACT
+    // per-column size (|L(:,j)| == |struct(j)|), so Lp is prefix-summed up front and each
+    // column's slice [Lp[j],Lp[j+1]) is filled in place. Consumers re-sort the
     // pattern, so per-column order is free -> output is set-identical to the old version.
     auto flap = [](const char*) {};
     const std::vector<int> post = postorder(parent, n);

@@ -15,11 +15,11 @@ namespace {
 constexpr int kParNdDepth = 4;
 constexpr int kParNdTopInduceThreshold = 49152;
 
-// cy155: PARALLEL nested dissection (research-grade A rewrite). METIS_NodeND is
-// single-threaded; ND is recursively parallel (after a vertex separator, the two halves
-// are independent). Find a separator with METIS, recurse on each half on separate threads,
-// order the separator last. Same ND algorithm -> fill ~= serial METIS (F-safe), but uses
-// the 12 cores. Returns perm in METIS convention: perm[old_local] = new_local_position.
+// Parallel nested dissection. METIS_NodeND is single-threaded; ND is recursively parallel
+// (after a vertex separator, the two halves are independent). Find a separator with METIS,
+// recurse on each half on separate threads, order the separator last. Same ND algorithm
+// → fill ~= serial METIS, but uses all cores. Returns perm in METIS convention:
+// perm[old_local] = new_local_position.
 void induce(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
             const std::vector<idx_t>& part, idx_t which, std::vector<idx_t>& sx,
             std::vector<idx_t>& sa, std::vector<int>& map)
@@ -62,13 +62,14 @@ void base_nodend(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     if (n <= 1) { if (n == 1) perm[0] = 0; return; }
     if (adj.empty()) { for (int i = 0; i < n; ++i) perm[i] = i; return; }
     idx_t nv = n;
-    std::vector<idx_t> p(n), ip(n);  // cy263: no xx/aa copy (METIS_NodeND is read-only on the
-                                     // graph; base_nodend is terminal so xadj/adj aren't reused).
+    // METIS_NodeND is read-only on the graph; base_nodend is the recursion terminal so
+    // xadj/adj aren't reused — pass them directly without copying.
+    std::vector<idx_t> p(n), ip(n);
     idx_t opt[METIS_NOPTIONS];
     METIS_SetDefaultOptions(opt);
     opt[METIS_OPTION_NUMBERING] = 0;
     opt[METIS_OPTION_SEED] = 42;  // fixed seed -> deterministic across threads
-    std::srand(42);  // cy168: reseed per call -> each subgraph from a fixed RNG state
+    std::srand(42);  // reseed per call → each subgraph starts from a fixed RNG state
                      // (deterministic with the LD_PRELOAD thread-safe rand; no-op otherwise)
     if (METIS_NodeND(&nv, const_cast<idx_t*>(xadj.data()), const_cast<idx_t*>(adj.data()),
                      nullptr, opt, p.data(), ip.data()) != METIS_OK) {
@@ -84,11 +85,10 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     const int n = static_cast<int>(xadj.size()) - 1;
     if (depth <= 0 || n < base_thr || adj.empty()) { base_nodend(xadj, adj, perm); return; }
     idx_t nv = n, sepsize = 0;
-    // cy263: no xx/aa graph copy. METIS_ComputeVertexSeparator treats the input graph as
-    // read-only (it copies into its own internal graph_t), and induce() below reads the
-    // ORIGINAL xadj/adj -- so pass them directly (const_cast only for the C API signature).
-    // Removes a full-graph copy at every recursion level (the root copy is on the sequential
-    // parND critical path). gpu_test + fill identity verify METIS leaves the input untouched.
+    // No graph copy. METIS_ComputeVertexSeparator treats the input graph as read-only (it
+    // copies into its own internal graph_t), and induce() below reads the ORIGINAL xadj/adj
+    // — so pass them directly (const_cast only for the C API signature). Removes a full-graph
+    // copy at every recursion level (the root copy is on the sequential parND critical path).
     std::vector<idx_t> part(n);
     idx_t* mx = const_cast<idx_t*>(xadj.data());
     idx_t* ma = const_cast<idx_t*>(adj.data());
@@ -96,7 +96,7 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     METIS_SetDefaultOptions(opt);
     opt[METIS_OPTION_NUMBERING] = 0;
     opt[METIS_OPTION_SEED] = 42;  // fixed seed -> deterministic across threads
-    std::srand(42);  // cy168: reseed per call (see base_nodend)
+    std::srand(42);  // reseed per call (see base_nodend)
     bool got_sep = false;
     if (!got_sep &&
         METIS_ComputeVertexSeparator(&nv, mx, ma, nullptr, opt, &sepsize,
@@ -122,7 +122,7 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     if (n0 == 0 || n1 == 0) { base_nodend(xadj, adj, perm); return; }  // degenerate split
     std::vector<int> p0, p1;
     std::thread th([&] { par_nd_rec(x0, a0, p0, depth - 1, base_thr, false); });
-    par_nd_rec(x1, a1, p1, depth - 1, base_thr, false);  // cy219: recursion uses METIS (is_root=false)
+    par_nd_rec(x1, a1, p1, depth - 1, base_thr, false);  // recursive calls go through METIS
     th.join();
     // perm convention is perm[new_position] = old_vertex (matches the caller's permute_sym
     // and METIS_NodeND's first output). p0[np]=old_local in part0 at sub-newpos np.
@@ -363,18 +363,18 @@ bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& p
     idx_t options[METIS_NOPTIONS];
     METIS_SetDefaultOptions(options);
     options[METIS_OPTION_NUMBERING] = 0;
-    // cy152: tested faster METIS opts (NITER=1/2, RM coarsening) -> only -2..-16% NodeND
-    // BUT broke onetone2 (ok=0: the different ordering's pivot structure fails the no-pivot
-    // GPU factor) + changes fill basis. Not viable; A stays METIS_NodeND-bound (92-95% of A).
+    // Faster METIS opts (NITER=1/2, RM coarsening) were tested: ~-2..-16% on analyze wall but
+    // produced orderings whose pivot structure fails the no-pivot GPU factor on some matrices,
+    // and changed the fill basis (downstream factor/solve regressed). Default METIS_NodeND
+    // stays — analyze is METIS_NodeND-bound (~92-95%).
 
-    // cy155/164: PARALLEL nested dissection (research-grade A). Same ND quality, multi-core.
-    // Enabled by the `parallel` arg (production A win).
+    // PARALLEL nested dissection: same ND quality, multi-core. Enabled by the `parallel` arg.
     if (parallel) {
-        // cy178: base-case threshold. Small matrices (n<20000) used to fall back to SERIAL
-        // METIS NodeND -> cuDSS edged them on A. Recursing them with parND (base 4000) is
-        // faster AND lower-fill (A/F/S all improve: case8387 beats cuDSS A, case6468 matches).
-        // BIG matrices keep 20000 -> their tuned fill is preserved (base 4000 over-recurses
-        // SyntheticUSA/onetone2 -> +fill -> F/S regress).
+        // Base-case threshold for the parallel recursion. The two regimes:
+        //   - Small Jacobians (n < 20000): recurse deeper (base 4000) — faster AND lower fill.
+        //   - Large Jacobians (n >= 20000): base 20000. Going deeper over-recurses on the long
+        //     elimination chains typical of large power-grid Jacobians, raising fill and
+        //     regressing the downstream factor/solve.
         const int base_thr = n < 20000 ? 4000 : 20000;
         std::vector<int> pp;
         par_nd_rec(xadj, adjncy, pp, kParNdDepth, base_thr);

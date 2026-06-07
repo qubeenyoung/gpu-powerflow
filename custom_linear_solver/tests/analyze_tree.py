@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze the elimination tree shape from CLS_DUMP output.
+"""Analyze the elimination tree shape from --analyze-info output.
 
 Identifies:
   - spine: longest consecutive cnt=1 chain from the top (highest level)
@@ -9,7 +9,7 @@ Identifies:
   - Phase 3 (multi-stream) K parameter
 
 Usage:
-    CLS_DUMP=1 ./custom_linear_solver_run <case> --repeat 1 --single-precision fp64 2>&1 | \
+    ./custom_linear_solver_run <case> --repeat 1 --single-precision fp64 --analyze-info 2>&1 | \
         python3 analyze_tree.py
 """
 
@@ -21,10 +21,10 @@ LevelInfo = namedtuple('LevelInfo', ['L', 'cnt', 'maxfsz', 'f2'])
 
 
 def parse_dump(text):
-    """Parse CLS_DUMP output. Returns (n, P, num_levels, cap, front_total_MB, levels[]).
+    """Parse --analyze-info output. Returns (n, P, num_levels, cap, front_total_MB, levels[]).
     Each level: L, cnt, maxfsz, f2.
     """
-    head_re = re.compile(r'\[CLS_DUMP\]\s+n=(\d+)\s+P=(\d+)\s+levels=(\d+)\s+cap=(\d+)\s+front_total\(MB f32\)=([\d.]+)')
+    head_re = re.compile(r'\[analyze\]\s+n=(\d+)\s+P=(\d+)\s+levels=(\d+)\s+cap=(\d+)\s+front_total\(MB f32\)=([\d.]+)')
     level_re = re.compile(r'^\s+L(\d+)\s+cnt=(\d+)\s+maxfsz=(\d+)\s+f2=(\d+)')
 
     n = P = num_levels = cap = 0
@@ -76,7 +76,7 @@ def find_subtree_roots(levels, spine_start_level):
 def analyze(text):
     n, P, num_levels, cap, front_mb, levels = parse_dump(text)
     if not levels:
-        print("No CLS_DUMP found in input — make sure CLS_DUMP=1 was set.")
+        print("No [analyze] lines found in input — make sure --analyze-info was passed.")
         return
 
     print(f'=== Tree analysis ===')

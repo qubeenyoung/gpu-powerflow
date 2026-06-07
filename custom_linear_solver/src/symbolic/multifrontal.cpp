@@ -6,9 +6,9 @@
 namespace custom_linear_solver::symbolic {
 
 namespace {
-// cy260: parallelize independent per-panel work (each panel's front-rows / asm_idx
-// depends only on read-only L + already-final parent rows). 12-core par_for, gated on
-// panel count so small problems stay serial (thread overhead > gain).
+// Parallelize independent per-panel work (each panel's front-rows / asm_idx depends only
+// on read-only L + already-final parent rows). 12-core par_for, gated on panel count so
+// small problems stay serial (thread overhead > gain).
 template <typename Fn>
 void par_panels(int lo, int hi, Fn&& fn)
 {

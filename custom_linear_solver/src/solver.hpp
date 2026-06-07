@@ -1,12 +1,12 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include "matrix/view.hpp"
+#include "multifrontal.hpp"   // Precision { FP64, FP32, FP16, TF32_WMMA, TF32 }
 
 namespace custom_linear_solver {
-
-enum class Precision;  // FP64 / FP32 / TC (defined in multifrontal.hpp)
 
 enum class Status {
     Success,
@@ -18,13 +18,33 @@ enum class Status {
     SolveFailed,
 };
 
+// User-configurable knobs. Set on the SolverConfig passed to Solver(). Tunables not listed
+// here (kernel-tier thresholds SMALL_THRESH=32 / MID_THRESH=128, the V9h+LB(512,2) TF32 stack,
+// the cp.async stage-in, the per-front kernel routing) are baked into the build because every
+// off-default we tried regressed at least one case in the docs/03-optimization-notes sweep.
 struct SolverConfig {
-    bool use_matching = false;
-    bool use_parallel_nested_dissection = true;
-    bool enable_shift_retry = true;
-    double shift_retry_epsilon = 1.0e-8;
-    int panel_cap = 8;
-    Precision precision = static_cast<Precision>(0);  // FP64 by default (enum value 0)
+    // ---- Symbolic analysis ----
+    bool use_matching = false;                       // (reserved) row matching pre-permutation
+    bool use_parallel_nested_dissection = true;      // multi-threaded METIS-ND ordering
+    int  panel_cap = 8;                              // supernode panel width cap (1..64). The
+                                                     // analyzer auto-bumps to 12 for n>=16k and
+                                                     // 20 for n>=80k; this is the floor.
+    // ---- Numeric factorization ----
+    bool enable_shift_retry = true;                  // (reserved) diagonal-shift fallback on
+                                                     // singular pivot
+    double shift_retry_epsilon = 1.0e-8;             // (reserved) shift magnitude
+    Precision precision = Precision::FP64;           // FP64 / FP32 / FP16 (FP16 WMMA) /
+                                                     // TF32_WMMA (V0 baseline) / TF32 (V9h PTX
+                                                     // + LB(512,2), recommended for TF32)
+    // ---- Runtime dispatch ----
+    bool use_multistream_subtrees = true;            // dispatch independent subtrees on
+                                                     // separate streams (capped at 8). Set
+                                                     // false for single-stream debugging.
+    // ---- Analyze-phase diagnostics (off by default) ----
+    std::string analyze_dump_fronts_path;            // non-empty → write per-front CSV here
+                                                     // after analyze() (replaces CLS_DUMP_FRONTS)
+    bool analyze_emit_info = false;                  // print front-size and subtree summary
+                                                     // to stderr (replaces CLS_DUMP / CLS_TREE_INFO)
 };
 
 // Phase API. Typical sequence:

@@ -10,8 +10,9 @@ namespace custom_linear_solver::reordering {
 // (col_ptr/row_idx; the pattern is symmetric in structure either way).
 // Falls back to the natural order if METIS cannot order the graph.
 // Returns false only on invalid input.
-// parallel=true uses the cy155 parallel nested dissection (recurse separator halves across
-// cores, ~-40% A on large matrices, fill ~= serial so F kept competitive). NOTE: METIS's
+// parallel=true uses parallel nested dissection (recurse separator halves across cores,
+// ~-40% on analyze wall for large Jacobians, fill ~= serial so factor stays competitive).
+// NOTE: METIS's
 // RNG is a thread-unsafe global -> the parallel ordering is NON-deterministic run-to-run
 // (within a run / NR loop the ordering is computed once and fixed). Production enables it
 // for the A win; reproducible-benchmark callers leave it false (serial).

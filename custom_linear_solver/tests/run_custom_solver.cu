@@ -23,13 +23,17 @@ struct Options {
     fs::path matrix_path;
     fs::path rhs_path;
     fs::path solution_out;
+    fs::path dump_fronts_path;
     bool write_solution = false;
     int repeat = 1;
     int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
     bool batch_only = false;  // skip the single-system factor/solve
     bool single_fp32 = false;
-    // Batched-mode precision (FP64 default). FP32 trades accuracy for ~2x throughput.
-    // TC is FP32 with FP16 WMMA trailing GEMM.
+    int panel_cap = 8;  // analyze: max panel width inside a supernode; -1 keeps default
+    bool no_multistream = false;     // disable subtree multi-stream dispatch
+    bool analyze_info = false;       // print analyze-phase front/subtree summary
+    // Numeric precision. See multifrontal.hpp for what each mode does.
+    //   fp64 / fp32 / fp16 (FP16 WMMA) / tf32_wmma (V0 WMMA) / tf32 (V9h PTX, recommended).
     cls::Precision precision = cls::Precision::FP64;
 };
 
@@ -103,10 +107,25 @@ void usage(const char* argv0)
 {
     std::cerr
         << "Usage:\n"
-        << "  " << argv0 << " <case-dir> [--repeat N] [--single-precision fp64|fp32]"
-                              " [--batch B [--batch-only]] [--precision fp64|fp32|tc]"
-                              " [--solution-out x.mtx]\n"
-        << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [other options]\n";
+        << "  " << argv0 << " <case-dir> [options]\n"
+        << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [options]\n"
+        << "\nOptions:\n"
+        << "  --repeat N            time-averaging trials (median reported)\n"
+        << "  --single-precision fp64|fp32\n"
+        << "                        single-system (non-batch) input precision\n"
+        << "  --batch B             also run a uniform-batch experiment with B systems\n"
+        << "  --batch-only          skip the single-system run\n"
+        << "  --precision MODE      batched factor precision; MODE one of\n"
+        << "                          fp64       (reference, ~1e-13)\n"
+        << "                          fp32       (~1e-4, ~2x speed of FP64)\n"
+        << "                          fp16       (FP32 + FP16 WMMA trailing)\n"
+        << "                          tf32_wmma  (FP32 + TF32 WMMA trailing — V0 baseline)\n"
+        << "                          tf32       (FP32 + TF32 PTX trailing — V9h+LB, recommended)\n"
+        << "  --panel-cap N         analyze: max panel width inside a supernode (1..64)\n"
+        << "  --no-multistream      disable subtree multi-stream dispatch (single stream)\n"
+        << "  --analyze-info        print front-size and subtree summary after analyze\n"
+        << "  --dump-fronts <path>  write (q,p,fsz,nc,uc,level) CSV after analyze\n"
+        << "  --solution-out <path> write the recovered x as MatrixMarket\n";
 }
 
 Options parse_args(int argc, char** argv)
@@ -141,14 +160,28 @@ Options parse_args(int argc, char** argv)
             if (value == "fp64") options.single_fp32 = false;
             else if (value == "fp32") options.single_fp32 = true;
             else throw std::runtime_error("--single-precision must be fp64 or fp32");
+        } else if (arg == "--panel-cap") {
+            if (++i >= argc) throw std::runtime_error("--panel-cap requires an int");
+            options.panel_cap = std::stoi(argv[i]);
+        } else if (arg == "--no-multistream") {
+            options.no_multistream = true;
+        } else if (arg == "--analyze-info") {
+            options.analyze_info = true;
+        } else if (arg == "--dump-fronts") {
+            if (++i >= argc) throw std::runtime_error("--dump-fronts requires a path");
+            options.dump_fronts_path = argv[i];
         } else if (arg == "--precision") {
-            if (++i >= argc) throw std::runtime_error("--precision requires fp64, fp32, or tc");
+            if (++i >= argc) throw std::runtime_error(
+                "--precision requires fp64|fp32|fp16|tf32_wmma|tf32");
             const std::string value = argv[i];
             using cls::Precision;
-            if      (value == "fp64") options.precision = Precision::FP64;
-            else if (value == "fp32") options.precision = Precision::FP32;
-            else if (value == "tc")   options.precision = Precision::TC;
-            else throw std::runtime_error("--precision must be fp64, fp32, or tc");
+            if      (value == "fp64")      options.precision = Precision::FP64;
+            else if (value == "fp32")      options.precision = Precision::FP32;
+            else if (value == "fp16")      options.precision = Precision::FP16;
+            else if (value == "tf32_wmma") options.precision = Precision::TF32_WMMA;
+            else if (value == "tf32")      options.precision = Precision::TF32;
+            else throw std::runtime_error(
+                "--precision must be fp64|fp32|fp16|tf32_wmma|tf32");
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -268,6 +301,12 @@ int main(int argc, char** argv)
 
         cls::SolverConfig solver_config;
         solver_config.precision = options.precision;
+        if (options.panel_cap > 0) solver_config.panel_cap = options.panel_cap;
+        solver_config.use_multistream_subtrees = !options.no_multistream;
+        solver_config.analyze_emit_info = options.analyze_info;
+        if (!options.dump_fronts_path.empty()) {
+            solver_config.analyze_dump_fronts_path = options.dump_fronts_path.string();
+        }
         cls::Solver solver(solver_config);
         cls::CsrMatrixView matrix_view;
         matrix_view.nrows = matrix.rows;
@@ -349,7 +388,6 @@ int main(int argc, char** argv)
         if (options.batch > 0) {
             const int B = options.batch;
             const int n = matrix.rows, nnz = matrix.nnz();
-            const cls::Precision prec = options.precision;
             // B identical copies (same pattern + values) -> each batch solves the same system,
             // so the per-batch residual must match the single-system solve (correctness check).
             std::vector<double> hvalB((std::size_t)B * nnz), hrhsB((std::size_t)B * n);

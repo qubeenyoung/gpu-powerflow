@@ -19,7 +19,16 @@ option(CLS_BUILD_SCRIPTS "Build custom_linear_solver command-line scripts" ON)
 option(CLS_BUILD_CUDSS_SCRIPT "Build cuDSS command-line comparison script" OFF)
 option(CLS_ENABLE_NVTX "Enable NVTX ranges in command-line profiling scripts" OFF)
 set(CLS_CUDA_ARCHITECTURES "86" CACHE STRING
-  "CUDA architectures for custom_linear_solver_ops; must be >= 60 for atomicAdd(double)")
+  "CUDA architectures for custom_linear_solver_ops; must be >= 80 for TF32 WMMA")
+
+foreach(_cls_arch IN LISTS CLS_CUDA_ARCHITECTURES)
+  string(REGEX REPLACE "-.*$" "" _cls_arch_num "${_cls_arch}")
+  if(_cls_arch_num MATCHES "^[0-9]+$" AND _cls_arch_num LESS 80)
+    message(FATAL_ERROR
+      "custom_linear_solver requires CLS_CUDA_ARCHITECTURES >= 80 for TF32 WMMA; "
+      "got ${_cls_arch}.")
+  endif()
+endforeach()
 
 add_library(custom_linear_solver_api INTERFACE)
 target_include_directories(custom_linear_solver_api INTERFACE
@@ -48,6 +57,7 @@ if(CLS_BUILD_CUDA_OPS)
     src/matrix/pattern_kernels.cu
     src/plan/multifrontal_plan.cu
     src/plan/analyze.cu
+    src/plan/build.cpp
     src/multifrontal.cu
     src/symbolic/elimination_tree.cpp
     src/symbolic/supernode.cpp

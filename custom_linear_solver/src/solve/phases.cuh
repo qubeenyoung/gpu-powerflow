@@ -1,0 +1,110 @@
+#pragma once
+
+// SOLVE — per-phase device building blocks.
+//
+// Internal — included only by multifrontal.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
+//
+// Per-front phases (all run inside a __global__ solve kernel):
+//
+//   Forward (L y = b):
+//     fwd_substitute     — warp-parallel panel substitution. nc ≤ 32. One warp drives the loop;
+//                          lane k finalizes sh_piv[k] then broadcasts so lanes j > k can update
+//                          their running partials.
+//     fwd_cb_update      — for each contribution-block row i (i ∈ [nc, fsz)),
+//                          y[fr[i]] -= sum_k L[i, k] * sh_piv[k]. atomicAdd because siblings
+//                          may scatter into the same parent entries concurrently.
+//
+//   Backward (U x = y):
+//     bwd_load_rhs_and_x — gather rhs[0..nc) ← y[fr[0..nc)] and x cache xsh[0..cb) ← y[fr[nc..fsz)].
+//     bwd_cb_subtract    — rhs[k] -= sum_j U[k, nc+j] * xsh[j], over k in [0, nc).
+//     bwd_substitute     — warp-parallel U_pp * x = rhs (one warp, high → low).
+//                          Writes x[k] back to y[fr[k]] for k ∈ [0, nc).
+//
+// Per-front layout (same as factor): F is row-major with leading dimension fsz, nc = pivot
+// columns, cb = fsz - nc = contribution-block rows. fr[0..fsz) is the panel-row list (front
+// rows → global y indices) computed by analyze.
+
+#include <cuda_runtime.h>
+
+namespace custom_linear_solver {
+namespace {
+
+constexpr int MF_MAX_NC = 64;  // upper bound on nc used to size per-warp shared slabs
+
+// =======================================================================================
+//  FORWARD SOLVE
+// =======================================================================================
+
+// Warp-parallel forward substitution L_pp * sh_piv = rhs (nc ≤ 32). Driven by one warp; for
+// warp-per-front kernels `lane = threadIdx.x & 31`, for block kernels caller restricts to
+// `if (threadIdx.x < 32)` and passes lane = threadIdx.x.
+template <typename T>
+__device__ __forceinline__ void fwd_substitute(const T* F, int fsz, int nc, const int* fr,
+                                               T* y_global, T* sh_piv, int lane)
+{
+    constexpr unsigned mask = 0xffffffffu;
+    T part = T(0), sk = T(0);
+    for (int k = 0; k < nc; ++k) {
+        if (lane == k) { sk = y_global[fr[k]] + part; sh_piv[k] = sk; y_global[fr[k]] = sk; }
+        sk = __shfl_sync(mask, sk, k);
+        if (lane > k && lane < nc) part -= F[(long)lane * fsz + k] * sk;
+    }
+}
+
+// CB row update: y[fr[nc + i]] -= sum_k L[i, k] sh_piv[k], for i in [0, cb) distributed
+// across `nt` threads starting at offset `t`. atomicAdd because sibling fronts scatter
+// into the same parent rows.
+template <typename T>
+__device__ __forceinline__ void fwd_cb_update(const T* F, int fsz, int nc, int cb,
+                                              const int* fr, T* y_global, const T* sh_piv,
+                                              int t, int nt)
+{
+    for (int i = nc + t; i < fsz; i += nt) {
+        T upd = T(0);
+        for (int k = 0; k < nc; ++k) upd += F[(long)i * fsz + k] * sh_piv[k];
+        atomicAdd(&y_global[fr[i]], -upd);
+    }
+}
+
+// =======================================================================================
+//  BACKWARD SOLVE
+// =======================================================================================
+
+// Phase 1 — gather rhs[0..nc) ← y[fr[0..nc)] and x cache xsh[0..cb) ← y[fr[nc..fsz)].
+template <typename T>
+__device__ __forceinline__ void bwd_load_rhs_and_x(const T* y_global, const int* fr,
+                                                   int nc, int cb, T* rhs, T* xsh,
+                                                   int t, int nt)
+{
+    for (int k = t; k < nc; k += nt) rhs[k] = y_global[fr[k]];
+    for (int j = t; j < cb; j += nt) xsh[j] = y_global[fr[nc + j]];
+}
+
+// Phase 2 — rhs[k] -= sum_j U[k, nc + j] * xsh[j], over k distributed across `width` threads.
+template <typename T>
+__device__ __forceinline__ void bwd_cb_subtract(const T* F, int fsz, int nc, int cb,
+                                                const T* xsh, T* rhs, int t, int width)
+{
+    if (t < nc && t < width) {
+        T pk = T(0);
+        for (int j = 0; j < cb; ++j) pk += F[(long)t * fsz + (nc + j)] * xsh[j];
+        rhs[t] -= pk;
+    }
+}
+
+// Phase 3 — warp-parallel U_pp * x = rhs (high → low). x written to y_global[fr[0..nc)].
+template <typename T>
+__device__ __forceinline__ void bwd_substitute(const T* F, int fsz, int nc, const int* fr,
+                                               T* y_global, const T* rhs, int lane)
+{
+    constexpr unsigned mask = 0xffffffffu;
+    T part = T(0), xk = T(0);
+    for (int k = nc - 1; k >= 0; --k) {
+        if (lane == k) { xk = (rhs[k] + part) / F[(long)k * fsz + k]; y_global[fr[k]] = xk; }
+        xk = __shfl_sync(mask, xk, k);
+        if (lane < k) part -= F[(long)lane * fsz + k] * xk;
+    }
+}
+
+}  // namespace
+}  // namespace custom_linear_solver

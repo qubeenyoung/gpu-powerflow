@@ -11,8 +11,6 @@ struct MultifrontalPlan {
     void* arena = nullptr;
     double* d_front = nullptr;
     float* d_frontf = nullptr;
-    bool fp32 = false;
-    bool pure_fp32 = false;
     int *d_front_off = nullptr, *d_front_ptr = nullptr, *d_ncols = nullptr;
     int *d_plcols = nullptr, *d_panel_parent = nullptr;
     int *d_asm_ptr = nullptr, *d_asm_local = nullptr;
@@ -57,6 +55,7 @@ struct MultifrontalPlan {
     // spine kernel (Phase 4). Sized K * num_plevels.
     std::vector<int> h_subtree_level_off;
     std::vector<int> h_subtree_level_cnt;
+
     void* stream = nullptr;
     bool owns_stream = false;
     void* graph_exec = nullptr;

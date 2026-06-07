@@ -40,6 +40,18 @@ Symbolic amalgamation. 작은 child fronts 들을 한 supernode 로 합쳐 trail
 ### `single_system/` (예약 — Phase 5 에서 채워짐)
 B=1 전용 factorize / solve 경로. batched(B=1) 와 중복. batched 가 단일 진입점이 되어 삭제.
 
+### `mid_warp/` (2026-06-06)
+T4.1 실험. SMALL tier 의 warp-per-front 패턴을 mid range (32 < fsz ≤ MID_WARP_THRESH) 로 확장한 새 커널. ncu 로 barrier stall 41% → 0% 확인했으나 load imbalance 로 occupancy 46% → 12% 추락 → 전체 wall net loss. variance gate (`CLS_MID_WARP_VAR_GATE`) 로 USA opt-in 일부 케이스에서 −4% 가능하나 ROI 낮음. 자세한 측정: `docs/03-optimization-notes/10`.
+
+- `mid_warp.cuh` — `factor_mid_warp<T>` kernel + `lu_mid_warp` helper.
+- 활성화 env (옛): `CLS_MID_WARP_THRESH`, `CLS_MID_WARP_VAR_GATE`.
+
+### `mid_opt/` (2026-06-06)
+docs/13 의 P1+P2(+P4) 결합 별도 커널. P1 (reciprocal multiply) 은 default kernel 에 흡수되어 retained; P2 (Phase 1+2 fusion) 만 별도 kernel 로 실험. P4 (shared padding) 는 stage-in integer division 비용으로 +85% 회귀 → 폐기. P2 단독으로는 USA B≥16 에서 −1~−4% 작은 win, case8387 noise. mid kernel micro-optimization 한계 도달의 evidence. 자세한 측정: `docs/03-optimization-notes/14`.
+
+- `mid_opt.cuh` — `factor_mid_opt<T>` kernel.
+- 활성화 env (옛): `CLS_USE_OPT_MID`.
+
 ## 복원 방법
 
 1. 필요 파일을 `deprecated/<area>/` 에서 `src/<해당 폴더>/` 로 복사.

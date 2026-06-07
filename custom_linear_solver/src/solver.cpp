@@ -1,72 +1,13 @@
 #include "solver.hpp"
 
-#include <algorithm>
-#include <cstdint>
-#include <exception>
-#include <thread>
 #include <utility>
 #include <vector>
 
-#include <cuda_runtime.h>
-
-#include "plan/analyze.hpp"
-#include "multifrontal.hpp"
-#include "matrix/pattern_kernels.hpp"
-#include "symbolic/supernode.hpp"
-#include "reordering/metis_nd.hpp"
-#include "symbolic/elimination_tree.hpp"
-
-#include <cstdio>
-#include <cstdlib>
+#include "matrix/pattern_kernels.hpp"  // IntDeviceBuffer
+#include "multifrontal.hpp"             // setup, factorize, solve, set_stream, State
+#include "plan/build.hpp"               // build_plan_from_csr
 
 namespace custom_linear_solver {
-namespace {
-
-template <typename Fn>
-void par_for(int lo, int hi, Fn&& fn)
-{
-    unsigned hw = std::thread::hardware_concurrency();
-    const int nth = static_cast<int>(std::max(1u, std::min(hw ? hw : 1u, 12u)));
-    if (hi - lo < 32768 || nth <= 1) {
-        fn(lo, hi);
-        return;
-    }
-    std::vector<std::thread> th;
-    const int chunk = (hi - lo + nth - 1) / nth;
-    for (int t = 0; t < nth; ++t) {
-        const int a = lo + t * chunk;
-        const int b = std::min(hi, a + chunk);
-        if (a < b) th.emplace_back([&fn, a, b] { fn(a, b); });
-    }
-    for (auto& x : th) x.join();
-}
-
-void permute_symmetric_pattern(int n, const std::vector<int>& col_ptr,
-                               const std::vector<int>& row_idx,
-                               const std::vector<int>& perm,
-                               const std::vector<int>& iperm,
-                               std::vector<int>& out_col_ptr,
-                               std::vector<int>& out_row_idx)
-{
-    out_col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
-    for (int new_col = 0; new_col < n; ++new_col) {
-        const int old_col = perm[new_col];
-        out_col_ptr[new_col + 1] =
-            out_col_ptr[new_col] + (col_ptr[old_col + 1] - col_ptr[old_col]);
-    }
-    out_row_idx.resize(static_cast<std::size_t>(out_col_ptr[n]));
-    par_for(0, n, [&](int lo, int hi) {
-        for (int new_col = lo; new_col < hi; ++new_col) {
-            const int old_col = perm[new_col];
-            int w = out_col_ptr[new_col];
-            for (int p = col_ptr[old_col]; p < col_ptr[old_col + 1]; ++p) {
-                out_row_idx[w++] = iperm[row_idx[p]];
-            }
-        }
-    });
-}
-
-}  // namespace
 
 struct Solver::Impl {
     SolverConfig config;
@@ -167,83 +108,23 @@ Status Solver::get_solution(DenseVectorView* solution) const
 Status Solver::analyze()
 {
     if (!impl_ || !impl_->has_matrix) return Status::InvalidState;
-    try {
-        auto lap = [](const char*) {};
-
-        const int n = static_cast<int>(impl_->matrix.nrows);
-        const int nnz = static_cast<int>(impl_->matrix.nnz);
-        const auto* d_csr_row_ptr = static_cast<const int*>(impl_->matrix.row_offsets);
-        const auto* d_csr_col_idx = static_cast<const int*>(impl_->matrix.col_indices);
-
-        custom_linear_solver::matrix::DeviceCscPattern csc_device;
-        Status st = custom_linear_solver::matrix::build_csc_from_csr_device(
-            n, nnz, d_csr_row_ptr, d_csr_col_idx, csc_device);
-        if (st != Status::Success) return st;
-        lap("build_csc_device");
-
-        // GPU-built symmetric adjacency graph (replaces the host CSC download + CPU
-        // build_symmetric_adjacency). Also reused below for permute_metis_graph.
-        std::vector<int> metis_sym_col_ptr, metis_sym_row_idx;
-        st = custom_linear_solver::matrix::build_symmetric_graph_device(
-            csc_device, metis_sym_col_ptr, metis_sym_row_idx);
-        if (st != Status::Success) return st;
-        lap("build_symmetric_graph_device");
-        impl_->perm.assign(static_cast<std::size_t>(n), 0);
-        std::vector<int> nd_xadj = metis_sym_col_ptr;     // consumed (moved-from) by the ND call
-        std::vector<int> nd_adjncy = metis_sym_row_idx;
-        if (!custom_linear_solver::reordering::metis_nd_from_graph(
-                n, nd_xadj, nd_adjncy, impl_->perm,
-                impl_->config.use_parallel_nested_dissection))
-            return Status::AnalysisFailed;
-        lap("metis_nd");
-        impl_->iperm.assign(static_cast<std::size_t>(n), 0);
-        for (int k = 0; k < n; ++k) impl_->iperm[impl_->perm[k]] = k;
-        lap("build_iperm");
-        st = impl_->d_perm.upload(impl_->perm);
-        if (st != Status::Success) return st;
-        st = impl_->d_iperm.upload(impl_->iperm);
-        if (st != Status::Success) return st;
-        lap("upload_perm_iperm");
-
-        custom_linear_solver::matrix::DeviceCscPattern ordered_device;
-        st = custom_linear_solver::matrix::permute_csc_device(
-            csc_device, impl_->d_iperm.ptr, ordered_device);
-        if (st != Status::Success) return st;
-        lap("permute_csc_device");
-        impl_->d_ordered_value_to_csr = std::move(ordered_device.source_pos);
-
-        std::vector<int> sym_col_ptr, sym_row_idx;
-        permute_symmetric_pattern(n, metis_sym_col_ptr, metis_sym_row_idx, impl_->perm,
-                                  impl_->iperm, sym_col_ptr, sym_row_idx);
-        lap("permute_metis_graph");
-        std::vector<int> parent = custom_linear_solver::symbolic::etree(
-            n, sym_col_ptr.data(), sym_row_idx.data());
-        lap("etree");
-
-        // Fill pattern in METIS order. When amalgamating, the per-column counts come from here for
-        // free (no separate cs_counts) and the pattern is relabeled to the reordered space below
-        // (the reorder is a postorder -> fill-neutral), avoiding a second fill_pattern.
-        std::vector<int> Lp, Li;
-        custom_linear_solver::symbolic::fill_pattern(n, sym_col_ptr.data(), sym_row_idx.data(),
-                                                     parent, Lp, Li);
-        lap("fill_pattern");
-
-        impl_->plan = custom_linear_solver::plan::analyze_multifrontal(
-            n, nnz, ordered_device.col_ptr.ptr, ordered_device.row_idx.ptr, Lp, Li, parent,
-            impl_->config.panel_cap,
-            /*mixed=*/false,
-            nullptr,
-            /*pure_fp32=*/impl_->config.precision == custom_linear_solver::Precision::FP32 ||
-                          impl_->config.precision == custom_linear_solver::Precision::TC);
-        lap("analyze_multifrontal");
-        if (impl_->plan.num_panels == 0) return Status::AnalysisFailed;
-        impl_->analyzed = true;
-        return Status::Success;
-    } catch (const std::bad_alloc&) {
-        return Status::AllocationFailed;
-    } catch (const std::exception&) {
+    plan::PlanBuildOptions opts;
+    opts.use_parallel_nested_dissection = impl_->config.use_parallel_nested_dissection;
+    opts.panel_cap = impl_->config.panel_cap;
+    opts.float_front = is_fp32_front(impl_->config.precision);
+    opts.dump_fronts_csv_path = impl_->config.analyze_dump_fronts_path;
+    opts.emit_analyze_info = impl_->config.analyze_emit_info;
+    plan::PlanBuildResult result;
+    if (!plan::build_plan_from_csr(impl_->matrix, opts, result))
         return Status::AnalysisFailed;
-    }
+    impl_->perm                    = std::move(result.perm);
+    impl_->iperm                   = std::move(result.iperm);
+    impl_->d_perm                  = std::move(result.d_perm);
+    impl_->d_iperm                 = std::move(result.d_iperm);
+    impl_->d_ordered_value_to_csr  = std::move(result.d_ordered_value_to_csr);
+    impl_->plan                    = std::move(result.plan);
+    impl_->analyzed = true;
+    return Status::Success;
 }
 
 Status Solver::setup(int batch_size)
@@ -251,7 +132,7 @@ Status Solver::setup(int batch_size)
     if (!impl_ || !impl_->analyzed) return Status::InvalidState;
     if (batch_size <= 0) return Status::InvalidValue;
     return custom_linear_solver::setup(impl_->plan, batch_size, impl_->config.precision,
-                                       impl_->state)
+                                       impl_->state, impl_->config.use_multistream_subtrees)
                ? Status::Success
                : Status::AllocationFailed;
 }

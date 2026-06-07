@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -62,12 +61,11 @@ __global__ void build_a_pos_device(int n, const int* __restrict__ Ap,
 MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const int* d_Ai,
                                       const std::vector<int>& Lp,
                                       const std::vector<int>& Li,
-                                      const std::vector<int>& parent, int panel_cap, bool fp32,
+                                      const std::vector<int>& parent, int panel_cap,
                                       const custom_linear_solver::symbolic::PanelPartition* forced_panels,
-                                      bool pure_fp32)
+                                      bool float_front, bool emit_info)
 {
     namespace sym = custom_linear_solver::symbolic;
-    constexpr bool solve_f32 = false;
     auto lap = [](const char*) {};
     MultifrontalPlan plan;
     plan.n = n;
@@ -81,10 +79,9 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // the price of padded fill. Larger matrices have the margin to amalgamate more aggressively.
     //   n >= 80000 → cap 20
     //   n >= 16000 → cap 12
-    //   else       → user-provided panel_cap (default 8)
+    //   else       → caller-supplied panel_cap (SolverConfig.panel_cap, default 8)
     // Upper bound 64 from the shared pivot buffer (nc <= cap).
     int eff_cap = n >= 80000 ? 20 : (n >= 16000 ? 12 : panel_cap);
-    if (const char* ce = std::getenv("CLS_CAP")) eff_cap = std::atoi(ce);  // research override
     if (eff_cap < 1) eff_cap = 1;
     if (eff_cap > 64) eff_cap = 64;
     const sym::PanelPartition panels =
@@ -136,15 +133,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     for (int L = 0; L < num_plevels; ++L) plan.plptr[L + 1] += plan.plptr[L];
     std::vector<int> plcols(P);
 
-    if (std::getenv("CLS_PANEL_DUMP")) {  // per-panel (fsz, nc) for GEMM-fraction analysis
-        fprintf(stderr, "[CLS_PANEL_DUMP] panel,fsz,nc,uc\n");
-        for (int p = 0; p < P; ++p) {
-            const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
-            const int nc = panels.ncols[p];
-            fprintf(stderr, "%d,%d,%d,%d\n", p, fsz, nc, fsz - nc);
-        }
-    }
-    if (std::getenv("CLS_DUMP")) {  // research: front-size distribution + per-level structure
+    if (emit_info) {  // front-size distribution + per-level structure (analyze-info dump)
         const int NB = 7;
         const int edges[NB] = {16, 32, 48, 64, 96, 160, 1 << 30};
         long cnt[NB] = {0}, sf2[NB] = {0};
@@ -156,7 +145,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
             cnt[bck]++; sf2[bck] += fsz * fsz; sf3[bck] += (double)fsz * fsz * fsz;
             tot2 += fsz * fsz; tot3 += (double)fsz * fsz * fsz;
         }
-        fprintf(stderr, "[CLS_DUMP] n=%d P=%d levels=%d cap=%d front_total(MB f32)=%.1f\n",
+        fprintf(stderr, "[analyze] n=%d P=%d levels=%d cap=%d front_total(MB f32)=%.1f\n",
                 n, P, num_plevels, eff_cap, total * 4.0 / 1e6);
         const int lo[NB] = {1, 17, 33, 49, 65, 97, 161};
         for (int bk = 0; bk < NB; ++bk)
@@ -262,12 +251,13 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         std::sort(distinct_roots.begin(), distinct_roots.end(),
                   [&](int a, int b) { return root_member_count[a] > root_member_count[b]; });
 
-        // Cap to MAX_SUBTREES (matches TCState.subtree_streams[8]). When more distinct roots
-        // exist (case8387 fix: K=29 of which only 2 are large), keep the top (K_cap-1)
-        // largest as separate subtrees and merge ALL remaining roots' members into one
-        // "spillover" subtree (id K_cap-1). The spillover subtree is processed on its own
-        // stream level-by-level; correctness holds because within one stream the level
-        // dispatch order respects panel-etree dependencies.
+        // Cap to MAX_SUBTREES (matches TCState.subtree_streams[8]). When more distinct
+        // roots exist (common on large power-grid Jacobians, where the etree fans out into
+        // many small subtrees + a few large ones), keep the top (K_cap-1) largest as separate
+        // subtrees and merge ALL remaining roots' members into one "spillover" subtree
+        // (id K_cap-1). The spillover subtree is processed on its own stream level-by-level;
+        // correctness holds because within one stream the level dispatch order respects
+        // panel-etree dependencies.
         constexpr int MAX_SUBTREES = 8;
         plan.h_subtree_roots.clear();
         std::vector<int> root_to_id(P, -1);
@@ -329,8 +319,8 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
             plan.h_plcols = plcols;
         }
 
-        if (std::getenv("CLS_TREE_INFO")) {
-            fprintf(stderr, "[CLS_TREE_INFO] P=%d levels=%d  spine=[L%d..L%d] (%zu panels)  K=%d\n",
+        if (emit_info) {
+            fprintf(stderr, "[analyze] P=%d levels=%d  spine=[L%d..L%d] (%zu panels)  K=%d\n",
                     P, num_plevels, plan.spine_start_level, num_plevels - 1,
                     plan.h_spine_panels.size(), plan.num_subtrees);
             for (int k = 0; k < plan.num_subtrees; ++k) {
@@ -338,7 +328,6 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
                 for (int p = 0; p < P; ++p) if (plan.h_subtree_of_panel[p] == k) ++sz;
                 fprintf(stderr, "  subtree %d: root panel %d, %d panels\n",
                         k, plan.h_subtree_roots[k], sz);
-                // Per-level breakdown for this subtree
                 for (int L = 0; L < num_plevels && L < 12; ++L) {
                     const int c = plan.h_subtree_level_cnt[(long)k * num_plevels + L];
                     if (c > 0) fprintf(stderr, "    sub%d L%d cnt=%d\n", k, L, c);
@@ -380,14 +369,8 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     cudaMalloc(&plan.arena, off);
     char* base = static_cast<char*>(plan.arena);
     plan.d_front = reinterpret_cast<double*>(base + o_front);
-    // `fp32` means single-system mixed factor (FP64 master + FP32 working). `pure_fp32`
-    // means the factor and solve front are float.
-    plan.fp32 = fp32;
-    plan.pure_fp32 = pure_fp32;
-    // FP32 "working" arena for the mixed factor (double-master design): a separate
-    // allocation (front_total floats), narrowed/written-back per front during factor.
-    // The FP64 master (d_front) holds the assembly + final L/U used by solve.
-    if (fp32 || pure_fp32 || solve_f32) cudaMalloc(&plan.d_frontf, (long)total * sizeof(float));
+    // When the factor/solve front is float (FP32 / FP16 / TF32), allocate the float front arena.
+    if (float_front) cudaMalloc(&plan.d_frontf, (long)total * sizeof(float));
     plan.d_front_off = reinterpret_cast<int*>(base + o_foff);
     plan.d_front_ptr = reinterpret_cast<int*>(base + o_fptr);
     plan.d_ncols = reinterpret_cast<int*>(base + o_nc);
@@ -399,7 +382,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     plan.d_front_rows = reinterpret_cast<int*>(base + o_fr);
     plan.d_y = reinterpret_cast<double*>(base + o_y);
     plan.d_sing = reinterpret_cast<int*>(base + o_sing);
-    if (pure_fp32) cudaMalloc(&plan.d_yf, (long)n * sizeof(float));
+    if (float_front) cudaMalloc(&plan.d_yf, (long)n * sizeof(float));
     int* d_panel_first = reinterpret_cast<int*>(base + o_pf);
     int* d_panel_of = reinterpret_cast<int*>(base + o_pof);
 
