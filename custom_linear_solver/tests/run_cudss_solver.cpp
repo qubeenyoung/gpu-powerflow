@@ -46,6 +46,7 @@ struct Options {
     bool use_threading_layer = false;
     int host_nthreads = 0;
     int repeat = 1;
+    bool fp32 = false;  // --precision fp32 → use CUDA_R_32F and float buffers
 };
 
 template <typename T>
@@ -147,11 +148,12 @@ void usage(const char* argv0)
     std::cerr
         << "Usage:\n"
         << "  " << argv0
-        << " <case-dir> [--repeat N] [--matching] [--split-analysis] [--mt] [--threading-lib path]"
-           " [--host-nthreads N] [--solution-out x.mtx]\n"
+        << " <case-dir> [--precision fp32|fp64] [--repeat N] [--matching] [--split-analysis]"
+           " [--mt] [--threading-lib path] [--host-nthreads N] [--solution-out x.mtx]\n"
         << "  " << argv0
-        << " --matrix J.mtx --rhs F.mtx [--repeat N] [--matching] [--split-analysis] [--mt]"
-           " [--threading-lib path] [--host-nthreads N] [--solution-out x.mtx]\n";
+        << " --matrix J.mtx --rhs F.mtx [--precision fp32|fp64] [--repeat N] [--matching]"
+           " [--split-analysis] [--mt] [--threading-lib path] [--host-nthreads N]"
+           " [--solution-out x.mtx]\n";
 }
 
 std::string default_threading_layer()
@@ -221,6 +223,12 @@ Options parse_args(int argc, char** argv)
             if (options.host_nthreads <= 0) {
                 throw std::runtime_error("--host-nthreads must be positive");
             }
+        } else if (arg == "--precision") {
+            if (++i >= argc) throw std::runtime_error("--precision requires fp32 or fp64");
+            const std::string value = argv[i];
+            if (value == "fp32") options.fp32 = true;
+            else if (value == "fp64") options.fp32 = false;
+            else throw std::runtime_error("--precision must be fp32 or fp64");
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -310,20 +318,46 @@ int main(int argc, char** argv)
             throw std::runtime_error("rhs length does not match matrix dimension");
         }
 
+        const cudaDataType_t cuda_dtype = options.fp32 ? CUDA_R_32F : CUDA_R_64F;
+        const size_t elt_bytes = options.fp32 ? sizeof(float) : sizeof(double);
+
         DeviceBuffer<int> d_row_ptr;
         DeviceBuffer<int> d_col_idx;
-        DeviceBuffer<double> d_values;
+        DeviceBuffer<double> d_values;       // fp64 path
         DeviceBuffer<double> d_rhs;
         DeviceBuffer<double> d_solution;
+        DeviceBuffer<float>  d_values_f;     // fp32 path
+        DeviceBuffer<float>  d_rhs_f;
+        DeviceBuffer<float>  d_solution_f;
+        void* p_values   = nullptr;
+        void* p_rhs      = nullptr;
+        void* p_solution = nullptr;
         {
             NvtxRange range("cudss_upload_input");
             d_row_ptr.upload(matrix.row_ptr);
             d_col_idx.upload(matrix.col_idx);
-            d_values.upload(matrix.values);
-            d_rhs.upload(rhs.values);
-            d_solution.allocate(rhs.values.size());
-            cuda_check(cudaMemset(d_solution.get(), 0, rhs.values.size() * sizeof(double)),
-                       "cudaMemset solution");
+            if (options.fp32) {
+                std::vector<float> values_f(matrix.values.begin(), matrix.values.end());
+                std::vector<float> rhs_f(rhs.values.begin(), rhs.values.end());
+                d_values_f.upload(values_f);
+                d_rhs_f.upload(rhs_f);
+                d_solution_f.allocate(rhs.values.size());
+                cuda_check(cudaMemset(d_solution_f.get(), 0, rhs.values.size() * sizeof(float)),
+                           "cudaMemset solution");
+                p_values   = d_values_f.get();
+                p_rhs      = d_rhs_f.get();
+                p_solution = d_solution_f.get();
+            } else {
+                d_values.upload(matrix.values);
+                d_rhs.upload(rhs.values);
+                d_solution.allocate(rhs.values.size());
+                cuda_check(cudaMemset(d_solution.get(), 0, rhs.values.size() * sizeof(double)),
+                           "cudaMemset solution");
+                p_values   = d_values.get();
+                p_rhs      = d_rhs.get();
+                p_solution = d_solution.get();
+            }
+            (void)elt_bytes;
         }
         const auto t_upload = std::chrono::steady_clock::now();
 
@@ -365,14 +399,14 @@ int main(int argc, char** argv)
 
             cudss_check(cudssMatrixCreateCsr(
                             &state.matrix, matrix.rows, matrix.cols, matrix.nnz(), d_row_ptr.get(),
-                            nullptr, d_col_idx.get(), d_values.get(), CUDA_R_32I, CUDA_R_64F,
+                            nullptr, d_col_idx.get(), p_values, CUDA_R_32I, cuda_dtype,
                             CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO),
                         "cudssMatrixCreateCsr");
-            cudss_check(cudssMatrixCreateDn(&state.rhs, matrix.rows, 1, matrix.rows, d_rhs.get(),
-                                            CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+            cudss_check(cudssMatrixCreateDn(&state.rhs, matrix.rows, 1, matrix.rows, p_rhs,
+                                            cuda_dtype, CUDSS_LAYOUT_COL_MAJOR),
                         "cudssMatrixCreateDn rhs");
             cudss_check(cudssMatrixCreateDn(&state.solution, matrix.cols, 1, matrix.cols,
-                                            d_solution.get(), CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+                                            p_solution, cuda_dtype, CUDSS_LAYOUT_COL_MAJOR),
                         "cudssMatrixCreateDn solution");
             cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize setup");
         }
@@ -448,7 +482,12 @@ int main(int argc, char** argv)
         ResidualStats stats;
         {
             NvtxRange range("cudss_download_check");
-            solution = d_solution.download();
+            if (options.fp32) {
+                const std::vector<float> sf = d_solution_f.download();
+                solution.assign(sf.begin(), sf.end());
+            } else {
+                solution = d_solution.download();
+            }
             stats = residual(matrix, rhs.values, solution);
             if (options.write_solution) {
                 scripts::write_matrix_market_vector(options.solution_out, solution);
@@ -465,6 +504,7 @@ int main(int argc, char** argv)
         std::cout << "matrix=" << options.matrix_path << '\n'
                   << "rhs=" << options.rhs_path << '\n'
                   << "n=" << matrix.rows << " nnz=" << matrix.nnz() << '\n'
+                  << "precision=" << (options.fp32 ? "fp32" : "fp64") << '\n'
                   << "repeat=" << options.repeat << '\n'
                   << "matching=" << (options.use_matching ? 1 : 0) << '\n'
                   << "split_analysis=" << (options.split_analysis ? 1 : 0) << '\n'

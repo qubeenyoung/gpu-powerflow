@@ -1,4 +1,7 @@
 #include <cuda_runtime.h>
+#ifdef CLS_ENABLE_NVTX
+#include <nvtx3/nvToolsExt.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -12,6 +15,24 @@
 #include "multifrontal.hpp"
 #include "io.hpp"
 #include "solver.hpp"
+
+namespace {
+
+// Minimal RAII NVTX range. When CLS_ENABLE_NVTX is off the constructor / destructor are
+// empty and nothing links against libnvToolsExt.
+class NvtxRange {
+public:
+#ifdef CLS_ENABLE_NVTX
+    explicit NvtxRange(const char* name) { nvtxRangePushA(name); }
+    ~NvtxRange() { nvtxRangePop(); }
+#else
+    explicit NvtxRange(const char*) {}
+#endif
+    NvtxRange(const NvtxRange&) = delete;
+    NvtxRange& operator=(const NvtxRange&) = delete;
+};
+
+}  // namespace
 
 namespace cls = custom_linear_solver;
 namespace scripts = custom_linear_solver::scripts;
@@ -416,8 +437,14 @@ int main(int argc, char** argv)
 
             cudaDeviceSynchronize();
             const auto t_setup0 = std::chrono::steady_clock::now();
-            require_success(solver.analyze(), "analyze(batched)");
-            require_success(solver.setup(B), "setup(batched)");
+            {
+                NvtxRange r1("analyze");
+                require_success(solver.analyze(), "analyze(batched)");
+            }
+            {
+                NvtxRange r2("setup");
+                require_success(solver.setup(B), "setup(batched)");
+            }
             cudaDeviceSynchronize();
             const double setup_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t_setup0).count();
@@ -425,12 +452,20 @@ int main(int argc, char** argv)
 
             std::vector<double> bf, bs;
             for (int r = 0; r < options.repeat; ++r) {
+                const std::string fname = "factorize/iter=" + std::to_string(r);
+                const std::string sname = "solve/iter=" + std::to_string(r);
                 const auto sf = std::chrono::steady_clock::now();
-                require_success(solver.factorize(), "factorize(batched)");
-                cudaDeviceSynchronize();
+                {
+                    NvtxRange rf(fname.c_str());
+                    require_success(solver.factorize(), "factorize(batched)");
+                    cudaDeviceSynchronize();
+                }
                 const auto ef = std::chrono::steady_clock::now();
-                require_success(solver.solve(), "solve(batched)");
-                cudaDeviceSynchronize();
+                {
+                    NvtxRange rs(sname.c_str());
+                    require_success(solver.solve(), "solve(batched)");
+                    cudaDeviceSynchronize();
+                }
                 const auto es = std::chrono::steady_clock::now();
                 bf.push_back(std::chrono::duration<double, std::milli>(ef - sf).count());
                 bs.push_back(std::chrono::duration<double, std::milli>(es - ef).count());

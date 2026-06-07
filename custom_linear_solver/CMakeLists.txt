@@ -86,6 +86,30 @@ if(CLS_BUILD_CUDA_OPS)
   target_link_libraries(custom_linear_solver_api INTERFACE custom_linear_solver_ops)
 
   if(CLS_BUILD_SCRIPTS)
+    # When CLS_ENABLE_NVTX is set, both runners get NVTX include + library so their
+    # NVTX_RANGE_* helpers compile through to libnvToolsExt. Located here so the
+    # detection runs once before either target is configured.
+    if(CLS_ENABLE_NVTX)
+      find_path(NVTX_INCLUDE_DIR
+        NAMES nvtx3/nvToolsExt.h nvToolsExt.h
+        HINTS
+          /usr/local/cuda/include
+          /usr/local/cuda-12.8/targets/x86_64-linux/include
+          $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/nvtx/include
+          /usr/local/lib/python3.10/dist-packages/nvidia/nvtx/include)
+      find_library(NVTOOLSEXT_LIBRARY
+        NAMES nvToolsExt
+        HINTS
+          /usr/local/cuda/lib64
+          /usr/local/cuda-12.8/targets/x86_64-linux/lib
+          /usr/lib
+          /usr/lib/x86_64-linux-gnu)
+      if(NOT NVTX_INCLUDE_DIR OR NOT NVTOOLSEXT_LIBRARY)
+        message(FATAL_ERROR "CLS_ENABLE_NVTX=ON requires NVTX headers and libnvToolsExt.")
+      endif()
+      get_filename_component(NVTOOLSEXT_LIBRARY_DIR "${NVTOOLSEXT_LIBRARY}" DIRECTORY)
+    endif()
+
     add_executable(custom_linear_solver_run
       tests/io.cpp
       tests/run_custom_solver.cu
@@ -100,6 +124,13 @@ if(CLS_BUILD_CUDA_OPS)
       CUDA_ARCHITECTURES "${CLS_CUDA_ARCHITECTURES}"
       CUDA_SEPARABLE_COMPILATION OFF
     )
+    if(CLS_ENABLE_NVTX)
+      target_compile_definitions(custom_linear_solver_run PRIVATE CLS_ENABLE_NVTX=1)
+      target_include_directories(custom_linear_solver_run PRIVATE ${NVTX_INCLUDE_DIR})
+      target_link_libraries(custom_linear_solver_run PRIVATE ${NVTOOLSEXT_LIBRARY})
+      set_target_properties(custom_linear_solver_run PROPERTIES
+        BUILD_RPATH "${NVTOOLSEXT_LIBRARY_DIR}")
+    endif()
 
     if(CLS_BUILD_CUDSS_SCRIPT)
       find_path(CUDSS_INCLUDE_DIR
@@ -137,24 +168,8 @@ if(CLS_BUILD_CUDA_OPS)
       )
       set(CUDSS_RUN_RPATH "${CUDSS_LIBRARY_DIR}")
       if(CLS_ENABLE_NVTX)
-        find_path(NVTX_INCLUDE_DIR
-          NAMES nvtx3/nvToolsExt.h nvToolsExt.h
-          HINTS
-            /usr/local/cuda/include
-            /usr/local/cuda-12.8/targets/x86_64-linux/include
-            $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/nvtx/include
-            /usr/local/lib/python3.10/dist-packages/nvidia/nvtx/include)
-        find_library(NVTOOLSEXT_LIBRARY
-          NAMES nvToolsExt
-          HINTS
-            /usr/local/cuda/lib64
-            /usr/local/cuda-12.8/targets/x86_64-linux/lib
-            /usr/lib
-            /usr/lib/x86_64-linux-gnu)
-        if(NOT NVTX_INCLUDE_DIR OR NOT NVTOOLSEXT_LIBRARY)
-          message(FATAL_ERROR "CLS_ENABLE_NVTX=ON requires NVTX headers and libnvToolsExt.")
-        endif()
-        get_filename_component(NVTOOLSEXT_LIBRARY_DIR "${NVTOOLSEXT_LIBRARY}" DIRECTORY)
+        # NVTX include / library are detected once above (next to the
+        # custom_linear_solver_run target). Reuse the cached vars here.
         target_compile_definitions(cudss_run PRIVATE CLS_ENABLE_NVTX=1)
         target_include_directories(cudss_run PRIVATE ${NVTX_INCLUDE_DIR})
         target_link_libraries(cudss_run PRIVATE ${NVTOOLSEXT_LIBRARY})
