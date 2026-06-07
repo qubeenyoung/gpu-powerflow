@@ -44,9 +44,11 @@ struct Options {
     bool use_matching = false;
     bool split_analysis = false;
     bool use_threading_layer = false;
+    bool mt_auto = false;       // --mt-auto: cudssSetThreadingLayer(handle, nullptr)
     int host_nthreads = 0;
     int repeat = 1;
-    bool fp32 = false;  // --precision fp32 → use CUDA_R_32F and float buffers
+    bool fp32 = false;          // --precision fp32 → use CUDA_R_32F and float buffers
+    int batch = 1;              // --batch B: CUDSS_CONFIG_UBATCH_SIZE + batch-major buffers
 };
 
 template <typename T>
@@ -147,13 +149,21 @@ void usage(const char* argv0)
 {
     std::cerr
         << "Usage:\n"
-        << "  " << argv0
-        << " <case-dir> [--precision fp32|fp64] [--repeat N] [--matching] [--split-analysis]"
-           " [--mt] [--threading-lib path] [--host-nthreads N] [--solution-out x.mtx]\n"
-        << "  " << argv0
-        << " --matrix J.mtx --rhs F.mtx [--precision fp32|fp64] [--repeat N] [--matching]"
-           " [--split-analysis] [--mt] [--threading-lib path] [--host-nthreads N]"
-           " [--solution-out x.mtx]\n";
+        << "  " << argv0 << " <case-dir> [options]\n"
+        << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [options]\n"
+        << "\nOptions:\n"
+        << "  --precision fp32|fp64   value/RHS/solution dtype (default fp64)\n"
+        << "  --batch B               uniform-batch B systems (CUDSS_CONFIG_UBATCH_SIZE);\n"
+        << "                          shares one sparsity pattern; default 1\n"
+        << "  --repeat N              time-averaging trials (median reported)\n"
+        << "  --mt-auto               cudssSetThreadingLayer(handle, nullptr) — let cuDSS\n"
+        << "                          load its default threading layer (cuPF's pattern)\n"
+        << "  --mt                    same as --mt-auto but uses --threading-lib path\n"
+        << "  --threading-lib path    explicit libcudss_mtlayer_*.so for --mt\n"
+        << "  --host-nthreads N       CUDSS_CONFIG_HOST_NTHREADS\n"
+        << "  --matching              CUDSS_CONFIG_USE_MATCHING\n"
+        << "  --split-analysis        report reordering vs symbolic factorization separately\n"
+        << "  --solution-out path     write recovered x as MatrixMarket\n";
 }
 
 std::string default_threading_layer()
@@ -163,13 +173,17 @@ std::string default_threading_layer()
         return env_value;
     }
 
+    // Search for libcudss_mtlayer_*.so in conventional locations. The /opt path is the
+    // system-wide install; the python-package path is the pip-installed copy.
     const fs::path candidates[] = {
-        "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
-        "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so",
+        "/opt/nvidia/cudss/lib/libcudss_mtlayer_gomp.so",
         "/opt/nvidia/cudss/lib/libcudss_mtlayer_gomp.so.0",
+        "/usr/local/lib/python3.10/dist-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
+        "/root/.local/lib/python3.10/site-packages/nvidia/cu12/lib/libcudss_mtlayer_gomp.so.0",
     };
+    std::error_code ec;
     for (const fs::path& candidate : candidates) {
-        if (fs::exists(candidate)) return candidate.string();
+        if (fs::exists(candidate, ec)) return candidate.string();
     }
     return candidates[0].string();
 }
@@ -213,6 +227,13 @@ Options parse_args(int argc, char** argv)
             options.split_analysis = true;
         } else if (arg == "--mt") {
             options.use_threading_layer = true;
+        } else if (arg == "--mt-auto") {
+            options.use_threading_layer = true;
+            options.mt_auto = true;
+        } else if (arg == "--batch") {
+            if (++i >= argc) throw std::runtime_error("--batch requires a count");
+            options.batch = std::stoi(argv[i]);
+            if (options.batch <= 0) throw std::runtime_error("--batch must be positive");
         } else if (arg == "--threading-lib") {
             if (++i >= argc) throw std::runtime_error("--threading-lib requires a path");
             options.threading_lib = argv[i];
@@ -320,12 +341,15 @@ int main(int argc, char** argv)
 
         const cudaDataType_t cuda_dtype = options.fp32 ? CUDA_R_32F : CUDA_R_64F;
         const size_t elt_bytes = options.fp32 ? sizeof(float) : sizeof(double);
+        const int B = options.batch;
+        const int n = matrix.rows;
+        const int nnz_j = matrix.nnz();
 
         DeviceBuffer<int> d_row_ptr;
         DeviceBuffer<int> d_col_idx;
-        DeviceBuffer<double> d_values;       // fp64 path
-        DeviceBuffer<double> d_rhs;
-        DeviceBuffer<double> d_solution;
+        DeviceBuffer<double> d_values;       // fp64 path (batch-major: B × nnz)
+        DeviceBuffer<double> d_rhs;          //                          B × n
+        DeviceBuffer<double> d_solution;     //                          B × n
         DeviceBuffer<float>  d_values_f;     // fp32 path
         DeviceBuffer<float>  d_rhs_f;
         DeviceBuffer<float>  d_solution_f;
@@ -336,22 +360,39 @@ int main(int argc, char** argv)
             NvtxRange range("cudss_upload_input");
             d_row_ptr.upload(matrix.row_ptr);
             d_col_idx.upload(matrix.col_idx);
+            // Replicate values / RHS B times so cuDSS sees B systems with the same sparsity.
             if (options.fp32) {
-                std::vector<float> values_f(matrix.values.begin(), matrix.values.end());
-                std::vector<float> rhs_f(rhs.values.begin(), rhs.values.end());
+                std::vector<float> values_f((std::size_t)B * nnz_j);
+                std::vector<float> rhs_f((std::size_t)B * n);
+                for (int b = 0; b < B; ++b) {
+                    std::transform(matrix.values.begin(), matrix.values.end(),
+                                   values_f.begin() + (std::size_t)b * nnz_j,
+                                   [](double v){ return static_cast<float>(v); });
+                    std::transform(rhs.values.begin(), rhs.values.end(),
+                                   rhs_f.begin() + (std::size_t)b * n,
+                                   [](double v){ return static_cast<float>(v); });
+                }
                 d_values_f.upload(values_f);
                 d_rhs_f.upload(rhs_f);
-                d_solution_f.allocate(rhs.values.size());
-                cuda_check(cudaMemset(d_solution_f.get(), 0, rhs.values.size() * sizeof(float)),
+                d_solution_f.allocate((std::size_t)B * n);
+                cuda_check(cudaMemset(d_solution_f.get(), 0, (std::size_t)B * n * sizeof(float)),
                            "cudaMemset solution");
                 p_values   = d_values_f.get();
                 p_rhs      = d_rhs_f.get();
                 p_solution = d_solution_f.get();
             } else {
-                d_values.upload(matrix.values);
-                d_rhs.upload(rhs.values);
-                d_solution.allocate(rhs.values.size());
-                cuda_check(cudaMemset(d_solution.get(), 0, rhs.values.size() * sizeof(double)),
+                std::vector<double> valB((std::size_t)B * nnz_j);
+                std::vector<double> rhsB((std::size_t)B * n);
+                for (int b = 0; b < B; ++b) {
+                    std::copy(matrix.values.begin(), matrix.values.end(),
+                              valB.begin() + (std::size_t)b * nnz_j);
+                    std::copy(rhs.values.begin(), rhs.values.end(),
+                              rhsB.begin() + (std::size_t)b * n);
+                }
+                d_values.upload(valB);
+                d_rhs.upload(rhsB);
+                d_solution.allocate((std::size_t)B * n);
+                cuda_check(cudaMemset(d_solution.get(), 0, (std::size_t)B * n * sizeof(double)),
                            "cudaMemset solution");
                 p_values   = d_values.get();
                 p_rhs      = d_rhs.get();
@@ -367,8 +408,15 @@ int main(int argc, char** argv)
             cudss_check(cudssCreate(&state.handle), "cudssCreate");
             std::string threading_lib;
             if (options.use_threading_layer) {
-                threading_lib = options.threading_lib.empty() ? default_threading_layer()
-                                                              : options.threading_lib;
+                // --mt-auto matches cuPF's intent (let cuDSS pick the default mt layer). The
+                // current cuDSS build rejects nullptr, so we resolve the bundled
+                // libcudss_mtlayer_*.so path the same way default_threading_layer() does.
+                if (options.mt_auto) {
+                    threading_lib = default_threading_layer();
+                } else {
+                    threading_lib = options.threading_lib.empty() ? default_threading_layer()
+                                                                  : options.threading_lib;
+                }
                 cudss_check(cudssSetThreadingLayer(state.handle, threading_lib.c_str()),
                             "cudssSetThreadingLayer");
             }
@@ -379,6 +427,12 @@ int main(int argc, char** argv)
             cudss_check(cudssConfigSet(state.config, CUDSS_CONFIG_REORDERING_ALG, &reordering_alg,
                                        sizeof(reordering_alg)),
                         "cudssConfigSet REORDERING_ALG");
+            if (B > 1) {
+                int ubatch_size = B;
+                cudss_check(cudssConfigSet(state.config, CUDSS_CONFIG_UBATCH_SIZE,
+                                           &ubatch_size, sizeof(ubatch_size)),
+                            "cudssConfigSet UBATCH_SIZE");
+            }
             if (options.use_matching) {
                 int use_matching = 1;
                 cudss_check(cudssConfigSet(state.config, CUDSS_CONFIG_USE_MATCHING, &use_matching,
@@ -480,13 +534,32 @@ int main(int argc, char** argv)
         const auto t_solve = std::chrono::steady_clock::now();
         std::vector<double> solution;
         ResidualStats stats;
+        double batch_max_relres = 0.0;
         {
             NvtxRange range("cudss_download_check");
             if (options.fp32) {
                 const std::vector<float> sf = d_solution_f.download();
-                solution.assign(sf.begin(), sf.end());
+                solution.assign(sf.begin() + 0, sf.begin() + n);                     // batch 0 → residual
+                // Max relres over all B systems (sanity check; all B copies are identical so this
+                // should match the batch-0 number except for rounding noise).
+                std::vector<double> xb(n);
+                for (int b = 0; b < B; ++b) {
+                    std::transform(sf.begin() + (std::size_t)b * n,
+                                   sf.begin() + (std::size_t)(b + 1) * n,
+                                   xb.begin(), [](float v){ return static_cast<double>(v); });
+                    batch_max_relres = std::max(batch_max_relres,
+                                                residual(matrix, rhs.values, xb).rel_l2);
+                }
             } else {
-                solution = d_solution.download();
+                const std::vector<double> sd = d_solution.download();
+                solution.assign(sd.begin() + 0, sd.begin() + n);
+                std::vector<double> xb(n);
+                for (int b = 0; b < B; ++b) {
+                    std::copy(sd.begin() + (std::size_t)b * n,
+                              sd.begin() + (std::size_t)(b + 1) * n, xb.begin());
+                    batch_max_relres = std::max(batch_max_relres,
+                                                residual(matrix, rhs.values, xb).rel_l2);
+                }
             }
             stats = residual(matrix, rhs.values, solution);
             if (options.write_solution) {
@@ -524,6 +597,8 @@ int main(int argc, char** argv)
                                                        1u, std::thread::hardware_concurrency()))))
                           : 0)
                   << '\n'
+                  << "batch=" << B << '\n'
+                  << "mt_auto=" << (options.mt_auto ? 1 : 0) << '\n'
                   << "read_ms=" << ms(t0, t_read) << '\n'
                   << "upload_ms=" << ms(t_read, t_upload) << '\n'
                   << "setup_ms=" << ms(t_upload, t_setup) << '\n'
@@ -532,6 +607,9 @@ int main(int argc, char** argv)
                   << "analyze_ms=" << ms(t_setup, t_analyze) << '\n'
                   << "factorize_ms=" << factor_median << '\n'
                   << "solve_ms=" << solve_median << '\n'
+                  << "factorize_per_sys_ms=" << factor_median / B << '\n'
+                  << "solve_per_sys_ms=" << solve_median / B << '\n'
+                  << "batch_relres=" << batch_max_relres << '\n'
                   << "download_check_ms=" << ms(t_solve, t_done) << '\n'
                   << "residual_l2=" << stats.abs_l2 << '\n'
                   << "relative_residual_l2=" << stats.rel_l2 << '\n'
