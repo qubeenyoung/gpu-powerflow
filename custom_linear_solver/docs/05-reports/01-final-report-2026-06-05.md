@@ -301,7 +301,7 @@ selinv OFF 가 TC 더 도와준 메커니즘:
 | [`03-session-summary-2026-06-05.md`](03-session-summary-2026-06-05.md) | 시간순 작업 로그 (Σ.4 ~ Σ.14) |
 | [`02-comprehensive-sweep-2026-06-05.md`](02-comprehensive-sweep-2026-06-05.md) | 5 cases × 3 modes × 5 batches full sweep |
 | [`../02-design-analysis/05-gemm-fraction-analysis.md`](../02-design-analysis/05-gemm-fraction-analysis.md) | GEMM 비중 이론 + 실측 + WMMA packing 분석 |
-| [`../03-optimization-notes/07-symbolic-gemm-research.md`](../03-optimization-notes/07-symbolic-gemm-research.md) | (historical) symbolic 구조 + cuBLAS / pivoting 연구 |
-| [`../03-optimization-notes/06-tc-dedicated-path-study.md`](../03-optimization-notes/06-tc-dedicated-path-study.md) | (historical) TC dedicated path 초기 설계 |
-| [`../03-optimization-notes/08-tree-restructuring-research-plan.md`](../03-optimization-notes/08-tree-restructuring-research-plan.md) | (historical) tree restructuring 연구 |
+| [`../03-optimization-notes/archive/07-symbolic-gemm-research.md`](../03-optimization-notes/archive/07-symbolic-gemm-research.md) | (historical) symbolic 구조 + cuBLAS / pivoting 연구 |
+| [`../03-optimization-notes/archive/06-tc-dedicated-path-study.md`](../03-optimization-notes/archive/06-tc-dedicated-path-study.md) | (historical) TC dedicated path 초기 설계 |
+| [`../03-optimization-notes/archive/08-tree-restructuring-research-plan.md`](../03-optimization-notes/archive/08-tree-restructuring-research-plan.md) | (historical) tree restructuring 연구 |
 | **[`01-final-report-2026-06-05.md`](01-final-report-2026-06-05.md)** | **(이 문서) 전체 요약 + 최적 경로** |

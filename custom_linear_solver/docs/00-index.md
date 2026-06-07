@@ -17,8 +17,59 @@
 - 전체 benchmark table의 canonical source는 `05-reports/02-comprehensive-sweep-2026-06-05.md`다.
 - GEMM/TC wall fraction과 TC speedup ceiling의 canonical 근거는 `02-design-analysis/05-gemm-fraction-analysis.md`다.
 - 시간순 작업 로그는 `05-reports/03-session-summary-2026-06-05.md`에 보존했다.
-- `03-optimization-notes/06`-`08`은 historical research log다. 진행 중 정정된 가설, negative result, race condition 기록을 보존하되 최신 결론의 기준점은 아니다.
+- `03-optimization-notes/archive/` 는 현재 코드에 반영되지 않은 시도 (research log, 회귀, deprecated 코드) 를 모아둔다. 같은 lever 재시도 시 동일한 실수 회피용. 폴더 자체 README 가 분류 표를 가진다.
 - 측정 근거가 독립적인 문서는 삭제하지 않고 보존했다. 대신 색인에서 “대표 문서”, “증거 문서”, “historical log”의 역할을 분리했다.
+
+## 최적 경로 (2026-06-08 정리)
+
+V9h GEMM stack (docs/15) + EXP-B `__launch_bounds__(512, 2)` (docs/17) 가 **`Precision::TF32` 의 기본 동작으로 baked-in** 되었다. 별도 build flag 가 더 이상 필요 없으며, runtime CLI 로 모든 비교가 가능하다.
+
+### Default 빌드
+
+```bash
+cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+런타임 선택:
+
+```bash
+# V9h + LB(512, 2) — 권장 (USA B=64 −5.7% vs V0)
+build/custom_linear_solver_run <case> --batch 64 --precision tf32
+
+# V0 baseline (비교용)
+build/custom_linear_solver_run <case> --batch 64 --precision tf32_wmma
+```
+
+### 정밀도 5종 비교 가능
+
+| `--precision` | front | Phase-3 trailing            | 비고                           |
+|---------------|-------|-----------------------------|--------------------------------|
+| `fp64`        | FP64  | scalar FP64                 | reference 정확도               |
+| `fp32`        | FP32  | staged-scalar FP32          | ~2× FP64                       |
+| `fp16`        | FP32  | FP16 WMMA m16n16k16         | FP16 input, FP32 accumulate    |
+| `tf32_wmma`   | FP32  | TF32 WMMA m16n16k8 + Csc    | V0 baseline (docs/15 §1)       |
+| `tf32`        | FP32  | TF32 PTX mma.m16n8k8/k4     | **V9h + LB recommended**       |
+
+### 런타임 knobs
+
+| Knob (SolverConfig / CLI)                | 기본    | 용도                                          |
+|-----------------------------------------|---------|-----------------------------------------------|
+| `precision` (`--precision`)              | `FP64`  | 위 5종 중 선택                                |
+| `panel_cap` (`--panel-cap`)              | `8`     | supernode panel width cap (1..64)             |
+| `use_multistream_subtrees` (`--no-multistream`) | `true` | 독립 subtree 를 별도 stream 으로            |
+| `analyze_emit_info` (`--analyze-info`)   | `false` | front-size + subtree 분포 stderr 덤프          |
+| `analyze_dump_fronts_path` (`--dump-fronts <path>`) | `""` | per-front CSV 출력                       |
+
+CMake 옵션은 `CLS_INTERNAL_GRAPH` (default ON, capturable mode 일 때 OFF) 가 유일하게 빈번한 빌드-타임 토글이다. 정밀도 / 경로 / 디버그 덤프는 더 이상 build flag 가 아니다.
+
+### 폐기된 / 삭제된 R&D 변형 (재시도 시 docs 필독)
+
+- **M2 persistent subtree-walking** — prototype wall +240~820% 회귀, 코드 전체 삭제. docs/19, docs/20 (`.deprecated.md`).
+- **V1 PTX_VARIANT / V3 LB_256_4 / V4 BIG_T_512 / V9 always-k4 / SMALL_WARPS_16 / factor_mid_warp / factor_mid_opt** — 모두 회귀 또는 noise. 매크로/커널 제거 (docs/10, docs/14, docs/15, docs/17, docs/18).
+- **T-split (CLS_USE_TIER_SPLIT, CLS_TIER_SPLIT_B_MIN)** — case-specific opt-in (USA-target). marginal gain (B≥16 -4~-6%) + case8387 noise/회귀 + B<32 회귀로 gate 필요. dispatch path 복잡도 비례 ROI 낮음 → 코드 제거 (2026-06-07). docs/12 (`.deprecated.md`) 의 측정 데이터만 보존.
+- **연구용 env 변수 5종** (`CLS_CAP`, `CLS_DUMP`, `CLS_PANEL_DUMP`, `CLS_TREE_INFO`, `CLS_DUMP_FRONTS`, `CLS_DISABLE_MULTISTREAM`) — SolverConfig / CLI 로 이전 후 env 경로 제거 (2026-06-08).
+- **`CLS_NO_CP_ASYNC`, `CLS_NO_ROWFUSED_LU`, `CLS_NO_RECIP_PIV`** — A/B 토글로 노출돼 있던 baked-in 최적화. macros 제거, 코드는 항상 ON (2026-06-08).
 
 ## 01. Orientation
 
@@ -33,6 +84,9 @@
 
 4. [Batched Precision and Dispatch Map](01-orientation/04-batched-precision-and-dispatch-map.md)
    5개 정밀도 모드 × front-size tier × env/CMake lever 의 단일 dispatch 표. 리팩토링 베이스라인.
+
+6. [Factorize / Solve File Layout 2026-06-06](01-orientation/06-factorize-file-layout-2026-06-06.md)
+   `src/factorize/` 11파일 → **4파일** + `src/solve/` 3파일 → **4파일** 통합 정리 (양쪽 모두 phases / kernels / dispatch / scatter or permute 대칭 패턴). multifrontal.cu (627줄 → 280줄) 의 factor + solve dispatch 함수가 각 모듈로 이동. 옛 경로 → 새 경로 매핑 표. mid_warp/mid_opt 실험 커널이 `deprecated/` 로 이동.
 
 ## 02. Design Analysis
 
@@ -51,6 +105,9 @@
 5. [GEMM Fraction Analysis](02-design-analysis/05-gemm-fraction-analysis.md)
    trailing GEMM의 이론 FLOP 비중과 실측 wall 비중을 분리해 TC headroom을 정량화한 최신 근거 문서.
 
+6. [Tier Threshold Rationale 2026-06-06](02-design-analysis/06-tier-threshold-rationale-2026-06-06.md)
+   SMALL_THRESH=32, MID_THRESH=128 의 design 근거. SMALL은 warp=32 lane HW alignment + sync cost trade-off, MID는 sm_86 99 KB shared budget + 256 thread block 효율. FP64 자동 fall-through, WMMA tile constraint (power-grid 에서 non-binding), sm_90 Hopper 시 MID 상향 여지 분석 포함.
+
 ## 03. Optimization Notes
 
 1. [FP32 Batched Kernel Optimization](03-optimization-notes/01-fp32-batched-kernel-optimization.md)
@@ -68,14 +125,50 @@
 5. [Mysolver Warm-Cache Port Plan](03-optimization-notes/05-mysolver-warm-cache-port-plan.md)
    `perf/warm-cache-stack` 기법을 본 솔버/cuPF Mixed 경로에 적용하는 계획.
 
-6. [TC Dedicated Path Study](03-optimization-notes/06-tc-dedicated-path-study.md)
+6. [(Archived) TC Dedicated Path Study](03-optimization-notes/archive/06-tc-dedicated-path-study.md)
    TC 전용 경로 초기 설계와 negative result. 최신 TC 판단은 final report와 GEMM fraction 문서를 우선 참고.
 
-7. [Symbolic GEMM Research](03-optimization-notes/07-symbolic-gemm-research.md)
+7. [(Archived) Symbolic GEMM Research](03-optimization-notes/archive/07-symbolic-gemm-research.md)
    symbolic 재구성, staged trailing, cuBLAS/pivoting 연구 로그와 정정된 가설.
 
-8. [Tree Restructuring Research Plan](03-optimization-notes/08-tree-restructuring-research-plan.md)
+8. [(Archived) Tree Restructuring Research Plan](03-optimization-notes/archive/08-tree-restructuring-research-plan.md)
    subtree/spine/multistream 연구 로그, 보류된 sibling amalgamation, race condition 기록.
+
+9. [Non-GEMM Sync Bottleneck Plan 2026-06-06](03-optimization-notes/09-non-gemm-sync-bottleneck-plan-2026-06-06.md)
+   factor_mid/big의 panel-LU `__syncthreads` 41% 병목 해소 4-phase 계획 (T4.1 warp-per-front mid, T4.2 sub-block, T4.3 cp.async stage-in, T4.4 persistent within-level). 이전 실패한 시도와의 차별성, Go/No-Go 기준 포함.
+
+10. [T4.1+T4.3+T4.2.A Results 2026-06-06](03-optimization-notes/10-t4.1-t4.3-results-2026-06-06.md)
+    docs/09 계획의 T4.1 (mid_warp) + T4.3 (cp.async stage-in) + T4.2.A (row-fused panel LU) 구현 후 실측. T4.1: barrier 41%→0% 확인하나 load imbalance로 occupancy 추락 → 기본 OFF env opt-in 유지. T4.3: USA B=1 factor_mid duration −11% (ncu) — 기본 ON sm_80+. T4.2.A: nc≤12 gate로 case8387 잠재 −7%, USA 회귀 차단 — 기본 ON. **메타-결론**: ncu barrier stall 41% → wall 단축 비례하지 않음 (~−3~−5%만). occupancy / per-thread serial work 가 sync 절감을 상쇄. 다음 round는 scatter_values / solve 또는 GEMM 영역 권장. cudaFuncSetAttribute 누락의 silent corruption 발견. **(2026-06-06 추가)** T4.1 `factor_mid_warp` 는 `deprecated/mid_warp/` 로 rollback; T4.3 cp.async + T4.2.A row-fused 는 `src/factorize/phases.cuh` 의 default kernel 에 유지.
+
+11. [(Archived) Small-tier Packing Experiment 2026-06-06](03-optimization-notes/archive/11-small-packed-experiment-2026-06-06.md)
+    analyze-time (nc, fsz, parent) 사전 정렬 + multi-front-per-warp packed kernel + nc=2 unrolled fast path. case8387 L=2의 730 fronts가 130개 contiguous run으로 잘 묶이지만, subtree multi-stream fragmentation 으로 launch 수 10-20개 폭증 → B=1 +65~+133% 회귀, B=64 case8387 +7% 회귀. USA B=64만 −5.7% 작은 win. 메타-결론: small tier 잠재 ROI는 packing이 아니라 launch overhead 줄이기 (이미 D1 CUDA Graph로 해결).
+
+12. [(Archived, deprecated) Per-level Tier Split Experiment 2026-06-06](03-optimization-notes/archive/12-tier-split-experiment-2026-06-06.deprecated.md)
+    USA-target opt-in (T-split): analyze-time fsz 오름차순 정렬 + dispatch wrapper 로 mixed 레벨을 small/mid/big sub-range 로 쪼개 적합한 kernel 로 routing. USA B≥16 −4~−6%, case8387 noise, B<32 회귀. **2026-06-07 폐기** — case-specific opt-in 비례 ROI 낮음, `CLS_USE_TIER_SPLIT`/`CLS_TIER_SPLIT_B_MIN` env + dispatch wrapper + analyze sort 블록 모두 제거. 측정 데이터는 historical log 로 보존.
+
+13. [Panel LU + U-solve Bottleneck Analysis 2026-06-06](03-optimization-notes/13-panel-lu-u-solve-bottleneck-2026-06-06.md)
+    mid / big tier 의 Phase 1 (panel LU) + Phase 2 (U-solve) 의 sync 수 분석 (case8387 mid 17 / USA mid 61 / USA big 61+), thread under-utilization 식별, 5개 개선안 제안. P1 (reciprocal multiply, FDIV→RCP×mul 4x cyc 단축) 실측 USA B=1 **−2%**, default ON. P2 (Phase 1+2 fusion, sync 67% 절감), P3 (parallel U-solve), P4 (bank conflict pad), P5 (warp-spec) deferred. 메타-결론: docs/10 §9 의 "sync 절감 ≠ wall 단축" ceiling 직면, GEMM/dispatch 영역이 더 큰 lever.
+
+14. [(Archived) factor_mid_opt Experiment 2026-06-06](03-optimization-notes/archive/14-factor-mid-opt-experiment-2026-06-06.md)
+    docs/13의 P1+P2+P4를 결합한 별도 커널 (`deprecated/mid_opt/mid_opt.cuh`, **2026-06-06 rollback**). P4 (shared padding) 폐기: stage-in의 integer division 오버헤드가 +85% 회귀. P3는 P2 fusion에 흡수. 최종 P1+P2 결과: USA B≥16에서 −1~−4% wall, case8387 noise/회귀. sync USA 61→22 (−64%) vs wall −1~−4% — docs/10 §9 "sync ≠ wall" 메타-결론 정량 재확인. **별도 kernel rollback**, P1 (reciprocal multiply) 만 default kernel `phases.cuh:lu_panel_factor` 에 흡수 유지. 결론: mid/big micro-optimization 한계 도달, GEMM/dispatch lever로 이동.
+
+15. [TF32 trailing GEMM 가속 — 통합 보고서 2026-06-06](03-optimization-notes/15-tf32-ptx-trailing-experiment-2026-06-06.md)
+    10개 변형 (V1-V9h) 시도, 7개 실패, **2개 채택** (V0 default + V9h opt-in stack), 나머지는 코드/매크로 삭제 (2026-06-07 정리). **default = V0** (WMMA m16n16k8 TF32 trailing) — 모든 case × B 에서 안전 winner. **opt-in = V9h stack** = `-DCLS_TF32_BIG_PTX=1 -DCLS_TF32_MMA_AREUSE=1 -DCLS_TF32_SKIP_CONVERT=1 -DCLS_TF32_MID_PTX=1 -DCLS_TF32_MID_K4_HYBRID=1 -DCLS_TF32_BIG_LB_512_2=1`: USA B=1 **-10%**, B=64 -2.7%; ACTIVSg25k **-5% B=1 / -4.1% B=64**; case8387 무영향. V9h 의 K4_HYBRID 는 dispatch 단계에서 `use_k4 = (KP_k4 < KP_k8)` heuristic 으로 mid level 마다 m16n8k4 vs m16n8k8 동적 선택 — nc=8 dominant case8387 mid (77%) 는 k8 자동 선택해 always-k4 의 +27% 회귀 회피, nc=12 dominant ACTIVSg25k (59%) 는 k4 자동 선택해 25% K-padding 절약. **삭제된 실패 매크로**: `CLS_TF32_PTX_VARIANT` (V1 m16n8k8 단독, +13% case8387), `CLS_TF32_BIG_T_512` (V4 thread cap), `CLS_TF32_BIG_LB_256_4` (V3 aggressive LB, USA B=1 +41%), `CLS_SMALL_WARPS_16` (docs/18 EXP-D, +4~+10%), `CLS_TF32_MID_K4` (V9 always-k4, case8387 mid +27%). 영구 학습 5가지: (i) m16n8k8 A 매핑이 PTX 문서 외삽과 다름, (ii) inline asm `"+f"(arr[var])` 는 var compile-time + `#pragma unroll` + break, (iii) `wmma::__float_to_tf32` 는 mma `.tf32` 와 redundant, (iv) m16n8k4 layout 단순, (v) **새 `__global__` kernel 의 `cudaFuncSetAttribute(.., MaxDynamicSharedMemorySize, 99 KB)` 등록 필수** (누락 시 graph capture mode 에서 segfault).
+
+19. [(Archived, deprecated) Architecture R&D: Persistent Subtree-walking (M2) — Design + 측정 2026-06-07](03-optimization-notes/archive/19-m2-persistent-subtree-rd-2026-06-07.deprecated.md)
+    docs/15-18 micro-opt ceiling 후 시도한 M2 (Rennich-Davis 2014) persistent subtree-walking R&D. Step 1 (etree shape 측정 + budget-fit DFS) 만 완료. **결론**: 잠재 게인 estimate 는 컸으나 (-10~-15% case8387) prototype 단계 (docs/20) 에서 실패. 본 문서는 historical design log.
+
+20. [(Archived, deprecated) M2 R&D — Prototype Implementation Status 2026-06-07](03-optimization-notes/archive/20-m2-prototype-status-2026-06-07.deprecated.md)
+    M2 prototype kernel + dispatch 구현. **실측 결과 wall +240-820% B=64 회귀** — 1-block-per-(subtree, batch) sequential 처리로 SM 자원 활용률 추락. parallel-within-subtree redesign 필요하나 비용/위험 대비 ROI 불명확 → **무기한 보류, 코드 전체 삭제 (2026-06-07)**. 본 문서는 historical R&D log; 재시도 시 필독.
+
+18. [(Archived) Small/Mid Memory-bound 분석 2026-06-07](03-optimization-notes/archive/18-small-mid-memory-bound-2026-06-07.md)
+    docs/16 의 small (memory-latency, scoreboard 203%) + mid (sync+memory, scoreboard 257%) 의 memory-bound 출처 세부 진단. ncu DRAM/L1 breakdown: **mid 는 DRAM 580 GB/s = peak 의 69% (read 313 + write 267) — bulk stage-in/writeback 이 주범**, atomic 은 0 sectors/ns (extend_add contention 가정 reject). small 은 DRAM 32% 만 → memory-latency hiding 부족. **EXP-D 실측**: SMALL_WARPS 8 → 16 (docs/16 S1 가설) **wall +4 ~ +10% 회귀**. 원인 — small kernel 의 warp 들이 독립적이라 (1 warp = 1 front-batch) block 키워도 warps_in_flight 안 늘어남, smem 만 2× → S1 가설 reject. 남는 lever (모두 본 라운드 미실행): M1 front packing (5-10% 예상), M2 persistent subtree-walking (Rennich-Davis 2014; 5-10%), M5 정밀도 강하 (Ootomo-Yokota correction; 5-10% trade off). 결론: **본 codebase 의 small/mid memory simple micro-opt 는 거의 다 ceiling 도달**. 진짜 lever 는 architecture-level (weeks of work). docs/15-17 의 GEMM/occupancy micro-opt 와 함께 ceiling 시리즈의 마지막 점 marking.
+
+17. [Big-tier Occupancy via `__launch_bounds__` 2026-06-07](03-optimization-notes/17-big-tier-occupancy-launch-bounds-2026-06-07.md)
+    docs/16 의 BG3 (bigT 256/512 + launch_bounds) 부분 실행. **EXP-B 결과**: factor_big_tf32 의 `__launch_bounds__(512, 2)` → barrier stall **1801% → 1340% (-26%)**, register/thread 48→64 (compiler spill 허용), warps_active 거의 동일. wall: USA B=64 **-2.7%**, B=256 **-3.4%**, case8387 B=1 **-6.3%**, regression 없음. LB(256, 4) aggressive 변형은 warps_active 49% 추락 + **USA B=1 +41% catastrophic regression** → 폐기. **V9h (docs/15) 와 결합 시 USA B=64 -5.7%, ACTIVSg25k B=64 -3.1%, B=256 -4.1%** — orthogonal lever (big tier vs mid tier). **EXP-A (warp-spec look-ahead pipeline, docs/16 BG1) 본 라운드 미실행**: prior art 없음 (Rennich-Davis 2016 명시적 unsolved), 본 codebase 의 sync→wall 변환률 ~1/10 일관 (docs/14 + 본 문서) → BG1 의 20-40% 예측이 5-10% 로 조정, 300+ 줄 위험 비례 ROI 낮음. EXP-A 단계적 분해 plan 은 §5.4 — A-step2 (1 warp panel + 31 idle, no-pipeline 측정) 부터 시작 권장.
+
+16. [Large-batch Bottleneck Analysis 2026-06-06](03-optimization-notes/16-large-batch-bottleneck-analysis-2026-06-06.md)
+    docs/15 V9h 의 wall 게인이 noise 수준 (2-5%) 에 머문 이유 + 진짜 lever 위치. **B-sweep** (B=1..256) saturation point: small B≈256 (latency-bound), mid B≈64 (sync+memory), big B≈16 (extreme sync). **ncu B=64** stall: small barrier 0% / scoreboard 203% (memory latency), mid barrier 94% / inst/cycle 0.42, **big barrier 1907% / inst/cycle 0.26 / DRAM 23%**. ncu 의 1907% barrier stall = 32 warp 중 평균 19 warp 가 sync 대기 → big tier 의 1 block/SM thread cap 과 phase 1 panel LU 의 sequential 구조 결합 → **big_tf32 의 컴퓨트 자원 90% 가 sync 로 묶임**. **GEMM micro-opt 의 ceiling**: trailing GEMM 자체가 wall 의 30% × 이론 max 가속 2× = ceiling 15%, V9h 실측 5-10% 가 그 절반. 진짜 lever 는 **non-GEMM 의 70%, 특히 phase 1 panel LU 의 sync wait** — 본 문서가 tier 별 제안 제시 (small: warps/block 8→16 (S1), mid: front packing M1, big: **warp-specialized panel LU BG1 — 20-40% wall 잠재, docs/13 의 P5 deferred 재활성화**). USA 같이 big dominant case 에 BG1 우선, ACTIVSg25k 같이 mid dominant 에 M1.
 
 ## 04. Benchmarks and Profiling
 
@@ -108,6 +201,15 @@
 
 10. [Batched Memory-Bound case8387/USA B=4,64,256 (FP32)](04-benchmarks-profiling/10-batched-membound-case8387-usa-b4-b64-b256-fp32.md)
     pure FP32, 같은 (case × B) 위의 bound 재분류. FP64 의 memory wall 이 FP32 에서 어떻게 *invert_pivot 의 FP64 compute* 로 이동하는지 직접 비교.
+
+11. [FP32 Factorize GEMM vs Non-GEMM 2026-06-06](04-benchmarks-profiling/11-fp32-factorize-gemm-vs-nongemm-2026-06-06.md)
+    refactored 코드 기준, case8387/USA × B=1/64에서 trailing GEMM과 비-GEMM의 wall 분리 (skip-trailing 차분). 이론 FLOP 71-77% vs 실측 wall 11-41% 격차의 원인 분석과 aggressive TC 활용 4가지 제안 (T1-T4), `--precision tf32` 구현 메모.
+
+12. [Front and GEMM Size Distribution 2026-06-06](04-benchmarks-profiling/12-front-gemm-distribution-2026-06-06.md)
+    case8387/USA의 fsz, nc, uc 분포와 trailing GEMM 크기를 small/mid/big tier별 히스토그램으로 분해. nc=2 (small) / nc=8 (8387 mid) / nc=20 (USA mid+big) 의 모드, WMMA padding (FP16 K=16: 37-50% padding vs TF32 K=8: 0-17% padding) 정량화. tier별 factorize 구조 ASCII 시각화 + ncu 병목 + 최적화 여지 ROI 종합. T1 TF32 권장의 핵심 정량 근거.
+
+13. [Multi-stream Tier Impact 2026-06-06](04-benchmarks-profiling/13-multistream-tier-impact-2026-06-06.md)
+    subtree multi-stream (`num_subtrees=K=8`) A/B. case8387 B=64 −22%, USA B=64 −14%, USA B=1 −9% wall. case30/118는 single이 −6~−10% 빠름 (overhead 우세). 메커니즘: **Hyper-Q 동시 커널 실행으로 SM의 idle cycle을 다른 stream의 block이 채움**. per-kernel time 자체가 단축 (case8387 mid −40%, small −16~−22%). barrier stall이 큰 경우 가장 효과, memory bandwidth contention이 우세하면 회귀. K=8이 현 워크로드에 적절.
 
 ## 05. Reports
 
@@ -150,9 +252,9 @@
 
 연구 로그:
 
-1. `03-optimization-notes/06-tc-dedicated-path-study.md`
-2. `03-optimization-notes/07-symbolic-gemm-research.md`
-3. `03-optimization-notes/08-tree-restructuring-research-plan.md`
+1. `03-optimization-notes/archive/06-tc-dedicated-path-study.md`
+2. `03-optimization-notes/archive/07-symbolic-gemm-research.md`
+3. `03-optimization-notes/archive/08-tree-restructuring-research-plan.md`
 4. `05-reports/03-session-summary-2026-06-05.md`
 
 STRUMPACK과의 관계:
