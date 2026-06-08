@@ -2,6 +2,8 @@
 
 #include <vector>
 
+#include "plan/solver_constants.hpp"
+
 namespace custom_linear_solver::plan {
 
 struct MultifrontalPlan {
@@ -28,16 +30,13 @@ struct MultifrontalPlan {
     std::vector<int> h_front_off;  // host copy of front_off (per-panel arena offset), for per-panel cuBLAS dispatch
 
     // Tier-homogeneous dispatch order. Same panels as h_plcols, but within each level the panels
-    // are grouped by kernel tier (small ≤32 / mid ≤128 / big) so the single-stream factor walk can
+    // are grouped by kernel tier (see classify_front_tier) so the single-stream factor walk can
     // launch one right-sized kernel per (level, tier) instead of promoting a whole mixed level to
-    // its largest front's tier. Tier edges must match tier_of in plan/analyze.cu and SMALL_THRESH /
-    // MID_THRESH in factorize/dispatch.cuh:  0: fsz ≤ 32 (small) | 1: 33..128 (mid) | 2: ≥129 (big).
-    // (A finer 5-class split of the small region was measured but only added ~2% at high B while
-    // regressing B=1 on the largest case — see docs/05-reports/11 — so the 3-tier split is kept.)
-    // h_level_tier_off has stride (kNumTiers+1) per level: entry [L*(kNumTiers+1)+t] is the
-    // absolute start in h_plcols_tier of tier t at level L; [...+kNumTiers] is the level end.
-    static constexpr int kNumTiers = 3;
-    static constexpr int kSmallTiers = 1;  // leading tiers (fsz ≤ 32) that use the small kernel
+    // its largest front's tier. h_level_tier_off has stride (kNumTiers+1) per level: entry
+    // [L*(kNumTiers+1)+t] is the absolute start in h_plcols_tier of tier t at level L;
+    // [...+kNumTiers] is the level end.
+    static constexpr int kNumTiers = kNumFrontTiers;
+    static constexpr int kSmallTiers = kSmallTierCount;
     std::vector<int> h_plcols_tier;     // P entries: level-major, tier-contiguous within level
     std::vector<int> h_level_tier_off;  // num_plevels * (kNumTiers+1) CSR offsets
     int* d_plcols_tier = nullptr;       // device mirror of h_plcols_tier

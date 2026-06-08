@@ -103,7 +103,7 @@ __global__ void solve_bwd_small(int lbegin, int level_size, int B, int slab,
     const int* fr = front_rows + s;
     const int cb = fsz - nc;
     T* rhs = slabs + (long)(warp_in_blk * FPW + sg) * slab;   // [0, nc)
-    T* xsh = rhs + MF_MAX_NC;                                 // [0, cb)
+    T* xsh = rhs + kMaxPivotColumns;                                 // [0, cb)
 
     bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, sl, /*nt=*/SG);
     __syncwarp(mask);
@@ -139,7 +139,7 @@ __global__ void solve_fwd(int lbegin, int lend, const int* __restrict__ plcols,
     const T* F = front + front_off[p];
     const int* fr = front_rows + s;
     const int t = threadIdx.x, nt = blockDim.x;
-    __shared__ T sh_piv[MF_MAX_NC];
+    __shared__ T sh_piv[kMaxPivotColumns];
 
     // Phase 1 — panel substitution (one warp).
     if (t < 32) fwd_substitute<T>(F, fsz, nc, fr, y, sh_piv, /*lane=*/t);
@@ -170,7 +170,7 @@ __global__ void solve_bwd(int lbegin, int lend, const int* __restrict__ plcols,
     // Caller-provided dynamic shared holds the x cache (cb entries); rhs is a static shared.
     extern __shared__ unsigned char xsh_raw[];
     T* xsh = reinterpret_cast<T*>(xsh_raw);
-    __shared__ T rhs[MF_MAX_NC];
+    __shared__ T rhs[kMaxPivotColumns];
 
     // Phase 1 — load rhs[] and x cache from y.
     bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, t, nt);

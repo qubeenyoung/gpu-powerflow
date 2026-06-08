@@ -29,6 +29,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include "level_metrics.hpp"
 #include "multifrontal.hpp"
 #include "factorize/kernels.cuh"
 
@@ -153,25 +154,12 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
     const Precision prec = st.prec;
     const int B = st.B;
     constexpr int do_extend = 1;
-    constexpr int SMALL_THRESH = 32;
-    constexpr int SMALL_WARPS = 8;
-    constexpr int MID_THRESH = 128;
-    constexpr size_t MID_SHARED_BUDGET = 96 * 1024;  // sm_86 max dynamic shared per block
     if (e <= b) return;
     const int level_size = e - b;
 
-    // (1) one host-side pass over the panels in this range to collect dispatch caps.
-    int max_fsz = 0, max_uc = 1, level_max_nc = 1, level_max_uc = 1;
-    for (int q = b; q < e; ++q) {
-        const int pp = h_plc[q];
-        const int fsz = plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp];
-        const int nc = plan.h_ncols[pp];
-        const int uc = fsz - nc;
-        if (fsz > max_fsz) max_fsz = fsz;
-        if (uc > max_uc && uc <= 256) max_uc = uc;
-        if (nc > level_max_nc) level_max_nc = nc;
-        if (uc > level_max_uc) level_max_uc = uc;
-    }
+    // One host-side pass over the panels in this range to collect dispatch caps.
+    const auto [max_fsz, max_uc, level_max_nc, level_max_uc] =
+        scan_level_metrics(plan, h_plc, b, e);
 
     // ----- SMALL tier: sub-group-packed kernel -------------------------------------------
     // One sub-group of SG lanes owns one front; FPW = 32/SG fronts pack per warp, SMALL_WARPS
@@ -182,14 +170,14 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
     // fills the GPU — gate on factor_warp_fill() (the same HW occupancy quantity the tier-split
     // uses); otherwise keep the classic one-warp-per-front form (SG=32). Composes with the
     // tier-split: a size-homogeneous small sub-range gets the tightest SG.
-    if (max_fsz <= SMALL_THRESH) {
+    if (classify_front_tier(max_fsz) == FrontTier::kSmall) {
         const long warps_un = (long)level_size * B;        // unpacked (one-warp-per-front) count
-        const int SG = factor_small_sg(max_fsz, warps_un), FPW = 32 / SG;
-        const int blk = SMALL_WARPS * 32;
-        const int gx = (int)(((warps_un + FPW - 1) / FPW + SMALL_WARPS - 1) / SMALL_WARPS);
+        const int SG = factor_small_sg(max_fsz, warps_un), FPW = kWarpSize / SG;
+        const int blk = kSmallTierWarpsPerBlock * kWarpSize;
+        const int gx = (int)(((warps_un + FPW - 1) / FPW + kSmallTierWarpsPerBlock - 1) / kSmallTierWarpsPerBlock);
         const int fsz2cap = max_fsz * max_fsz;
         const size_t elt = (prec == Precision::FP64) ? sizeof(double) : sizeof(float);
-        const size_t shb = (size_t)SMALL_WARPS * FPW * fsz2cap * elt;
+        const size_t shb = (size_t)kSmallTierWarpsPerBlock * FPW * fsz2cap * elt;
         if (prec == Precision::FP64)
             launch_factor_small_t<double>(SG, gx, blk, shb, stream, b, level_size, B, fsz2cap,
                                           plan, d_plc, st.d_frontB, st.d_sing, do_extend);
@@ -202,9 +190,9 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
     // ----- MID tier: shared-resident kernel if the smem budget fits ----------------------
     // Grid is (level_size, B): blockIdx.x indexes the panel within the level, blockIdx.y the
     // batch. Per-variant shared layouts and block sizes follow below.
-    if (max_fsz <= MID_THRESH) {
+    if (classify_front_tier(max_fsz) == FrontTier::kMid) {
         const int fsz_cap = max_fsz;
-        const int ucp_max = round_up_int(max_uc, 16);
+        const int ucp_max = round_up_to_multiple(max_uc, 16);
         dim3 grid(level_size, B);
 
         if (prec == Precision::FP16) {
@@ -213,10 +201,10 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
             // drains to per-lane registers). Block size scales with fsz so small mid fronts
             // do not pay the full 256-thread launch cost.
             const int mblk = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
-            const int kp_max = round_up_int(std::min(level_max_nc, 32), 8);
+            const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
             const size_t shb = (size_t)fsz_cap * fsz_cap * sizeof(float)        // Fs
                              + (size_t)2 * ucp_max * kp_max * sizeof(__half);   // Lh + Uh
-            if (shb <= MID_SHARED_BUDGET) {
+            if (shb <= kMidSharedMemoryBudgetBytes) {
                 factor_mid_fp16_ptx<<<grid, mblk, shb, stream>>>(
                     b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                     plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
@@ -234,14 +222,14 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
             // extra K-loop iterations a K=4 instruction would pay. Both PTX paths omit Csc
             // (per-lane accumulators write straight to F).
             const int mblk = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
-            const int level_nc_clipped = std::min(level_max_nc, 32);
-            const int kp_k4 = round_up_int(level_nc_clipped, 4);
-            const int kp_k8 = round_up_int(level_nc_clipped, 8);
+            const int level_nc_clipped = std::min(level_max_nc, kTensorCorePivotColumnCap);
+            const int kp_k4 = round_up_to_multiple(level_nc_clipped, 4);
+            const int kp_k8 = round_up_to_multiple(level_nc_clipped, 8);
             const bool use_k4 = (kp_k4 < kp_k8);
             const int kp_max = use_k4 ? kp_k4 : kp_k8;
             const size_t shb = (size_t)fsz_cap * fsz_cap * sizeof(float)        // Fs
                              + (size_t)2 * ucp_max * kp_max * sizeof(float);    // Ltf + Utf
-            if (shb <= MID_SHARED_BUDGET) {
+            if (shb <= kMidSharedMemoryBudgetBytes) {
                 if (use_k4) {
                     factor_mid_tf32_ptx<4><<<grid, mblk, shb, stream>>>(
                         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
@@ -270,7 +258,7 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
             // occupancy, so keep the default 256. Both the gate (num_SMs) and the wide size
             // (maxThreadsPerBlock) are device attributes, not tuned constants. See docs/05-reports/12.
             const int mblk = ((long)(e - b) * B <= factor_num_sms()) ? factor_max_block() : 256;
-            if (shb_tiled <= MID_SHARED_BUDGET) {
+            if (shb_tiled <= kMidSharedMemoryBudgetBytes) {
                 if (prec == Precision::FP64)
                     factor_mid<double><<<grid, mblk, shb_tiled, stream>>>(
                         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
@@ -337,8 +325,8 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
         // fit per SM on sm_86. Shared scratch is only the __half staging panels (Lh, Uh) —
         // the front stays in global memory and the inline-asm mma needs no Csc readback.
         constexpr int bigT_fp16 = 512;
-        const int ucp_max = round_up_int(max_uc, 16);
-        const int kp_max = round_up_int(std::min(level_max_nc, 32), 8);
+        const int ucp_max = round_up_to_multiple(max_uc, 16);
+        const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
         const size_t shbytes = (size_t)2 * ucp_max * kp_max * sizeof(__half);
         factor_big_fp16_ptx<<<grid, bigT_fp16, shbytes, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
@@ -352,8 +340,8 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
         // 1024-thread block would be capped at one resident block by the thread-per-SM limit).
         // PTX path needs no Csc scratch.
         constexpr int bigT_tf32 = 512;
-        const int ucp_max = round_up_int(max_uc, 16);
-        const int kp_max = round_up_int(std::min(level_max_nc, 32), 8);
+        const int ucp_max = round_up_to_multiple(max_uc, 16);
+        const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
         const size_t shbytes = (size_t)2 * ucp_max * kp_max * sizeof(float);
         factor_big_tf32_ptx<<<grid, bigT_tf32, shbytes, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,

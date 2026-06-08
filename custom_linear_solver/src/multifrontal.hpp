@@ -42,11 +42,6 @@ inline bool is_tf32_path(Precision p)
     return p == Precision::TF32;
 }
 
-inline int round_up_int(int x, int align)
-{
-    return ((x + align - 1) / align) * align;
-}
-
 // Per-batch runtime state. Owned by Solver; rebuilt by setup() each time batch_size or
 // precision changes. The kernel launches in multifrontal.cu read State fields directly.
 struct State {

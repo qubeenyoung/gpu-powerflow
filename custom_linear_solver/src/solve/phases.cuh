@@ -26,10 +26,10 @@
 
 #include <cuda_runtime.h>
 
+#include "plan/solver_constants.hpp"
+
 namespace custom_linear_solver {
 namespace {
-
-constexpr int MF_MAX_NC = 64;  // upper bound on nc used to size per-warp shared slabs
 
 // =======================================================================================
 //  FORWARD SOLVE

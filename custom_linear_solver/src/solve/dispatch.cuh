@@ -21,6 +21,7 @@
 
 #include <cuda_runtime.h>
 
+#include "level_metrics.hpp"
 #include "multifrontal.hpp"
 #include "solve/kernels.cuh"
 
@@ -92,46 +93,25 @@ static void issue_solve_levels(const MultifrontalPlan& plan, State& st, cudaStre
 {
     const bool float_front = is_fp32_front(st.prec);
     const int B = st.B;
-    const int SMALL_THRESH = 32, SMALL_WARPS = 8;
     const int selt = float_front ? (int)sizeof(float) : (int)sizeof(double);
-
-    auto level_max_fsz = [&](const int* h_plc, int b, int e) {
-        int m = 0;
-        for (int q = b; q < e; ++q) {
-            const int pp = h_plc[q];
-            const int fsz = plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp];
-            if (fsz > m) m = fsz;
-        }
-        return m;
-    };
-
-    auto level_max_cb = [&](const int* h_plc, int b, int e) {
-        int m = 1;
-        for (int q = b; q < e; ++q) {
-            const int pp = h_plc[q];
-            const int cbq = (plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp]) - plan.h_ncols[pp];
-            if (cbq > m) m = cbq;
-        }
-        return m;
-    };
 
     // Per-level forward dispatch on a caller-chosen stream over a plcols (sub)range.
     auto fwd_level = [&](cudaStream_t ks, int b, int e, const int* d_plc, const int* h_plc) {
         if (e <= b) return;
-        const int mfsz = level_max_fsz(h_plc, b, e);
+        const int mfsz = scan_level_metrics(plan, h_plc, b, e).max_fsz;
 
-        // Small tier: sub-group-packed warp kernel (FPW = 32/SG fronts per warp).
-        if (mfsz <= SMALL_THRESH) {
+        // Small tier: sub-group-packed warp kernel (FPW = kWarpSize/SG fronts per warp).
+        if (classify_front_tier(mfsz) == FrontTier::kSmall) {
             const long warps_un = (long)(e - b) * B;
-            const int SG = solve_small_sg(mfsz, warps_un), FPW = 32 / SG;
-            const int blk = SMALL_WARPS * 32;
-            const int gx = (int)(((warps_un + FPW - 1) / FPW + SMALL_WARPS - 1) / SMALL_WARPS);
-            const size_t shb = (size_t)SMALL_WARPS * FPW * 64 * selt;
+            const int SG = solve_small_sg(mfsz, warps_un), FPW = kWarpSize / SG;
+            const int blk = kSmallTierWarpsPerBlock * kWarpSize;
+            const int gx = (int)(((warps_un + FPW - 1) / FPW + kSmallTierWarpsPerBlock - 1) / kSmallTierWarpsPerBlock);
+            const size_t shb = (size_t)kSmallTierWarpsPerBlock * FPW * kMaxPivotColumns * selt;
             if (float_front)
-                launch_solve_small_t<float>(/*fwd=*/true, SG, gx, blk, shb, ks, b, e - b, B, 64,
+                launch_solve_small_t<float>(/*fwd=*/true, SG, gx, blk, shb, ks, b, e - b, B, kMaxPivotColumns,
                                             plan, d_plc, st.d_frontBf, st.d_yBf);
             else
-                launch_solve_small_t<double>(/*fwd=*/true, SG, gx, blk, shb, ks, b, e - b, B, 64,
+                launch_solve_small_t<double>(/*fwd=*/true, SG, gx, blk, shb, ks, b, e - b, B, kMaxPivotColumns,
                                              plan, d_plc, st.d_frontB, st.d_yB);
             return;
         }
@@ -151,17 +131,18 @@ static void issue_solve_levels(const MultifrontalPlan& plan, State& st, cudaStre
 
     auto bwd_level = [&](cudaStream_t ks, int b, int e, const int* d_plc, const int* h_plc) {
         if (e <= b) return;
-        const int mfsz = level_max_fsz(h_plc, b, e);
-        const int max_cb = level_max_cb(h_plc, b, e);
+        const LevelMetrics metrics = scan_level_metrics(plan, h_plc, b, e);
+        const int mfsz = metrics.max_fsz;
+        const int max_cb = metrics.level_max_uc;
 
-        // Small tier: sub-group-packed warp kernel. slab = 64 (rhs) + max_cb (x cache).
-        if (mfsz <= SMALL_THRESH) {
+        // Small tier: sub-group-packed warp kernel. slab = kMaxPivotColumns (rhs) + max_cb (x cache).
+        if (classify_front_tier(mfsz) == FrontTier::kSmall) {
             const long warps_un = (long)(e - b) * B;
-            const int SG = solve_small_sg(mfsz, warps_un), FPW = 32 / SG;
-            const int blk = SMALL_WARPS * 32;
-            const int gx = (int)(((warps_un + FPW - 1) / FPW + SMALL_WARPS - 1) / SMALL_WARPS);
-            const int slab = 64 + max_cb;
-            const size_t shb = (size_t)SMALL_WARPS * FPW * slab * selt;
+            const int SG = solve_small_sg(mfsz, warps_un), FPW = kWarpSize / SG;
+            const int blk = kSmallTierWarpsPerBlock * kWarpSize;
+            const int gx = (int)(((warps_un + FPW - 1) / FPW + kSmallTierWarpsPerBlock - 1) / kSmallTierWarpsPerBlock);
+            const int slab = kMaxPivotColumns + max_cb;
+            const size_t shb = (size_t)kSmallTierWarpsPerBlock * FPW * slab * selt;
             if (float_front)
                 launch_solve_small_t<float>(/*fwd=*/false, SG, gx, blk, shb, ks, b, e - b, B, slab,
                                             plan, d_plc, st.d_frontBf, st.d_yBf);

@@ -83,32 +83,32 @@ bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
 
     // All shared-resident kernels can exceed the 48 KB default; opt them in to the sm_86 cap.
     cudaFuncSetAttribute(factor_small<float, 8>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_small<float, 16>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_small<float, 32>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_small<double, 8>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_small<double, 16>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_small<double, 32>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_mid<float>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_mid<double>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     if (is_fp32_front(prec)) {
         cudaFuncSetAttribute(factor_mid_fp16_ptx,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
         cudaFuncSetAttribute(factor_big_fp16_ptx,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
         cudaFuncSetAttribute(factor_mid_tf32_ptx<8>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
         cudaFuncSetAttribute(factor_mid_tf32_ptx<4>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
         cudaFuncSetAttribute(factor_big_tf32_ptx,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     }
 
 #ifdef CLS_INTERNAL_GRAPH

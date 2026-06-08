@@ -351,9 +351,9 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         // in setup(B), leaving this canonical order untouched for B=1 and smaller B paths.
         if (plan.num_subtrees > 0) {
             constexpr int NT = MultifrontalPlan::kNumTiers;
-            auto tier_of = [&](int p) {  // must match the single-stream tier block below
+            auto tier_of = [&](int p) {
                 const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
-                return fsz <= 32 ? 0 : (fsz <= 128 ? 1 : 2);
+                return front_tier_index(classify_front_tier(fsz));
             };
             plan.h_subtree_level_off.assign((long)plan.num_subtrees * num_plevels, 0);
             plan.h_subtree_level_cnt.assign((long)plan.num_subtrees * num_plevels, 0);
@@ -411,18 +411,16 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         }
     }
 
-    // Tier-homogeneous dispatch order. Within each level, group panels by kernel tier so the
-    // single-stream factor walk launches one right-sized kernel per (level, tier) instead of
-    // promoting a whole mixed level to its largest front's tier (which sent ~24% of fronts in
-    // case8387 from the warp-packed small kernel to the block-per-front mid kernel — see
-    // docs/05-reports/11). Tier cut points MUST match SMALL_THRESH=32 / MID_THRESH=128 in
-    // src/factorize/dispatch.cuh. The grouping is stable, so subtree/locality order is preserved
-    // within each tier. front sizes are value-independent, so this is computed once at analyze.
+    // Tier-homogeneous dispatch order. Within each level, group panels by kernel tier
+    // (classify_front_tier) so the single-stream factor walk launches one right-sized kernel per
+    // (level, tier) instead of promoting a whole mixed level to its largest front's tier. The
+    // grouping is stable, so subtree/locality order is preserved within each tier. Front sizes are
+    // value-independent, so this is computed once at analyze.
     {
-        constexpr int NT = MultifrontalPlan::kNumTiers;  // 3: small / mid / big (see plan hpp)
+        constexpr int NT = MultifrontalPlan::kNumTiers;
         auto tier_of = [&](int p) {
             const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
-            return fsz <= 32 ? 0 : (fsz <= 128 ? 1 : 2);
+            return front_tier_index(classify_front_tier(fsz));
         };
         plan.h_plcols_tier.assign(P, 0);
         plan.h_level_tier_off.assign((long)num_plevels * (NT + 1), 0);
@@ -455,8 +453,10 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     }
     plan.asm_total = static_cast<int>(asm_local.size());
 
-    // One arena, 256-byte-aligned sub-arrays (avoids the L2 straddle from cycle 39).
-    auto al = [](long b) { return (b + 255) & ~static_cast<long>(255); };
+    // One arena with kArenaAlignmentBytes-aligned sub-arrays (avoids an L2 cache-line straddle).
+    auto al = [](long b) {
+        return (b + kArenaAlignmentBytes - 1) & ~static_cast<long>(kArenaAlignmentBytes - 1);
+    };
     long off = 0;
     const long o_front = off; off = al(off + total * sizeof(double));
     const long o_foff = off;  off = al(off + (long)(P + 1) * sizeof(int));
