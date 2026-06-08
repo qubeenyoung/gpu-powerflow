@@ -19,17 +19,17 @@ namespace cls::profile {
 namespace {
 const char* dtype_name(DType dt) {
     switch (dt) {
-        case DType::Float32: return "float32";
-        case DType::Float64: return "float64";
-        case DType::Int32:   return "int32";
+        case DType::kFloat32: return "float32";
+        case DType::kFloat64: return "float64";
+        case DType::kInt32:   return "int32";
     }
     return "unknown";
 }
 std::size_t dtype_size(DType dt) {
     switch (dt) {
-        case DType::Float32: return 4;
-        case DType::Float64: return 8;
-        case DType::Int32:   return 4;
+        case DType::kFloat32: return 4;
+        case DType::kFloat64: return 8;
+        case DType::kInt32:   return 4;
     }
     return 0;
 }

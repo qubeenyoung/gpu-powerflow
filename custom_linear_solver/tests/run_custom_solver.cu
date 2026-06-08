@@ -236,7 +236,7 @@ Options parse_args(int argc, char** argv)
 
 void require_success(cls::Status status, const char* phase)
 {
-    if (status != cls::Status::Success) {
+    if (status != cls::Status::kSuccess) {
         throw std::runtime_error(std::string(phase) + " failed: " + cls::status_string(status));
     }
 }
@@ -342,10 +342,10 @@ int main(int argc, char** argv)
         matrix_view.nrows = matrix.rows;
         matrix_view.ncols = matrix.cols;
         matrix_view.nnz = matrix.nnz();
-        matrix_view.index_type = cls::IndexType::Int32;
-        matrix_view.location = cls::DataLocation::Device;
+        matrix_view.index_type = cls::IndexType::kInt32;
+        matrix_view.location = cls::DataLocation::kDevice;
         matrix_view.value_type =
-            options.single_fp32 ? cls::ValueType::Float32 : cls::ValueType::Float64;
+            options.single_fp32 ? cls::ValueType::kFloat32 : cls::ValueType::kFloat64;
         matrix_view.row_offsets = d_row_ptr.get();
         matrix_view.col_indices = d_col_idx.get();
         matrix_view.values = options.single_fp32
@@ -354,18 +354,18 @@ int main(int argc, char** argv)
 
         cls::DenseVectorView rhs_view;
         rhs_view.size = rhs.size();
-        rhs_view.location = cls::DataLocation::Device;
+        rhs_view.location = cls::DataLocation::kDevice;
         rhs_view.value_type =
-            options.single_fp32 ? cls::ValueType::Float32 : cls::ValueType::Float64;
+            options.single_fp32 ? cls::ValueType::kFloat32 : cls::ValueType::kFloat64;
         rhs_view.values = options.single_fp32
                               ? static_cast<void*>(d_rhs_f.get())
                               : static_cast<void*>(d_rhs.get());
 
         cls::DenseVectorView solution_view;
         solution_view.size = rhs.size();
-        solution_view.location = cls::DataLocation::Device;
+        solution_view.location = cls::DataLocation::kDevice;
         solution_view.value_type =
-            options.single_fp32 ? cls::ValueType::Float32 : cls::ValueType::Float64;
+            options.single_fp32 ? cls::ValueType::kFloat32 : cls::ValueType::kFloat64;
         solution_view.values = options.single_fp32
                                    ? static_cast<void*>(d_solution_f.get())
                                    : static_cast<void*>(d_solution.get());
@@ -446,8 +446,8 @@ int main(int argc, char** argv)
             batched_matrix.values = d_valB.get();
             cls::DenseVectorView batched_rhs;
             batched_rhs.size = (std::size_t)B * n;
-            batched_rhs.location = cls::DataLocation::Device;
-            batched_rhs.value_type = cls::ValueType::Float64;
+            batched_rhs.location = cls::DataLocation::kDevice;
+            batched_rhs.value_type = cls::ValueType::kFloat64;
             batched_rhs.values = d_rhsB.get();
             cls::DenseVectorView batched_sol = batched_rhs;
             batched_sol.values = d_solB.get();

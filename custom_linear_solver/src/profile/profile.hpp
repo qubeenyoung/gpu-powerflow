@@ -34,7 +34,7 @@
 //     CLS_PROFILE_CPU("factorize_host");
 //     CLS_PROFILE_GPU("factorize_gpu", stream);
 //     CLS_PROFILE_DUMP("front_post_factor", d_front, n_elems,
-//                      cls::profile::DType::Float32, stream);
+//                      cls::profile::DType::kFloat32, stream);
 //   }
 
 #include <cstddef>
@@ -47,9 +47,9 @@
 namespace cls::profile {
 
 enum class DType {
-    Float32 = 0,
-    Float64 = 1,
-    Int32 = 2,
+    kFloat32 = 0,
+    kFloat64 = 1,
+    kInt32 = 2,
 };
 
 #if CLS_ENABLE_PROFILE

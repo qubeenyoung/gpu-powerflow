@@ -104,12 +104,12 @@ bool build_plan_from_csr(const CsrMatrixView& matrix,
         // 1. CSR → CSC on device.
         matrix::DeviceCscPattern csc_device;
         if (matrix::build_csc_from_csr_device(n, nnz, d_csr_row_ptr, d_csr_col_idx, csc_device)
-            != Status::Success) return false;
+            != Status::kSuccess) return false;
 
         // 2. Symmetric adjacency graph (A + A^T) on device. Reused below for permute_metis_graph.
         std::vector<int> metis_sym_col_ptr, metis_sym_row_idx;
         if (matrix::build_symmetric_graph_device(csc_device, metis_sym_col_ptr, metis_sym_row_idx)
-            != Status::Success) return false;
+            != Status::kSuccess) return false;
 
         // 3. METIS nested-dissection.
         out.perm.assign(static_cast<std::size_t>(n), 0);
@@ -122,13 +122,13 @@ bool build_plan_from_csr(const CsrMatrixView& matrix,
         }
         out.iperm.assign(static_cast<std::size_t>(n), 0);
         for (int k = 0; k < n; ++k) out.iperm[out.perm[k]] = k;
-        if (out.d_perm.upload(out.perm) != Status::Success) return false;
-        if (out.d_iperm.upload(out.iperm) != Status::Success) return false;
+        if (out.d_perm.upload(out.perm) != Status::kSuccess) return false;
+        if (out.d_iperm.upload(out.iperm) != Status::kSuccess) return false;
 
         // 4. Apply permutation to CSC; capture ordered_value_to_csr mapping.
         matrix::DeviceCscPattern ordered_device;
         if (matrix::permute_csc_device(csc_device, out.d_iperm.ptr, ordered_device)
-            != Status::Success) return false;
+            != Status::kSuccess) return false;
         out.d_ordered_value_to_csr = std::move(ordered_device.source_pos);
 
         // 5. Relabel the symmetric adjacency under the permutation for etree / fill_pattern.

@@ -9,13 +9,13 @@
 namespace custom_linear_solver {
 
 enum class Status {
-    Success,
-    InvalidValue,
-    InvalidState,
-    AllocationFailed,
-    AnalysisFailed,
-    FactorizationFailed,
-    SolveFailed,
+    kSuccess,
+    kInvalidValue,
+    kInvalidState,
+    kAllocationFailed,
+    kAnalysisFailed,
+    kFactorizationFailed,
+    kSolveFailed,
 };
 
 // User-configurable knobs. Set on the SolverConfig passed to Solver(). Tunables not listed
@@ -73,7 +73,7 @@ public:
     Solver& operator=(const Solver&) = delete;
 
     Status set_data(const CsrMatrixView& matrix);
-    Status set_values(const void* values, ValueType value_type = ValueType::Float64);
+    Status set_values(const void* values, ValueType value_type = ValueType::kFloat64);
     Status set_rhs(const DenseVectorView& rhs);
     Status set_solution(const DenseVectorView& solution);
 

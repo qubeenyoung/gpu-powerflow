@@ -38,81 +38,81 @@ Solver& Solver::operator=(Solver&&) noexcept = default;
 
 Status Solver::set_data(const CsrMatrixView& matrix)
 {
-    if (!impl_) return Status::InvalidState;
+    if (!impl_) return Status::kInvalidState;
     if (matrix.nrows <= 0 || matrix.nrows != matrix.ncols || matrix.nnz < 0)
-        return Status::InvalidValue;
-    if (matrix.index_type != IndexType::Int32 || matrix.location != DataLocation::Device)
-        return Status::InvalidValue;
+        return Status::kInvalidValue;
+    if (matrix.index_type != IndexType::kInt32 || matrix.location != DataLocation::kDevice)
+        return Status::kInvalidValue;
     // values may be null: the float-input path (set via factorize(const float*))
     // supplies numeric values separately and only needs the pattern here. The single-case
     // factorize() rechecks values != nullptr at the point it actually reads them.
     if (matrix.row_offsets == nullptr || matrix.col_indices == nullptr)
-        return Status::InvalidValue;
+        return Status::kInvalidValue;
     impl_->matrix = matrix;
     impl_->has_matrix = true;
     impl_->analyzed = false;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::set_values(const void* values, ValueType value_type)
 {
-    if (!impl_) return Status::InvalidState;
-    if (!impl_->has_matrix || values == nullptr) return Status::InvalidState;
+    if (!impl_) return Status::kInvalidState;
+    if (!impl_->has_matrix || values == nullptr) return Status::kInvalidState;
     impl_->matrix.values = values;
     impl_->matrix.value_type = value_type;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::set_rhs(const DenseVectorView& rhs)
 {
-    if (!impl_) return Status::InvalidState;
-    if (rhs.size <= 0 || rhs.values == nullptr || rhs.location != DataLocation::Device)
-        return Status::InvalidValue;
+    if (!impl_) return Status::kInvalidState;
+    if (rhs.size <= 0 || rhs.values == nullptr || rhs.location != DataLocation::kDevice)
+        return Status::kInvalidValue;
     impl_->rhs = rhs;
     impl_->has_rhs = true;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::set_solution(const DenseVectorView& solution)
 {
-    if (!impl_) return Status::InvalidState;
+    if (!impl_) return Status::kInvalidState;
     if (solution.size <= 0 || solution.values == nullptr ||
-        solution.location != DataLocation::Device)
-        return Status::InvalidValue;
+        solution.location != DataLocation::kDevice)
+        return Status::kInvalidValue;
     impl_->solution = solution;
     impl_->has_solution = true;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::get_data(CsrMatrixView* matrix) const
 {
-    if (!impl_ || !matrix) return Status::InvalidValue;
-    if (!impl_->has_matrix) return Status::InvalidState;
+    if (!impl_ || !matrix) return Status::kInvalidValue;
+    if (!impl_->has_matrix) return Status::kInvalidState;
     *matrix = impl_->matrix;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::get_rhs(DenseVectorView* rhs) const
 {
-    if (!impl_ || !rhs) return Status::InvalidValue;
-    if (!impl_->has_rhs) return Status::InvalidState;
+    if (!impl_ || !rhs) return Status::kInvalidValue;
+    if (!impl_->has_rhs) return Status::kInvalidState;
     *rhs = impl_->rhs;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::get_solution(DenseVectorView* solution) const
 {
-    if (!impl_ || !solution) return Status::InvalidValue;
-    if (!impl_->has_solution) return Status::InvalidState;
+    if (!impl_ || !solution) return Status::kInvalidValue;
+    if (!impl_->has_solution) return Status::kInvalidState;
     *solution = impl_->solution;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::analyze()
 {
     CLS_PROFILE_NVTX("Solver::analyze");
     CLS_PROFILE_CPU("Solver::analyze");
-    if (!impl_ || !impl_->has_matrix) return Status::InvalidState;
+    if (!impl_ || !impl_->has_matrix) return Status::kInvalidState;
     plan::PlanBuildOptions opts;
     opts.use_parallel_nested_dissection = impl_->config.use_parallel_nested_dissection;
     opts.panel_cap = impl_->config.panel_cap;
@@ -121,7 +121,7 @@ Status Solver::analyze()
     opts.emit_analyze_info = impl_->config.analyze_emit_info;
     plan::PlanBuildResult result;
     if (!plan::build_plan_from_csr(impl_->matrix, opts, result))
-        return Status::AnalysisFailed;
+        return Status::kAnalysisFailed;
     impl_->perm                    = std::move(result.perm);
     impl_->iperm                   = std::move(result.iperm);
     impl_->d_perm                  = std::move(result.d_perm);
@@ -129,25 +129,25 @@ Status Solver::analyze()
     impl_->d_ordered_value_to_csr  = std::move(result.d_ordered_value_to_csr);
     impl_->plan                    = std::move(result.plan);
     impl_->analyzed = true;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::setup(int batch_size)
 {
-    if (!impl_ || !impl_->analyzed) return Status::InvalidState;
-    if (batch_size <= 0) return Status::InvalidValue;
+    if (!impl_ || !impl_->analyzed) return Status::kInvalidState;
+    if (batch_size <= 0) return Status::kInvalidValue;
     return custom_linear_solver::setup(impl_->plan, batch_size, impl_->config.precision,
                                        impl_->state, impl_->config.use_multistream_subtrees,
                                        impl_->config.tier_split)
-               ? Status::Success
-               : Status::AllocationFailed;
+               ? Status::kSuccess
+               : Status::kAllocationFailed;
 }
 
 Status Solver::set_stream(void* stream)
 {
-    if (!impl_ || !impl_->analyzed || impl_->state.batch_count == 0) return Status::InvalidState;
+    if (!impl_ || !impl_->analyzed || impl_->state.batch_count == 0) return Status::kInvalidState;
     custom_linear_solver::set_stream(impl_->state, stream);
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::factorize()
@@ -155,24 +155,24 @@ Status Solver::factorize()
     CLS_PROFILE_NVTX("Solver::factorize");
     CLS_PROFILE_GPU("Solver::factorize",
                     static_cast<cudaStream_t>(impl_ ? impl_->state.stream : nullptr));
-    if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::InvalidState;
-    if (impl_->matrix.values == nullptr) return Status::InvalidState;
+    if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::kInvalidState;
+    if (impl_->matrix.values == nullptr) return Status::kInvalidState;
     // Auto-setup with batch size 1 if the caller skipped setup().
     if (impl_->state.batch_count == 0) {
-        if (auto st = setup(1); st != Status::Success) return st;
+        if (auto st = setup(1); st != Status::kSuccess) return st;
     }
     const int* o2c = impl_->d_ordered_value_to_csr.ptr;
     bool ok = false;
-    if (impl_->matrix.value_type == ValueType::Float64) {
+    if (impl_->matrix.value_type == ValueType::kFloat64) {
         ok = custom_linear_solver::factorize(impl_->plan, impl_->state,
                                              static_cast<const double*>(impl_->matrix.values), o2c);
-    } else if (impl_->matrix.value_type == ValueType::Float32) {
+    } else if (impl_->matrix.value_type == ValueType::kFloat32) {
         ok = custom_linear_solver::factorize(impl_->plan, impl_->state,
                                              static_cast<const float*>(impl_->matrix.values), o2c);
     } else {
-        return Status::InvalidValue;
+        return Status::kInvalidValue;
     }
-    return ok ? Status::Success : Status::FactorizationFailed;
+    return ok ? Status::kSuccess : Status::kFactorizationFailed;
 }
 
 Status Solver::solve()
@@ -181,46 +181,46 @@ Status Solver::solve()
     CLS_PROFILE_GPU("Solver::solve",
                     static_cast<cudaStream_t>(impl_ ? impl_->state.stream : nullptr));
     if (!impl_ || !impl_->has_rhs || !impl_->has_solution || !impl_->analyzed)
-        return Status::InvalidState;
-    if (impl_->state.batch_count == 0) return Status::InvalidState;
+        return Status::kInvalidState;
+    if (impl_->state.batch_count == 0) return Status::kInvalidState;
     const int* perm = impl_->d_perm.ptr;
     bool ok = false;
     const auto rt = impl_->rhs.value_type;
     const auto st = impl_->solution.value_type;
-    if (rt == ValueType::Float64 && st == ValueType::Float64) {
+    if (rt == ValueType::kFloat64 && st == ValueType::kFloat64) {
         ok = custom_linear_solver::solve(impl_->plan, impl_->state,
                                          static_cast<const double*>(impl_->rhs.values),
                                          static_cast<double*>(impl_->solution.values), perm);
-    } else if (rt == ValueType::Float64 && st == ValueType::Float32) {
+    } else if (rt == ValueType::kFloat64 && st == ValueType::kFloat32) {
         ok = custom_linear_solver::solve(impl_->plan, impl_->state,
                                          static_cast<const double*>(impl_->rhs.values),
                                          static_cast<float*>(impl_->solution.values), perm);
-    } else if (rt == ValueType::Float32 && st == ValueType::Float32) {
+    } else if (rt == ValueType::kFloat32 && st == ValueType::kFloat32) {
         ok = custom_linear_solver::solve(impl_->plan, impl_->state,
                                          static_cast<const float*>(impl_->rhs.values),
                                          static_cast<float*>(impl_->solution.values), perm);
     } else {
-        return Status::InvalidValue;
+        return Status::kInvalidValue;
     }
-    return ok ? Status::Success : Status::SolveFailed;
+    return ok ? Status::kSuccess : Status::kSolveFailed;
 }
 
 const char* status_string(Status status)
 {
     switch (status) {
-        case Status::Success:
+        case Status::kSuccess:
             return "success";
-        case Status::InvalidValue:
+        case Status::kInvalidValue:
             return "invalid value";
-        case Status::InvalidState:
+        case Status::kInvalidState:
             return "invalid state";
-        case Status::AllocationFailed:
+        case Status::kAllocationFailed:
             return "allocation failed";
-        case Status::AnalysisFailed:
+        case Status::kAnalysisFailed:
             return "analysis failed";
-        case Status::FactorizationFailed:
+        case Status::kFactorizationFailed:
             return "factorization failed";
-        case Status::SolveFailed:
+        case Status::kSolveFailed:
             return "solve failed";
     }
     return "unknown";
