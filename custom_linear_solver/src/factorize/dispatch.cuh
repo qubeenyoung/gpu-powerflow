@@ -313,6 +313,25 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
         return;
     }
     constexpr int bigT = 1024;
+    // TF32 path: the TC-fused trailing is already fast, so fanning out costs the TC speedup and
+    // only pays under *severe* underfill — a handful of large fronts on a near-idle GPU (the
+    // deep levels of a single-system solve). There the FP32 scalar multi-block path beats
+    // TC-fused (SM fanout, no panel staging) and is more accurate. Tighter gate than the scalar
+    // path (≈ num_SMs/8) so moderately-underfilled levels, where TC-fused still wins, keep the
+    // TC kernel. (FP16 stays on the fused kernel — its TC trailing is fast enough that even
+    // severe-underfill routing nets a small loss on the smaller cases.)
+#ifndef CLS_NO_BIG_MB
+    const bool tf32_severe_underfill = (prec == Precision::TF32) &&
+                                       ((long)level_size * B * 8 < factor_num_sms());
+#else
+    const bool tf32_severe_underfill = false;
+#endif
+    if (tf32_severe_underfill) {
+        constexpr int bigT_tc = 512;
+        launch_factor_big_mb<float>(b, e, level_size, B, bigT_tc, level_max_uc, plan, d_plc,
+                                    st.d_frontBf, st.d_sing, do_extend, stream);
+        return;
+    }
     if (prec == Precision::FP16) {
         // 512-thread block + __launch_bounds__(512, 2) on factor_big_fp16_ptx so two blocks
         // fit per SM on sm_86. Shared scratch is only the __half staging panels (Lh, Uh) —

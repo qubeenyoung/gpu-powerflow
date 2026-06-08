@@ -68,11 +68,28 @@ deep level (B=1 전부, 또는 batched 의 cnt=1 spine-근처 big level) 만 mul
 - `factorize/dispatch.cuh`: `launch_factor_big_mb<T>()` + big tier FP64/FP32 분기에 `big_underfill` gate.
 - dynamic smem 없음 → 등록 불필요.
 
+## TF32 경로 확장 (severe-underfill → scalar-MB 라우팅)
+
+tf32/fp16 의 TC-fused trailing 은 이미 빠르므로, multi-block 으로 펼치면 TC 속도를 잃는다.
+fanout 이 그 손해를 이기는 건 **극심한 underfill (소수의 큰 front, near-idle GPU)** 일 때뿐이다.
+실측: USA B=1 은 scalar-MB(fp32, 1.95ms) 가 tf32-fused(2.12ms) 보다 빠르다 (fanout + staging 없음,
+게다가 fp32 라 더 정확).
+
+→ **tf32** big 경로에서 severe-underfill (`level_size × B × 8 < num_SMs`, ≈ num_SMs/8) level 만
+scalar multi-block 으로 라우팅. scalar 경로의 gate(num_SMs) 보다 타이트 — 적당히 underfill 된 level
+(cnt 10~80) 은 TC-fused 가 여전히 이기므로 그대로 둔다.
+
+결과 (B=1 factor): **USA tf32 −17%**, 8387/25K tf32 중립 (노이즈 ±4~5% 내; 같은 gate 의 fp16
+미라우팅 경로가 ±4.5% 흔들리는 것으로 noise floor 확인). tf32 B=64 / fp16 무영향.
+
+**fp16 은 제외**: TC trailing 이 tf32 보다도 빨라 severe-underfill 라우팅도 작은 케이스에서 소폭
+net-loss → fused 유지.
+
 ## 남은 lever
 
-- **TC 경로 multi-block**: 현재 tf32/fp16 big (factor_big_tf32_ptx / fp16_ptx) 은 multi-block 미적용.
-  USA B=1 은 tf32(fused) 가 이미 2.1ms 라 scalar-MB(1.95) 와 비슷 — 둘을 합치면(tf32 trailing 을 MB 로)
-  추가 win 가능. PTX trailing 의 tile 분할 필요.
+- **proper TC multi-block**: scalar-MB 라우팅은 routed level 에서 TC 를 포기한다. TC trailing 자체를
+  M-strip 으로 분할(블록당 L subset + U staging)하면 TC 속도 + fanout 을 둘 다 얻어 USA 를 더 줄일
+  여지. 단 per-block panel staging 중복 비용 + delicate mma 인덱싱 → 난이도 높음.
 - **panel kernel**: trailing 이 빨라진 뒤 deep level 의 panel LU (1 block, nc 순차) 가 상대적으로 커질 수 있음.
   multi-block panel 은 cross-block sync 필요 → 난이도 높음, 보류.
 - case8387/25K/USA 검증. 다른 케이스 일반화 확인 권장.
