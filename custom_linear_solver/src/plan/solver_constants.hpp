@@ -58,6 +58,33 @@ constexpr FrontTier classify_front_tier(int front_size)
 // Tier index in [0, kNumFrontTiers): 0 = small, 1 = mid, 2 = big.
 constexpr int front_tier_index(FrontTier tier) { return static_cast<int>(tier); }
 
+// Mid sub-tier boundary: the mid tier (kSmallFrontMax < fsz <= kMidFrontMax) is split here for
+// dispatch bucketing only — fronts at or below it form the "mid-low" bucket.
+inline constexpr int kMidSplitFrontMax = 64;
+
+// Front-size buckets for the analyze-time tier ordering and the occupancy-gated dispatch split.
+// Finer than classify_front_tier: the mid tier is split at kMidSplitFrontMax so a heterogeneous mid
+// level dispatches its small-mid majority with a tighter shared front-staging budget (Fs scales as
+// fsz_cap², so a tighter cap raises occupancy and frees the shared headroom that front-per-block
+// packing needs). Kernel SELECTION still uses classify_front_tier (small / mid / big) — both mid
+// buckets run the mid kernel, just with their own fsz_cap. CLS_NO_MID_SPLIT reverts to 3 buckets.
+#ifdef CLS_NO_MID_SPLIT
+inline constexpr int kNumFrontBuckets = kNumFrontTiers;  // 3: small / mid / big
+constexpr int front_bucket(int front_size)
+{
+    return front_tier_index(classify_front_tier(front_size));
+}
+#else
+inline constexpr int kNumFrontBuckets = 4;  // small / mid-low / mid-high / big
+constexpr int front_bucket(int front_size)
+{
+    if (front_size <= kSmallFrontMax) return 0;     // small
+    if (front_size <= kMidSplitFrontMax) return 1;  // mid-low
+    if (front_size <= kMidFrontMax) return 2;       // mid-high
+    return 3;                                       // big
+}
+#endif
+
 // Round `value` up to the next multiple of `alignment` (alignment > 0).
 constexpr int round_up_to_multiple(int value, int alignment)
 {

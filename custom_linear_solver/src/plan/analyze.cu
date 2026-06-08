@@ -307,7 +307,7 @@ static void partition_subtrees(MultifrontalPlan& plan, const symbolic::Multifron
         constexpr int NT = MultifrontalPlan::kNumTiers;
         auto tier_of = [&](int p) {
             const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
-            return front_tier_index(classify_front_tier(fsz));
+            return front_bucket(fsz);
         };
         plan.h_subtree_level_off.assign((long)plan.num_subtrees * num_plevels, 0);
         plan.h_subtree_level_cnt.assign((long)plan.num_subtrees * num_plevels, 0);
@@ -373,7 +373,7 @@ static void build_tier_order(MultifrontalPlan& plan, const symbolic::Multifronta
     constexpr int NT = MultifrontalPlan::kNumTiers;
     auto tier_of = [&](int p) {
         const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
-        return front_tier_index(classify_front_tier(fsz));
+        return front_bucket(fsz);
     };
     plan.h_plcols_tier.assign(P, 0);
     plan.h_level_tier_off.assign((long)num_plevels * (NT + 1), 0);
