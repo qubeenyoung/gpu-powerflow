@@ -56,32 +56,35 @@ State::~State()
 // Solve dispatch (issue_solve_levels) lives in solve/dispatch.cuh.
 // ---------------------------------------------------------------------------
 
-bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
-           bool use_multistream_subtrees, bool tier_split)
+// Set the per-batch scalar state and allocate the front + solve-vector arenas. Float-front modes
+// (FP32 / FP16 / TF32) use the f32 arena; FP64 uses the double arena.
+static bool allocate_state(const MultifrontalPlan& plan, int B, Precision prec, State& st,
+                           bool tier_split)
 {
-    if (plan.num_panels == 0 || B <= 0) return false;
     st.batch_count = B;
     st.front_total = plan.front_total;
     st.num_rows = plan.num_rows;
     st.precision = prec;
     st.tier_split = tier_split;
-    // Float-front modes: FP32 / FP16 (PTX) / TF32 (PTX) all run on the f32 arena.
     const bool float_front = is_fp32_front(prec);
     const long fe = (long)B * plan.front_total;
     if (float_front) {
         if (cudaMalloc(&st.d_front_batch_f, fe * sizeof(float)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_y_batch_f, (long)B * plan.num_rows * sizeof(float)) != cudaSuccess)
+            return false;
     } else {
         if (cudaMalloc(&st.d_front_batch, fe * sizeof(double)) != cudaSuccess) return false;
-    }
-    // Solve working vector matches the solve precision: float for pure-FP32, double otherwise.
-    if (float_front) {
-        if (cudaMalloc(&st.d_y_batch_f, (long)B * plan.num_rows * sizeof(float)) != cudaSuccess) return false;
-    } else {
-        if (cudaMalloc(&st.d_y_batch, (long)B * plan.num_rows * sizeof(double)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_y_batch, (long)B * plan.num_rows * sizeof(double)) != cudaSuccess)
+            return false;
     }
     if (cudaMalloc(&st.d_sing, sizeof(int)) != cudaSuccess) return false;
+    return true;
+}
 
-    // All shared-resident kernels can exceed the 48 KB default; opt them in to the sm_86 cap.
+// Opt the shared-resident kernels into the sm_86 dynamic-shared cap (they exceed the 48 KB
+// default). The PTX tensor-core variants only run on the float-front path.
+static void register_kernel_attributes(Precision prec)
+{
     cudaFuncSetAttribute(factor_small<float, 8>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_small<float, 16>,
@@ -110,33 +113,35 @@ bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
         cudaFuncSetAttribute(factor_big_tf32_ptx,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     }
+}
 
 #ifdef CLS_INTERNAL_GRAPH
-    // Internal-graph mode: own a private stream and capture the factor / solve kernel sequences
-    // into replayable CUDA graphs (default standalone behavior).
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-    st.stream = stream;
-    st.owns_stream = true;
-
-    // Allocate subtree streams + fork/join events for multi-stream dispatch. One stream per
-    // independent subtree (capped at 8). The caller can opt out via SolverConfig.use_multistream_subtrees;
-    // when subtree_streams stays empty, issue_factor_levels falls back to single-stream dispatch.
-    if (use_multistream_subtrees && plan.num_subtrees > 1 && plan.num_subtrees <= 8) {
-        st.num_subtree_streams = plan.num_subtrees;
-        for (int k = 0; k < st.num_subtree_streams; ++k) {
-            cudaStream_t ks;
-            cudaStreamCreateWithFlags(&ks, cudaStreamNonBlocking);
-            st.subtree_streams[k] = ks;
-            cudaEvent_t je;
-            cudaEventCreateWithFlags(&je, cudaEventDisableTiming);
-            st.join_events[k] = je;
-        }
-        cudaEvent_t fe;
-        cudaEventCreateWithFlags(&fe, cudaEventDisableTiming);
-        st.fork_event = fe;
+// Allocate one CUDA stream + join event per independent subtree (capped at kMaxSubtreeStreams) plus
+// the shared fork event, for multi-stream dispatch. No-op when disabled or when the plan has 0/1
+// subtrees, in which case dispatch falls back to single-stream.
+static void create_subtree_streams(const MultifrontalPlan& plan, State& st,
+                                   bool use_multistream_subtrees)
+{
+    if (!(use_multistream_subtrees && plan.num_subtrees > 1 &&
+          plan.num_subtrees <= kMaxSubtreeStreams))
+        return;
+    st.num_subtree_streams = plan.num_subtrees;
+    for (int k = 0; k < st.num_subtree_streams; ++k) {
+        cudaStream_t ks;
+        cudaStreamCreateWithFlags(&ks, cudaStreamNonBlocking);
+        st.subtree_streams[k] = ks;
+        cudaEvent_t je;
+        cudaEventCreateWithFlags(&je, cudaEventDisableTiming);
+        st.join_events[k] = je;
     }
+    cudaEvent_t fe;
+    cudaEventCreateWithFlags(&fe, cudaEventDisableTiming);
+    st.fork_event = fe;
+}
 
+// Capture the factor and solve kernel sequences into replayable CUDA graphs on `stream`.
+static void capture_phase_graphs(const MultifrontalPlan& plan, State& st, cudaStream_t stream)
+{
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     issue_factor_levels(plan, st, stream);
     cudaGraph_t g;
@@ -146,7 +151,6 @@ bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
     cudaGraphDestroy(g);
     st.factor_graph_exec = ge;
 
-    // Capture batched solve graph (the gather/scatter wrappers stay outside, in solve).
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     issue_solve_levels(plan, st, stream);
     cudaGraph_t sg;
@@ -155,6 +159,26 @@ bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
     cudaGraphInstantiate(&sge, sg, nullptr, nullptr, 0);
     cudaGraphDestroy(sg);
     st.solve_graph_exec = sge;
+}
+#endif
+
+bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
+           bool use_multistream_subtrees, bool tier_split)
+{
+    if (plan.num_panels == 0 || B <= 0) return false;
+    if (!allocate_state(plan, B, prec, st, tier_split)) return false;
+    register_kernel_attributes(prec);
+
+#ifdef CLS_INTERNAL_GRAPH
+    // Internal-graph mode: own a private stream and capture the factor / solve kernel sequences
+    // into replayable CUDA graphs (default standalone behavior).
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    st.stream = stream;
+    st.owns_stream = true;
+
+    create_subtree_streams(plan, st, use_multistream_subtrees);
+    capture_phase_graphs(plan, st, stream);
     return cudaGetLastError() == cudaSuccess;
 #else
     // External/capturable mode: no private stream and no internal graphs. The factor / solve
