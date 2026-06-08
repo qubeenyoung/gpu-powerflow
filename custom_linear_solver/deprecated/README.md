@@ -46,6 +46,20 @@ T4.1 실험. SMALL tier 의 warp-per-front 패턴을 mid range (32 < fsz ≤ MID
 - `mid_warp.cuh` — `factor_mid_warp<T>` kernel + `lu_mid_warp` helper.
 - 활성화 env (옛): `CLS_MID_WARP_THRESH`, `CLS_MID_WARP_VAR_GATE`.
 
+### `solve_spine/` (2026-06-08)
+Solve 의 spine fusion 실험. etree 최상단 *cnt=1 chain* (spine_start_level..num_plevels-1) 을 단일 fused kernel (`solve_fwd_spine`, `solve_bwd_spine`) 로 처리. 한 block 이 spine 전체를 순차 진행 → 레벨당 launch 없음. 측정상 wall −1~−5% 수준의 marginal gain (전체 solve 의 spine 비중이 작음). 코드 복잡도 (kernel 2종 + dispatcher metadata + launch 분기) 대비 ROI 낮아 master 에서 제거. 추후 *solve 가 bottleneck 인 시나리오 (다수 solve, NR 반복)* 에서 재검토 가치 있음.
+
+- `spine_kernels.cuh.snippet` — `solve_fwd_spine<T>`, `solve_bwd_spine<T>` 두 kernel.
+- `dispatch_spine.cuh.snippet` — 기존 `issue_solve_levels` 의 spine metadata / launch_fwd_spine / launch_bwd_spine 람다.
+- 활성화 (옛): 항상 ON, `has_spine && spine_lo < num_plevels` 시 자동 dispatch.
+
+### `factor_spine/` (2026-06-08)
+Factor 의 spine chain 실험. etree 상단 cnt=1 chain 을 단일 *staged-single* kernel (`factor_panel_chain_staged_single`) 로 fuse. 측정상 wall −1~−5% marginal. solve_spine 과 같이 ROI 낮아 master 에서 제거. plan 단의 `spine_start_level` / `h_spine_panels` / `h_subtree_*` metadata 는 multistream fork/join 의 *경계 정보* 로 여전히 사용 — 제거된 건 *spine 영역의 fused kernel + 그 dispatch 분기* 뿐.
+
+- `spine_kernel.cuh.snippet` — `factor_panel_chain_staged_single<T>` kernel.
+- `dispatch_spine.cuh.snippet` — 기존 `factor_spine_chain_start_level` + `issue_factor_panel_chain_single` 헬퍼.
+- 활성화 (옛): 항상 ON, fp64 + chain length ≥ threshold 시 자동 dispatch (multistream + single-stream 둘 다).
+
 ### `mid_opt/` (2026-06-06)
 docs/13 의 P1+P2(+P4) 결합 별도 커널. P1 (reciprocal multiply) 은 default kernel 에 흡수되어 retained; P2 (Phase 1+2 fusion) 만 별도 kernel 로 실험. P4 (shared padding) 는 stage-in integer division 비용으로 +85% 회귀 → 폐기. P2 단독으로는 USA B≥16 에서 −1~−4% 작은 win, case8387 noise. mid kernel micro-optimization 한계 도달의 evidence. 자세한 측정: `docs/03-optimization-notes/14`.
 

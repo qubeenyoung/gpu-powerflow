@@ -1,0 +1,43 @@
+    // Spine fusion metadata (cnt=1 chain at the top).
+    const bool has_spine = (plan.spine_start_level >= 0) &&
+                           !plan.h_spine_panels.empty() &&
+                           (plan.spine_start_level < plan.num_plevels);
+    const int spine_lo = has_spine ? plan.spine_start_level : plan.num_plevels;
+    const int n_spine = has_spine ? (int)plan.h_spine_panels.size() : 0;
+    constexpr int kSpineThreads = 128;
+    int spine_max_cb = 1;
+    if (has_spine) {
+        for (int p : plan.h_spine_panels) {
+            const int cbp = (plan.h_front_ptr[p + 1] - plan.h_front_ptr[p]) - plan.h_ncols[p];
+            if (cbp > spine_max_cb) spine_max_cb = cbp;
+        }
+    }
+
+    auto launch_fwd_spine = [&](cudaStream_t ks) {
+        const dim3 sg(1, B);
+        if (float_front)
+            solve_fwd_spine<float><<<sg, kSpineThreads, 0, ks>>>(
+                n_spine, plan.d_spine_panels, plan.d_front_off, plan.d_front_ptr,
+                plan.d_ncols, plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total,
+                plan.n);
+        else
+            solve_fwd_spine<double><<<sg, kSpineThreads, 0, ks>>>(
+                n_spine, plan.d_spine_panels, plan.d_front_off, plan.d_front_ptr,
+                plan.d_ncols, plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total,
+                plan.n);
+    };
+
+    auto launch_bwd_spine = [&](cudaStream_t ks) {
+        const dim3 sg(1, B);
+        const size_t sh = (size_t)spine_max_cb * selt;
+        if (float_front)
+            solve_bwd_spine<float><<<sg, kSpineThreads, sh, ks>>>(
+                n_spine, plan.d_spine_panels, plan.d_front_off, plan.d_front_ptr,
+                plan.d_ncols, plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total,
+                plan.n);
+        else
+            solve_bwd_spine<double><<<sg, kSpineThreads, sh, ks>>>(
+                n_spine, plan.d_spine_panels, plan.d_front_off, plan.d_front_ptr,
+                plan.d_ncols, plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total,
+                plan.n);
+    };
