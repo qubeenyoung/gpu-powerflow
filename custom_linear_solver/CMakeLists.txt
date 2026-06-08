@@ -18,6 +18,18 @@ option(CLS_INTERNAL_GRAPH "Capture batched factor/solve into internal CUDA graph
 option(CLS_BUILD_SCRIPTS "Build custom_linear_solver command-line scripts" ON)
 option(CLS_BUILD_CUDSS_SCRIPT "Build cuDSS command-line comparison script" OFF)
 option(CLS_ENABLE_NVTX "Enable NVTX ranges in command-line profiling scripts" OFF)
+
+# Compile-time gate for the profile/dump toolkit (src/profile/). Default ON for Debug builds,
+# OFF for Release/RelWithDebInfo/MinSizeRel — when OFF, all profile macros expand to no-ops,
+# profile.cpp is not compiled, and libnvToolsExt is not linked.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(_CLS_PROFILE_DEFAULT ON)
+else()
+  set(_CLS_PROFILE_DEFAULT OFF)
+endif()
+option(CLS_ENABLE_PROFILE
+  "Compile in profile/dump instrumentation (CSV timers + buffer dumps)" ${_CLS_PROFILE_DEFAULT})
+
 set(CLS_CUDA_ARCHITECTURES "86" CACHE STRING
   "CUDA architectures for custom_linear_solver_ops; must be >= 80 for TF32 WMMA")
 
@@ -65,6 +77,32 @@ if(CLS_BUILD_CUDA_OPS)
     src/reordering/metis_nd.cpp
   )
 
+  # Profile module: compiled in only when CLS_ENABLE_PROFILE=ON. Pulls in NVTX as a link
+  # dependency since profile.cpp uses libnvToolsExt directly. When OFF, profile.hpp inlines
+  # empty stubs and none of this is needed.
+  if(CLS_ENABLE_PROFILE)
+    list(APPEND CLS_OP_SOURCES src/profile/profile.cpp)
+    find_path(NVTX_INCLUDE_DIR
+      NAMES nvtx3/nvToolsExt.h nvToolsExt.h
+      HINTS
+        /usr/local/cuda/include
+        /usr/local/cuda-12.8/targets/x86_64-linux/include
+        $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/nvtx/include
+        /usr/local/lib/python3.10/dist-packages/nvidia/nvtx/include)
+    find_library(NVTOOLSEXT_LIBRARY
+      NAMES nvToolsExt
+      HINTS
+        /usr/local/cuda/lib64
+        /usr/local/cuda-12.8/targets/x86_64-linux/lib
+        /usr/lib
+        /usr/lib/x86_64-linux-gnu)
+    if(NOT NVTX_INCLUDE_DIR OR NOT NVTOOLSEXT_LIBRARY)
+      message(FATAL_ERROR
+        "CLS_ENABLE_PROFILE=ON requires NVTX headers and libnvToolsExt.")
+    endif()
+    get_filename_component(NVTOOLSEXT_LIBRARY_DIR "${NVTOOLSEXT_LIBRARY}" DIRECTORY)
+  endif()
+
   add_library(custom_linear_solver_ops STATIC ${CLS_OP_SOURCES})
   target_include_directories(custom_linear_solver_ops PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -75,6 +113,11 @@ if(CLS_BUILD_CUDA_OPS)
     CUDA::cublas
     ${METIS_LIBRARY}
   )
+  if(CLS_ENABLE_PROFILE)
+    target_compile_definitions(custom_linear_solver_ops PUBLIC CLS_ENABLE_PROFILE=1)
+    target_include_directories(custom_linear_solver_ops PUBLIC ${NVTX_INCLUDE_DIR})
+    target_link_libraries(custom_linear_solver_ops PUBLIC ${NVTOOLSEXT_LIBRARY})
+  endif()
   if(CLS_INTERNAL_GRAPH)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_INTERNAL_GRAPH)
   endif()

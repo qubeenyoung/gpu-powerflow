@@ -6,6 +6,7 @@
 #include "matrix/pattern_kernels.hpp"  // IntDeviceBuffer
 #include "multifrontal.hpp"             // setup, factorize, solve, set_stream, State
 #include "plan/build.hpp"               // build_plan_from_csr
+#include "profile/profile.hpp"          // cls::profile::init / flush + CLS_PROFILE_* macros
 
 namespace custom_linear_solver {
 
@@ -28,8 +29,10 @@ struct Solver::Impl {
     custom_linear_solver::State state;
 };
 
-Solver::Solver(const SolverConfig& config) : impl_(new Impl{config}) {}
-Solver::~Solver() = default;
+Solver::Solver(const SolverConfig& config) : impl_(new Impl{config}) {
+    cls::profile::init();
+}
+Solver::~Solver() { cls::profile::flush(); }
 Solver::Solver(Solver&&) noexcept = default;
 Solver& Solver::operator=(Solver&&) noexcept = default;
 
@@ -107,6 +110,8 @@ Status Solver::get_solution(DenseVectorView* solution) const
 
 Status Solver::analyze()
 {
+    CLS_PROFILE_NVTX("Solver::analyze");
+    CLS_PROFILE_CPU("Solver::analyze");
     if (!impl_ || !impl_->has_matrix) return Status::InvalidState;
     plan::PlanBuildOptions opts;
     opts.use_parallel_nested_dissection = impl_->config.use_parallel_nested_dissection;
@@ -146,6 +151,9 @@ Status Solver::set_stream(void* stream)
 
 Status Solver::factorize()
 {
+    CLS_PROFILE_NVTX("Solver::factorize");
+    CLS_PROFILE_GPU("Solver::factorize",
+                    static_cast<cudaStream_t>(impl_ ? impl_->state.stream : nullptr));
     if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::InvalidState;
     if (impl_->matrix.values == nullptr) return Status::InvalidState;
     // Auto-setup with batch size 1 if the caller skipped setup().
@@ -168,6 +176,9 @@ Status Solver::factorize()
 
 Status Solver::solve()
 {
+    CLS_PROFILE_NVTX("Solver::solve");
+    CLS_PROFILE_GPU("Solver::solve",
+                    static_cast<cudaStream_t>(impl_ ? impl_->state.stream : nullptr));
     if (!impl_ || !impl_->has_rhs || !impl_->has_solution || !impl_->analyzed)
         return Status::InvalidState;
     if (impl_->state.B == 0) return Status::InvalidState;
