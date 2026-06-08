@@ -24,8 +24,8 @@ namespace custom_linear_solver {
 //                __launch_bounds__(512, 2)). Accuracy tracks FP32 except for the FP16 rounding
 //                of trailing contributions.
 //   TF32       – FP32 front + TF32 PTX mma.m16n8k8 trailing GEMM + per-level k4/k8 hybrid for
-//                mid fronts + __launch_bounds__(512, 2) for big fronts (docs/15 V9h + docs/17
-//                EXP-B). Recommended path on power-grid Jacobians.
+//                mid fronts + __launch_bounds__(512, 2) for big fronts. Recommended path on
+//                power-grid Jacobians.
 //
 // FP16 and TF32 require Ampere (sm80+).
 enum class Precision { FP64, FP32, FP16, TF32 };

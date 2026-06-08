@@ -16,13 +16,10 @@
 //                                level walk on the main stream.
 //
 //   issue_factor_level_range   — per-range dispatcher. For one (sub)range of panels at one
-//                                level it (1) scans the level to find max_fsz / max_uc /
-//                                level_max_nc, (2) picks a tier (small / mid / big) by
-//                                max_fsz against SMALL_THRESH=32 and MID_THRESH=128, then
-//                                (3) selects the kernel variant for the active Precision and
-//                                computes the dynamic shared-memory size. The mid tier falls
-//                                through to the big tier when the shared budget overflows
-//                                the 96 KB per-block cap on sm_86.
+//                                level it scans the range (scan_level_metrics), picks a tier
+//                                with classify_front_tier, and calls dispatch_factor_small /
+//                                _mid / _big. The mid dispatch falls through to the big tier
+//                                when its shared layout overflows kMidSharedMemoryBudgetBytes.
 
 #include <algorithm>
 
@@ -135,18 +132,11 @@ static inline void launch_factor_big_mb(int b, int e, int level_size, int B, int
 }
 
 // ---------------------------------------------------------------------------------------
-// Per-range dispatcher: pick the right kernel for fronts in plcols[b..e), launch on `stream`.
-//
-// Flow:
-//   1. Scan plcols[b..e) once to find this level's max_fsz / max_uc / level_max_{nc, uc}.
-//      The kernels need these caps for shared-layout sizing and for the WMMA tile bounds.
-//   2. Tier selection by max_fsz:
-//        max_fsz ≤ SMALL_THRESH (=32)  → small tier (one warp per (front, batch))
-//        max_fsz ≤ MID_THRESH   (=128) → mid tier   (one block per (front, batch), shared-resident)
-//        otherwise                    → big tier   (one block per (front, batch), global-resident)
-//   3. Variant selection by Precision (within tier).
-//   4. Shared-memory budget check. The mid tier may overflow the 96 KB sm_86 cap for the
-//      largest (fsz, kp_max, mblk) triples; in that case it falls through to the big tier.
+// Per-tier dispatch helpers (small / mid / big), each launching the kernel variant for the
+// active Precision. issue_factor_level_range (below) scans the range, classifies the tier, and
+// calls the matching helper.
+// ---------------------------------------------------------------------------------------
+
 // SMALL tier: sub-group-packed kernel. One sub-group of SG lanes owns one front; 32/SG fronts
 // pack per warp, SG chosen by max_fsz so the dominant tiny fronts keep all SG lanes busy. The
 // factor_small_sg gate keeps the classic one-warp-per-front form (SG=32) until the packed grid
@@ -249,7 +239,7 @@ static bool dispatch_factor_mid(const MultifrontalPlan& plan, State& st, cudaStr
         // max parallelises the per-pivot rank-1 update over more of that SM with no occupancy
         // cost. Once the level fills the GPU with blocks the extra width would only cost
         // occupancy, so keep the default 256. Both the gate (num_SMs) and the wide size
-        // (maxThreadsPerBlock) are device attributes, not tuned constants. See docs/05-reports/12.
+        // (maxThreadsPerBlock) are device attributes, not tuned constants.
         const int mblk = ((long)(e - b) * B <= factor_num_sms()) ? factor_max_block() : 256;
         if (shb_tiled <= kMidSharedMemoryBudgetBytes) {
             if (prec == Precision::FP64)
@@ -411,7 +401,7 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
 // block-per-front kernel gives each small front 8× the threads and a mixed range already has enough
 // fronts to occupy the device, so keeping the range merged on the larger kernel wins (unsplit
 // regressed B=1 factor by up to ~80%). The threshold is a pure hardware quantity (SMs × warps/SM
-// via device attrs), so the rule generalizes across matrices and GPUs. See docs/05-reports/11.
+// via device attrs), so the rule generalizes across matrices and GPUs.
 static long factor_warp_fill()
 {
     static const long v = [] {

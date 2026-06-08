@@ -154,10 +154,8 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // h_plcols filled after plcols is built below.
 
     // Per-panel front offset (in doubles) into the front arena = prefix sum of fsz², in panel-id
-    // (postorder) order. NB: a level-contiguous arena was tried (offsets assigned in plcols/level
-    // order) and measured a regression — postorder already keeps each parent front adjacent to its
-    // children, which is the dominant locality for child→parent extend-add. See
-    // docs/04-benchmarks-profiling/15. Keep postorder.
+    // (postorder) order. Postorder keeps each parent front adjacent to its children, which is the
+    // dominant locality for child→parent extend-add (a level-contiguous arena was measured slower).
     std::vector<int> front_off(P + 1, 0);
     long total = 0;
     for (int p = 0; p < P; ++p) {

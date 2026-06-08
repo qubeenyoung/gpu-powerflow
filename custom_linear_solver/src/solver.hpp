@@ -19,9 +19,9 @@ enum class Status {
 };
 
 // User-configurable knobs. Set on the SolverConfig passed to Solver(). Tunables not listed
-// here (kernel-tier thresholds SMALL_THRESH=32 / MID_THRESH=128, the V9h+LB(512,2) TF32 stack,
-// the cp.async stage-in, the per-front kernel routing) are baked into the build because every
-// off-default we tried regressed at least one case in the docs/03-optimization-notes sweep.
+// here (kernel-tier thresholds kSmallFrontMax / kMidFrontMax, the TF32 PTX trailing stack, the
+// cp.async stage-in, the per-front kernel routing) are baked into the build because every
+// measured off-default regressed at least one case.
 struct SolverConfig {
     // ---- Symbolic analysis ----
     bool use_matching = false;                       // (reserved) row matching pre-permutation
@@ -34,13 +34,12 @@ struct SolverConfig {
                                                      // singular pivot
     double shift_retry_epsilon = 1.0e-8;             // (reserved) shift magnitude
     Precision precision = Precision::FP64;           // FP64 / FP32 / FP16 (FP16 PTX mma) /
-                                                     // TF32 (V9h PTX + LB(512,2), recommended)
+                                                     // TF32 (TF32 PTX mma, recommended)
     // ---- Runtime dispatch ----
     bool tier_split = true;                          // occupancy-gated per-front tier split in the
                                                      // factor/solve level dispatch. false = original
                                                      // whole-level dispatch (small fronts promoted
-                                                     // to the larger tier's kernel). See
-                                                     // docs/05-reports/11.
+                                                     // to the larger tier's kernel).
     bool use_multistream_subtrees = true;            // dispatch independent subtrees on
                                                      // separate streams (capped at 8). Set
                                                      // false for single-stream debugging.

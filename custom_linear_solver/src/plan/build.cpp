@@ -66,7 +66,7 @@ void permute_symmetric_pattern(int n, const std::vector<int>& col_ptr,
 }
 
 // Dump per-front (q, p, fsz, nc, uc, level) to a CSV when SolverConfig.analyze_dump_fronts_path
-// is non-empty. Used by the front-distribution analysis scripts in docs/04-benchmarks-profiling.
+// is non-empty. Used by the offline front-distribution analysis scripts.
 void maybe_dump_fronts(const MultifrontalPlan& plan, const std::string& path)
 {
     if (path.empty()) return;

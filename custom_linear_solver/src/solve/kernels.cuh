@@ -13,7 +13,7 @@
 //
 // The regular kernels are NOT tier-split into mid/big like factor — the solve work per front
 // is much lighter than factor (no rank-nc GEMM; just substitution + CB row update), so a single
-// block-per-front kernel with caller-tuned thread count covers all max_fsz > SMALL_THRESH.
+// block-per-front kernel with caller-tuned thread count covers all max_fsz > kSmallFrontMax.
 //
 // Each kernel is a thin orchestrator composing the device building blocks in phases.cuh:
 //   forward:  fwd_substitute  → sync  → fwd_cb_update

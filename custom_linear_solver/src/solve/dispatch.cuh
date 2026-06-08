@@ -14,7 +14,7 @@
 //                                    for the forward sweep, joins, re-forks for the
 //                                    backward sweep, joins again.
 //
-//   per-level routing         — within each pass, levels with max_fsz ≤ SMALL_THRESH go to the
+//   per-level routing         — within each pass, levels with max_fsz ≤ kSmallFrontMax go to the
 //                                warp-packed small kernel (8 warps/block, one (front,batch)
 //                                per warp); larger levels go to the block-per-front kernel
 //                                with thread count tuned to the level's max_fsz.
@@ -170,7 +170,7 @@ static void issue_solve_levels(const MultifrontalPlan& plan, State& st, cudaStre
     // fronts go to the warp-packed solve kernel instead of block-per-front, but only once the small
     // fronts × B fill the GPU's warp slots — below that (B=1 latency regime) block-per-front's extra
     // threads/front win, so keep the range merged. Same range = independent fronts → order-free.
-    // See docs/05-reports/11.
+    //
     constexpr int NT = MultifrontalPlan::kNumTiers;
     constexpr int NS = MultifrontalPlan::kSmallTiers;
     auto dispatch_tiered = [&](cudaStream_t ks, const int* tb, const int* d_plc, const int* h_plc,

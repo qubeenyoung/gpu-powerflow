@@ -51,7 +51,7 @@ namespace {
 //  SMALL tier  —  one warp per (front, batch); W warps per block
 // =======================================================================================
 //
-// Used when the level's max_fsz ≤ SMALL_THRESH = 32 (see factorize/dispatch.cuh).
+// Used when the level's max_fsz ≤ kSmallFrontMax (see factorize/dispatch.cuh).
 //
 // At the leaves of the elimination tree the fronts are tiny (fsz ≲ 30, nc ≲ 8) but
 // numerous. A 256-thread block per front would leave most threads idle and pay a full
@@ -66,7 +66,7 @@ namespace {
 //   3. writeback Fs → global F (factored L | U panel only; the uc×uc CB stays in Fs).
 //   4. extend_add: scatter the CB straight from shared into the parent front via atomicAdd.
 // SG = sub-group lane count (8 / 16 / 32). One sub-group of SG lanes owns one (front, batch);
-// FPW = 32/SG sub-groups (fronts) pack per warp, SMALL_WARPS warps per block. SG=32 is the
+// FPW = 32/SG sub-groups (fronts) pack per warp, kSmallTierWarpsPerBlock warps per block. SG=32 is the
 // classic one-warp-per-front form. The dispatcher picks SG from the level's max_fsz so the
 // tiny fronts (fsz ≤ 16) keep all SG lanes busy and expose FPW independent fronts' memory
 // traffic per warp (latency hiding on this memory-latency-bound tier).
@@ -139,7 +139,7 @@ __global__ void factor_small(int lbegin, int level_size, int B, int fsz2cap,
 //  MID tier  —  one block per (front, batch); whole front staged into shared
 // =======================================================================================
 //
-// Used when SMALL_THRESH < max_fsz ≤ MID_THRESH = 128 and the shared-memory budget fits
+// Used when kSmallFrontMax < max_fsz ≤ kMidFrontMax and the shared-memory budget fits
 // (≤ 96 KB / block on sm_86). The 256-thread block stages the entire fsz × fsz front into
 // dynamic shared once and runs all four phases against shared, avoiding O(nc) re-reads
 // from global. Falls through to the big tier when shared is too tight (e.g. FP64 with
@@ -321,7 +321,7 @@ __global__ void factor_mid_tf32_ptx(int lbegin, int lend, const int* __restrict_
 //  BIG tier  —  one block per (front, batch); front stays in global memory
 // =======================================================================================
 //
-// Used when max_fsz > MID_THRESH = 128 or the mid shared budget overflows. The front is
+// Used when max_fsz > kMidFrontMax or the mid shared budget overflows. The front is
 // too large to stage (e.g. 128² FP32 = 64 KB just for Fs), so all phases operate directly on
 // the global front buffer F. The block is widened (1024 threads) to expose enough
 // parallelism for the larger uc² · nc trailing GEMM.
