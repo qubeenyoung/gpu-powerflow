@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <unordered_map>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -56,6 +57,59 @@ __global__ void build_a_pos_device(int n, const int* __restrict__ Ap,
     }
 }
 
+// Determine whether every numerical scatter destination in `a_pos` is unique. When true,
+// `scatter_values_unique` can use plain stores instead of atomicAdd. Optionally emits
+// front fill / coverage statistics. Returns false on cudaMemcpy failure so dispatch falls
+// back to the safe atomicAdd path.
+static bool determine_a_pos_unique(const int* d_a_pos, int nnz_a, long front_total,
+                                   bool emit_info)
+{
+    std::vector<int> h_a_pos(static_cast<std::size_t>(nnz_a));
+    if (cudaMemcpy(h_a_pos.data(), d_a_pos, h_a_pos.size() * sizeof(int),
+                   cudaMemcpyDeviceToHost) != cudaSuccess) {
+        return false;
+    }
+    std::sort(h_a_pos.begin(), h_a_pos.end());
+
+    bool unique = true;
+    for (std::size_t i = 1; i < h_a_pos.size(); ++i) {
+        if (h_a_pos[i] >= 0 && h_a_pos[i] == h_a_pos[i - 1]) {
+            unique = false;
+            break;
+        }
+    }
+
+    if (emit_info) {
+        long present = 0, fill_runs = 0, fill_slots = 0, last = -1;
+        for (int pos : h_a_pos) {
+            if (pos < 0 || pos == last) continue;
+            if (pos > last + 1) {
+                ++fill_runs;
+                fill_slots += pos - last - 1;
+            }
+            ++present;
+            last = pos;
+        }
+        if (last + 1 < front_total) {
+            ++fill_runs;
+            fill_slots += front_total - last - 1;
+        }
+        std::fprintf(stderr,
+                     "[analyze] front fill slots=%ld (%.1f%%) runs=%ld avg_run=%.1f\n",
+                     fill_slots,
+                     100.0 * (double)fill_slots / std::max(1.0, (double)front_total),
+                     fill_runs,
+                     fill_runs ? (double)fill_slots / (double)fill_runs : 0.0);
+        std::fprintf(stderr,
+                     "[analyze] front present slots=%ld (%.1f%% of front_total)\n",
+                     present,
+                     100.0 * (double)present / std::max(1.0, (double)front_total));
+        std::fprintf(stderr, "[analyze] a_pos_unique=%s\n", unique ? "true" : "false");
+    }
+
+    return unique;
+}
+
 }  // namespace
 
 MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const int* d_Ai,
@@ -82,6 +136,10 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     //   else       → caller-supplied panel_cap (SolverConfig.panel_cap, default 8)
     // Upper bound 64 from the shared pivot buffer (nc <= cap).
     int eff_cap = n >= 80000 ? 20 : (n >= 16000 ? 12 : panel_cap);
+    // B=1 float-front factorization benefits from a slightly wider panel around the
+    // 3K-bus / 6K-unknown class: it removes enough tiny-front overhead without creating
+    // the large-front padding that hurts the 6K-8K bus cases.
+    if (float_front && n >= 5000 && n < 8000 && eff_cap < 18) eff_cap = 18;
     if (eff_cap < 1) eff_cap = 1;
     if (eff_cap > 64) eff_cap = 64;
     const sym::PanelPartition panels =
@@ -283,9 +341,10 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
             plan.h_subtree_of_panel[p] = root_to_id[r];
         }
 
-        // Re-sort plcols within each level so panels of the same subtree are
-        // contiguous (subtree 0 first, then subtree 1, ..., then -1=spine). After this,
-        // for subtree k at level L the range is [off, off+cnt) inside plcols.
+        // Re-sort plcols within each level so panels of the same subtree are contiguous
+        // (subtree 0 first, then subtree 1, ..., then -1=spine). Same-level panels are
+        // independent. Selected B>1 factor dispatch builds a temporary band-sorted order
+        // in setup(B), leaving this canonical order untouched for B=1 and smaller B paths.
         if (plan.num_subtrees > 0) {
             plan.h_subtree_level_off.assign((long)plan.num_subtrees * num_plevels, 0);
             plan.h_subtree_level_cnt.assign((long)plan.num_subtrees * num_plevels, 0);
@@ -412,6 +471,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     const cudaError_t apos_err = cudaGetLastError();
     cudaDeviceSynchronize();
     if (apos_err != cudaSuccess) return MultifrontalPlan{};
+    plan.a_pos_unique = determine_a_pos_unique(plan.d_a_pos, plan.nnz_a, total, emit_info);
     lap("a_pos_device");
 
 

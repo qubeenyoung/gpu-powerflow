@@ -32,6 +32,7 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         if (d_spine_panels) cudaFree(d_spine_panels);
         if (d_yf) cudaFree(d_yf);
         if (d_frontf) cudaFree(d_frontf);
+        if (d_pivot_offset) cudaFree(d_pivot_offset);
         if (arena) cudaFree(arena);
 
         n = o.n;
@@ -56,6 +57,7 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         d_y = o.d_y;
         d_yf = o.d_yf;
         front_store = o.front_store;
+        a_pos_unique = o.a_pos_unique;
         plptr = std::move(o.plptr);
         h_front_ptr = std::move(o.h_front_ptr);
         h_ncols = std::move(o.h_ncols);
@@ -87,6 +89,7 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         o.solve_graph_exec = nullptr;
         o.d_frontf = nullptr;
         o.d_yf = nullptr;
+        o.d_pivot_offset = nullptr;
         o.solve_graph = nullptr;
     }
     return *this;

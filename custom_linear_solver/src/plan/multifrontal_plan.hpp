@@ -20,6 +20,7 @@ struct MultifrontalPlan {
     double* d_y = nullptr;
     float* d_yf = nullptr;
     int front_store = 0;
+    bool a_pos_unique = false;  // true when numeric scatter can store instead of atomic-add
     std::vector<int> plptr;
     std::vector<int> h_front_ptr;  // host copy of front_ptr (per-panel front size), for kernel dispatch
     std::vector<int> h_ncols;      // host copy of panel ncols, for tensor-core shared sizing
