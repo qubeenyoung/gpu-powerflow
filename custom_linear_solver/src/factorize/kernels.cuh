@@ -367,6 +367,102 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
     extend_add<T, T>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
 }
 
+// ----- Multi-block big-front split (B=1 / underfilled-level path) ----------------------------
+//
+// When a big level has too few fronts to fill the GPU (level_size × B < num_SMs, e.g. the deep
+// levels of a single-system solve), the fused factor_big runs one block per front — a handful
+// of busy SMs while the rest idle, with the FLOP-heavy trailing GEMM serialized onto those few
+// blocks. These three kernels split the work so the trailing fans out across many blocks:
+//
+//   factor_big_panel<T>     Phase 1 (panel LU) + Phase 2 (U-solve), one block per front. Small
+//                           fronts (fsz ≤ 48) take the fused lu_small_front (panel + trailing in
+//                           one pass) so the trailing kernel can skip them.
+//   factor_big_trailing_mb  Phase 3 (scalar trailing) split into blockIdx.z element tiles of
+//                           `elems_per_block` C entries — grid (front, batch, tiles).
+//   factor_big_extend<T>    Phase 4 (extend-add) into the parent front, one block per front.
+//
+// Each C output element is owned by exactly one tile and L/U are read-only, so the tiles are
+// race-free; the kernel-launch boundaries order panel → trailing → extend within the stream.
+template <typename T>
+__global__ void factor_big_panel(int lbegin, int lend, const int* __restrict__ plcols,
+                                 const int* __restrict__ front_off,
+                                 const int* __restrict__ front_ptr,
+                                 const int* __restrict__ ncols, T* frontB,
+                                 long front_total, int* sing)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    T* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    T* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    if (fsz <= 48) {
+        lu_small_front<T>(F, fsz, nc, t, nt, sing);   // Phase 1 + 3 fused; trailing kernel skips these
+    } else {
+        lu_panel_factor<T>(F, fsz, nc, t, nt, sing);  // Phase 1
+        u_panel_solve<T>(F, fsz, nc, uc, t, nt);      // Phase 2 (trailing deferred to the MB kernel)
+    }
+}
+
+template <typename T>
+__global__ void factor_big_trailing_mb(int lbegin, int lend, const int* __restrict__ plcols,
+                                       const int* __restrict__ front_off,
+                                       const int* __restrict__ front_ptr,
+                                       const int* __restrict__ ncols, T* frontB,
+                                       long front_total, int elems_per_block)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    const int uc = fsz - nc;
+    if (fsz <= 48) return;                               // already trailed by the fused panel kernel
+    const long total = (long)uc * uc;
+    const long base = (long)blockIdx.z * elems_per_block;
+    if (base >= total) return;
+    const long end = (base + elems_per_block < total) ? base + elems_per_block : total;
+    T* F = frontB + (long)blockIdx.y * front_total + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    // Scalar trailing C[ii,jj] -= Σ_k L[ii,k]·U[k,jj] over this block's element slice.
+    for (long ee = base + t; ee < end; ee += nt) {
+        const int ii = nc + (int)(ee / uc), jj = nc + (int)(ee % uc);
+        T acc = T(0);
+        for (int k = 0; k < nc; ++k) acc += F[(long)ii * fsz + k] * F[(long)k * fsz + jj];
+        F[(long)ii * fsz + jj] -= acc;
+    }
+}
+
+template <typename T>
+__global__ void factor_big_extend(int lbegin, int lend, const int* __restrict__ plcols,
+                                  const int* __restrict__ front_off,
+                                  const int* __restrict__ front_ptr,
+                                  const int* __restrict__ ncols,
+                                  const int* __restrict__ panel_parent,
+                                  const int* __restrict__ asm_ptr,
+                                  const int* __restrict__ asm_local, T* frontB,
+                                  long front_total)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const int p = plcols[idx];
+    const int par = panel_parent[p];
+    if (par < 0) return;
+    T* front = frontB + (long)blockIdx.y * front_total;
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    const int uc = fsz - nc;
+    T* F = front + front_off[p];
+    T* Fp = front + front_off[par];
+    const int pfsz = front_ptr[par + 1] - front_ptr[par];
+    const int abase = asm_ptr[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    extend_add<T, T>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
+}
+
 // FP16 PTX trailing on the global front (Precision::FP16). 512-thread block with
 // __launch_bounds__(512, 2) so two blocks stay resident per SM on sm_86. Shared scratch is
 // only the __half L/U staging panels; the inline-asm mma writes the accumulator to per-lane

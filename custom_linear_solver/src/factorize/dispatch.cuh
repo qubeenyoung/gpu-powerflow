@@ -102,6 +102,37 @@ static inline void launch_factor_small_t(int SG, int gx, int blk, size_t shb, cu
     else               launch_factor_small<FT, 32>(gx, blk, shb, stream, b, level_size, B, fsz2cap, plan, d_plc, frontB, sing, do_extend);
 }
 
+// Multi-block big-front path for underfilled levels (B=1 deep levels): split the scalar big
+// kernel into panel → multi-block trailing → extend so the FLOP-heavy trailing fans out across
+// SMs instead of running one-block-per-front. `panel_blk` is the panel/extend block size,
+// `level_max_uc` sizes the trailing tile grid (blockIdx.z).
+template <typename T>
+static inline void launch_factor_big_mb(int b, int e, int level_size, int B, int panel_blk,
+                                        int level_max_uc, const MultifrontalPlan& plan,
+                                        const int* d_plc, T* frontB, int* sing, int do_extend,
+                                        cudaStream_t stream)
+{
+    const dim3 grid_pf(level_size, B);
+    factor_big_panel<T><<<grid_pf, panel_blk, 0, stream>>>(
+        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols, frontB,
+        plan.front_total, sing);
+
+    constexpr int TRAIL_BLK = 256;
+    const int eb = TRAIL_BLK * 8;                              // C elements per trailing block
+    const long max_uc2 = (long)level_max_uc * level_max_uc;
+    const int ztiles = (int)((max_uc2 + eb - 1) / eb);
+    if (ztiles > 0) {
+        const dim3 grid_tr(level_size, B, ztiles);
+        factor_big_trailing_mb<T><<<grid_tr, TRAIL_BLK, 0, stream>>>(
+            b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols, frontB,
+            plan.front_total, eb);
+    }
+    if (do_extend)
+        factor_big_extend<T><<<grid_pf, panel_blk, 0, stream>>>(
+            b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, frontB, plan.front_total);
+}
+
 // ---------------------------------------------------------------------------------------
 // Per-range dispatcher: pick the right kernel for fronts in plcols[b..e), launch on `stream`.
 //
@@ -258,15 +289,27 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
     }
 
     // ----- BIG tier: global-memory kernel ------------------------------------------------
+    // Underfilled levels (level_size × B < num_SMs, e.g. the deep levels of a single-system
+    // solve) use the multi-block split on the scalar path so the trailing GEMM fans out across
+    // SMs instead of running one block per front. Filled levels keep the fused kernel.
     dim3 grid(level_size, B);
+#ifdef CLS_NO_BIG_MB
+    const bool big_underfill = false;   // A/B baseline: fused factor_big only (no multi-block)
+#else
+    const bool big_underfill = ((long)level_size * B < factor_num_sms());
+#endif
     if (prec == Precision::FP64) {
         // FP64 uses a smaller block (128) — the scalar trailing on global memory does not
         // amortise the larger occupancy cost of a 1024-thread block at FP64 register pressure.
         constexpr int T = 128;
-        factor_big<double><<<grid, T, 0, stream>>>(
-            b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB,
-            plan.front_total, st.d_sing, do_extend);
+        if (big_underfill)
+            launch_factor_big_mb<double>(b, e, level_size, B, T, level_max_uc, plan, d_plc,
+                                         st.d_frontB, st.d_sing, do_extend, stream);
+        else
+            factor_big<double><<<grid, T, 0, stream>>>(
+                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB,
+                plan.front_total, st.d_sing, do_extend);
         return;
     }
     constexpr int bigT = 1024;
@@ -300,10 +343,14 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
         return;
     }
     // FP32 big: scalar trailing on the global front, no staging.
-    factor_big<float><<<grid, bigT, 0, stream>>>(
-        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
-        plan.front_total, st.d_sing, do_extend);
+    if (big_underfill)
+        launch_factor_big_mb<float>(b, e, level_size, B, bigT, level_max_uc, plan, d_plc,
+                                    st.d_frontBf, st.d_sing, do_extend, stream);
+    else
+        factor_big<float><<<grid, bigT, 0, stream>>>(
+            b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+            plan.front_total, st.d_sing, do_extend);
 }
 
 // ---------------------------------------------------------------------------------------
