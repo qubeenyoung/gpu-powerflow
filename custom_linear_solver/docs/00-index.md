@@ -88,6 +88,9 @@ CMake 옵션은 `CLS_INTERNAL_GRAPH` (default ON, capturable mode 일 때 OFF) �
 6. [Factorize / Solve File Layout 2026-06-06](01-orientation/06-factorize-file-layout-2026-06-06.md)
    `src/factorize/` 11파일 → **4파일** + `src/solve/` 3파일 → **4파일** 통합 정리 (양쪽 모두 phases / kernels / dispatch / scatter or permute 대칭 패턴). multifrontal.cu (627줄 → 280줄) 의 factor + solve dispatch 함수가 각 모듈로 이동. 옛 경로 → 새 경로 매핑 표. mid_warp/mid_opt 실험 커널이 `deprecated/` 로 이동.
 
+7. [Claude Refactor Instructions 2026-06-08](01-orientation/07-claude-refactor-instructions-2026-06-08.md)
+   CUTLASS/NVIDIA 관례, Google C++ Style Guide, Doxygen 스타일을 이 코드베이스에 맞춘 간결한 리팩토링 규칙. 모듈 순서, 네이밍, CUDA 파일 역할, canonical dispatch policy, 함수 분리, 문서화 기준을 정의.
+
 ## 02. Design Analysis
 
 1. [Why Custom Is Fast on Power Grid](02-design-analysis/01-why-custom-fast-on-power-grid.md)
