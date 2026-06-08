@@ -80,15 +80,45 @@ __device__ __forceinline__ void bwd_load_rhs_and_x(const T* y_global, const int*
     for (int j = t; j < cb; j += nt) xsh[j] = y_global[fr[nc + j]];
 }
 
-// Phase 2 — rhs[k] -= sum_j U[k, nc + j] * xsh[j], over k distributed across `width` threads.
+// Phase 2 — rhs[k] -= sum_j U[k, nc + j] * xsh[j], over k in [0, nc).
+//
+// Two paths sharing the same math:
+//   nc-parallel (original): each lane handles one row k, runs cb FMAs serial. Latency cb
+//                           cycles; idles (width - nc) threads. Best when nc is close to
+//                           a warp.
+//   cb-parallel (new):      lanes stride over j (xsh dimension); per-row dot is a warp
+//                           reduce. Uses 32 lanes regardless of nc; latency
+//                           nc * (ceil(cb/32) + log2(32)). Best when cb >> nc.
+//
+// Crossover on Ampere FP64 (FMA ~4 cyc, shfl ~4-5 cyc per step) lands around cb > ~7*nc.
+// Use cb > 4*nc as a slightly conservative gate so the regression band at cb ≈ nc stays
+// narrow. width >= 32 is needed for the warp reduce.
 template <typename T>
 __device__ __forceinline__ void bwd_cb_subtract(const T* F, int fsz, int nc, int cb,
                                                 const T* xsh, T* rhs, int t, int width)
 {
-    if (t < nc && t < width) {
-        T pk = T(0);
-        for (int j = 0; j < cb; ++j) pk += F[(long)t * fsz + (nc + j)] * xsh[j];
-        rhs[t] -= pk;
+    // Small tier (warp-per-front, width == 32) is where nc-parallel idles cb-nc lanes
+    // out of 32, so the cb-parallel reduction recovers utilization. In the regular
+    // tier (width > 32) the kernel already has more parallelism elsewhere; FP64-latency-
+    // bound nc-parallel actually beats the reduce-bound cb-parallel there. Empirical.
+    if (width == 32 && cb > 4 * nc) {
+        constexpr unsigned mask = 0xffffffffu;
+        if (t < 32) {
+            for (int k = 0; k < nc; ++k) {
+                T pk = T(0);
+                for (int j = t; j < cb; j += 32)
+                    pk += F[(long)k * fsz + (nc + j)] * xsh[j];
+                for (int off = 16; off > 0; off >>= 1)
+                    pk += __shfl_down_sync(mask, pk, off);
+                if (t == 0) rhs[k] -= pk;
+            }
+        }
+    } else {
+        if (t < nc && t < width) {
+            T pk = T(0);
+            for (int j = 0; j < cb; ++j) pk += F[(long)t * fsz + (nc + j)] * xsh[j];
+            rhs[t] -= pk;
+        }
     }
 }
 
