@@ -32,10 +32,10 @@ State::~State()
 {
     if (factor_graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(factor_graph_exec));
     if (solve_graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(solve_graph_exec));
-    if (d_frontB) cudaFree(d_frontB);
-    if (d_frontBf) cudaFree(d_frontBf);
-    if (d_yB) cudaFree(d_yB);
-    if (d_yBf) cudaFree(d_yBf);
+    if (d_front_batch) cudaFree(d_front_batch);
+    if (d_front_batch_f) cudaFree(d_front_batch_f);
+    if (d_y_batch) cudaFree(d_y_batch);
+    if (d_y_batch_f) cudaFree(d_y_batch_f);
     if (d_sing) cudaFree(d_sing);
     if (fork_event) cudaEventDestroy(static_cast<cudaEvent_t>(fork_event));
     for (int k = 0; k < num_subtree_streams; ++k) {
@@ -60,24 +60,24 @@ bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
            bool use_multistream_subtrees, bool tier_split)
 {
     if (plan.num_panels == 0 || B <= 0) return false;
-    st.B = B;
+    st.batch_count = B;
     st.front_total = plan.front_total;
-    st.n = plan.n;
-    st.prec = prec;
+    st.num_rows = plan.num_rows;
+    st.precision = prec;
     st.tier_split = tier_split;
     // Float-front modes: FP32 / FP16 (PTX) / TF32 (PTX) all run on the f32 arena.
     const bool float_front = is_fp32_front(prec);
     const long fe = (long)B * plan.front_total;
     if (float_front) {
-        if (cudaMalloc(&st.d_frontBf, fe * sizeof(float)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_front_batch_f, fe * sizeof(float)) != cudaSuccess) return false;
     } else {
-        if (cudaMalloc(&st.d_frontB, fe * sizeof(double)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_front_batch, fe * sizeof(double)) != cudaSuccess) return false;
     }
     // Solve working vector matches the solve precision: float for pure-FP32, double otherwise.
     if (float_front) {
-        if (cudaMalloc(&st.d_yBf, (long)B * plan.n * sizeof(float)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_y_batch_f, (long)B * plan.num_rows * sizeof(float)) != cudaSuccess) return false;
     } else {
-        if (cudaMalloc(&st.d_yB, (long)B * plan.n * sizeof(double)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_y_batch, (long)B * plan.num_rows * sizeof(double)) != cudaSuccess) return false;
     }
     if (cudaMalloc(&st.d_sing, sizeof(int)) != cudaSuccess) return false;
 
@@ -177,23 +177,23 @@ void set_stream(State& st, void* stream)
 // whichever front the active precision mode consumes.
 template <typename VT>
 static bool factorize_impl(const MultifrontalPlan& plan, State& st, const VT* d_valuesB,
-                           const int* d_o2c)
+                           const int* d_ordered_value_to_csr)
 {
     cudaStream_t stream = static_cast<cudaStream_t>(st.stream);
-    const long fe = (long)st.B * plan.front_total;
+    const long fe = (long)st.batch_count * plan.front_total;
     constexpr int T = 256;
-    const dim3 sgrid((plan.nnz_a + T - 1) / T, st.B);
+    const dim3 sgrid((plan.nnz + T - 1) / T, st.batch_count);
     // Zero + scatter A into the front the factor consumes.
     auto issue_scatter = [&]() {
         cudaMemsetAsync(st.d_sing, 0, sizeof(int), stream);
-        if (is_fp32_front(st.prec)) {
-            cudaMemsetAsync(st.d_frontBf, 0, fe * sizeof(float), stream);
-            scatter_values<float, VT><<<sgrid, T, 0, stream>>>(plan.nnz_a, plan.front_total, d_o2c,
-                                                               plan.d_a_pos, d_valuesB, st.d_frontBf);
+        if (is_fp32_front(st.precision)) {
+            cudaMemsetAsync(st.d_front_batch_f, 0, fe * sizeof(float), stream);
+            scatter_values<float, VT><<<sgrid, T, 0, stream>>>(plan.nnz, plan.front_total, d_ordered_value_to_csr,
+                                                               plan.d_a_pos, d_valuesB, st.d_front_batch_f);
         } else {
-            cudaMemsetAsync(st.d_frontB, 0, fe * sizeof(double), stream);
-            scatter_values<double, VT><<<sgrid, T, 0, stream>>>(plan.nnz_a, plan.front_total, d_o2c,
-                                                                plan.d_a_pos, d_valuesB, st.d_frontB);
+            cudaMemsetAsync(st.d_front_batch, 0, fe * sizeof(double), stream);
+            scatter_values<double, VT><<<sgrid, T, 0, stream>>>(plan.nnz, plan.front_total, d_ordered_value_to_csr,
+                                                                plan.d_a_pos, d_valuesB, st.d_front_batch);
         }
     };
 #ifdef CLS_INTERNAL_GRAPH
@@ -219,17 +219,17 @@ static bool solve_impl(const MultifrontalPlan& plan, State& st, const RT* d_rhsB
                        ST* d_solB, const int* d_perm)
 {
     cudaStream_t stream = static_cast<cudaStream_t>(st.stream);
-    const int n = plan.n;
+    const int n = plan.num_rows;
     constexpr int T = 256;
-    const dim3 vg((n + T - 1) / T, st.B);
-    const bool float_front = is_fp32_front(st.prec);
+    const dim3 vg((n + T - 1) / T, st.batch_count);
+    const bool float_front = is_fp32_front(st.precision);
     auto issue_gather = [&]() {
-        if (float_front) gather_rhs<RT, float><<<vg, T, 0, stream>>>(n, d_rhsB, d_perm, st.d_yBf);
-        else           gather_rhs<RT, double><<<vg, T, 0, stream>>>(n, d_rhsB, d_perm, st.d_yB);
+        if (float_front) gather_rhs<RT, float><<<vg, T, 0, stream>>>(n, d_rhsB, d_perm, st.d_y_batch_f);
+        else           gather_rhs<RT, double><<<vg, T, 0, stream>>>(n, d_rhsB, d_perm, st.d_y_batch);
     };
     auto issue_scatter_sol = [&]() {
-        if (float_front) scatter_sol<float, ST><<<vg, T, 0, stream>>>(n, st.d_yBf, d_perm, d_solB);
-        else           scatter_sol<double, ST><<<vg, T, 0, stream>>>(n, st.d_yB, d_perm, d_solB);
+        if (float_front) scatter_sol<float, ST><<<vg, T, 0, stream>>>(n, st.d_y_batch_f, d_perm, d_solB);
+        else           scatter_sol<double, ST><<<vg, T, 0, stream>>>(n, st.d_y_batch, d_perm, d_solB);
     };
 #ifdef CLS_INTERNAL_GRAPH
     issue_gather();
@@ -247,9 +247,9 @@ static bool solve_impl(const MultifrontalPlan& plan, State& st, const RT* d_rhsB
 
 // FP64-input entry points.
 bool factorize(const MultifrontalPlan& plan, State& st, const double* d_valuesB,
-               const int* d_o2c)
+               const int* d_ordered_value_to_csr)
 {
-    return factorize_impl<double>(plan, st, d_valuesB, d_o2c);
+    return factorize_impl<double>(plan, st, d_valuesB, d_ordered_value_to_csr);
 }
 
 bool solve(const MultifrontalPlan& plan, State& st, const double* d_rhsB,
@@ -260,9 +260,9 @@ bool solve(const MultifrontalPlan& plan, State& st, const double* d_rhsB,
 
 // FP32-input overloads (float values / RHS / solution combinations).
 bool factorize(const MultifrontalPlan& plan, State& st, const float* d_valuesB,
-               const int* d_o2c)
+               const int* d_ordered_value_to_csr)
 {
-    return factorize_impl<float>(plan, st, d_valuesB, d_o2c);
+    return factorize_impl<float>(plan, st, d_valuesB, d_ordered_value_to_csr);
 }
 
 bool solve(const MultifrontalPlan& plan, State& st, const double* d_rhsB,

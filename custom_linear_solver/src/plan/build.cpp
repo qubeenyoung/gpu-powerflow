@@ -77,7 +77,7 @@ void maybe_dump_fronts(const MultifrontalPlan& plan, const std::string& path)
     }
     std::fprintf(f, "q,p,fsz,nc,uc,level\n");
     for (int L = 0; L < plan.num_plevels; ++L) {
-        for (int q = plan.plptr[L]; q < plan.plptr[L + 1]; ++q) {
+        for (int q = plan.panel_level_ptr[L]; q < plan.panel_level_ptr[L + 1]; ++q) {
             const int p = plan.h_plcols[q];
             const int fsz = plan.h_front_ptr[p + 1] - plan.h_front_ptr[p];
             const int nc = plan.h_ncols[p];

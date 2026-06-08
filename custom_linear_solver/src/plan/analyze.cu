@@ -122,8 +122,8 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     namespace sym = custom_linear_solver::symbolic;
     auto lap = [](const char*) {};
     MultifrontalPlan plan;
-    plan.n = n;
-    plan.nnz_a = nnz_a;
+    plan.num_rows = n;
+    plan.nnz = nnz_a;
     if (n <= 0) return plan;
 
     std::vector<int> colcount(n);
@@ -190,9 +190,9 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     }
     for (int p = 0; p < P; ++p) num_plevels = std::max(num_plevels, plevel[p] + 1);
     plan.num_plevels = num_plevels;
-    plan.plptr.assign(num_plevels + 1, 0);
-    for (int p = 0; p < P; ++p) ++plan.plptr[plevel[p] + 1];
-    for (int L = 0; L < num_plevels; ++L) plan.plptr[L + 1] += plan.plptr[L];
+    plan.panel_level_ptr.assign(num_plevels + 1, 0);
+    for (int p = 0; p < P; ++p) ++plan.panel_level_ptr[plevel[p] + 1];
+    for (int L = 0; L < num_plevels; ++L) plan.panel_level_ptr[L + 1] += plan.panel_level_ptr[L];
     std::vector<int> plcols(P);
 
     if (emit_info) {  // front-size distribution + per-level structure (analyze-info dump)
@@ -225,7 +225,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         }
     }
     {
-        std::vector<int> next(plan.plptr.begin(), plan.plptr.end());
+        std::vector<int> next(plan.panel_level_ptr.begin(), plan.panel_level_ptr.end());
         for (int p = 0; p < P; ++p) plcols[next[plevel[p]]++] = p;
     }
     plan.h_plcols = plcols;
@@ -236,7 +236,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     // Each subtree is the closure of one of those roots (all descendants by panel_parent).
     {
         // Compute cnt-per-level (we already have plptr which gives cnt = plptr[L+1] - plptr[L]).
-        auto level_cnt = [&](int L) { return plan.plptr[L + 1] - plan.plptr[L]; };
+        auto level_cnt = [&](int L) { return plan.panel_level_ptr[L + 1] - plan.panel_level_ptr[L]; };
 
         // Spine: walk down from the top level while cnt == 1.
         int spine_top = num_plevels - 1;
@@ -248,7 +248,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
             // Collect spine panels in factor order (bottom -> top).
             plan.h_spine_panels.clear();
             for (int L = spine_bot; L <= spine_top; ++L) {
-                for (int q = plan.plptr[L]; q < plan.plptr[L + 1]; ++q) {
+                for (int q = plan.panel_level_ptr[L]; q < plan.panel_level_ptr[L + 1]; ++q) {
                     plan.h_spine_panels.push_back(plan.h_plcols[q]);
                 }
             }
@@ -362,7 +362,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
             // For each level: bucket panels by subtree (spine=-1 last); each subtree cell is then
             // ordered tier-major so multistream dispatch can tier-split it (see h_subtree_level_*).
             for (int L = 0; L < num_plevels; ++L) {
-                const int lo = plan.plptr[L], hi = plan.plptr[L + 1];
+                const int lo = plan.panel_level_ptr[L], hi = plan.panel_level_ptr[L + 1];
                 std::vector<int> bucketed;
                 bucketed.reserve(hi - lo);
                 for (int k = 0; k < plan.num_subtrees; ++k) {
@@ -426,7 +426,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         plan.h_level_tier_off.assign((long)num_plevels * (NT + 1), 0);
         int w = 0;
         for (int L = 0; L < num_plevels; ++L) {
-            const int lo = plan.plptr[L], hi = plan.plptr[L + 1];
+            const int lo = plan.panel_level_ptr[L], hi = plan.panel_level_ptr[L + 1];
             for (int t = 0; t < NT; ++t) {
                 plan.h_level_tier_off[(long)L * (NT + 1) + t] = w;
                 for (int q = lo; q < hi; ++q) {
@@ -466,7 +466,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     const long o_par = off;   off = al(off + (long)P * sizeof(int));
     const long o_aptr = off;  off = al(off + (long)(P + 1) * sizeof(int));
     const long o_aloc = off;  off = al(off + (long)std::max(1, plan.asm_total) * sizeof(int));
-    const long o_apos = off;  off = al(off + (long)std::max(1, plan.nnz_a) * sizeof(int));
+    const long o_apos = off;  off = al(off + (long)std::max(1, plan.nnz) * sizeof(int));
     const int front_store = mf.front_ptr[P];
     plan.front_store = front_store;
     const long o_fr = off;    off = al(off + (long)std::max(1, front_store) * sizeof(int));
@@ -478,7 +478,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     char* base = static_cast<char*>(plan.arena);
     plan.d_front = reinterpret_cast<double*>(base + o_front);
     // When the factor/solve front is float (FP32 / FP16 / TF32), allocate the float front arena.
-    if (float_front) cudaMalloc(&plan.d_frontf, (long)total * sizeof(float));
+    if (float_front) cudaMalloc(&plan.d_front_f, (long)total * sizeof(float));
     plan.d_front_off = reinterpret_cast<int*>(base + o_foff);
     plan.d_front_ptr = reinterpret_cast<int*>(base + o_fptr);
     plan.d_ncols = reinterpret_cast<int*>(base + o_nc);
@@ -490,7 +490,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     plan.d_front_rows = reinterpret_cast<int*>(base + o_fr);
     plan.d_y = reinterpret_cast<double*>(base + o_y);
     plan.d_sing = reinterpret_cast<int*>(base + o_sing);
-    if (float_front) cudaMalloc(&plan.d_yf, (long)n * sizeof(float));
+    if (float_front) cudaMalloc(&plan.d_y_f, (long)n * sizeof(float));
     int* d_panel_first = reinterpret_cast<int*>(base + o_pf);
     int* d_panel_of = reinterpret_cast<int*>(base + o_pof);
 
@@ -520,7 +520,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     const cudaError_t apos_err = cudaGetLastError();
     cudaDeviceSynchronize();
     if (apos_err != cudaSuccess) return MultifrontalPlan{};
-    plan.a_pos_unique = determine_a_pos_unique(plan.d_a_pos, plan.nnz_a, total, emit_info);
+    plan.a_pos_unique = determine_a_pos_unique(plan.d_a_pos, plan.nnz, total, emit_info);
     lap("a_pos_device");
 
 

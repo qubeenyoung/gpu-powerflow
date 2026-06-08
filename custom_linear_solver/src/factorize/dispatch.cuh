@@ -151,8 +151,8 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
                                      cudaStream_t stream, int b, int e,
                                      const int* d_plc, const int* h_plc)
 {
-    const Precision prec = st.prec;
-    const int B = st.B;
+    const Precision prec = st.precision;
+    const int B = st.batch_count;
     constexpr int do_extend = 1;
     if (e <= b) return;
     const int level_size = e - b;
@@ -180,10 +180,10 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
         const size_t shb = (size_t)kSmallTierWarpsPerBlock * FPW * fsz2cap * elt;
         if (prec == Precision::FP64)
             launch_factor_small_t<double>(SG, gx, blk, shb, stream, b, level_size, B, fsz2cap,
-                                          plan, d_plc, st.d_frontB, st.d_sing, do_extend);
+                                          plan, d_plc, st.d_front_batch, st.d_sing, do_extend);
         else
             launch_factor_small_t<float>(SG, gx, blk, shb, stream, b, level_size, B, fsz2cap,
-                                         plan, d_plc, st.d_frontBf, st.d_sing, do_extend);
+                                         plan, d_plc, st.d_front_batch_f, st.d_sing, do_extend);
         return;
     }
 
@@ -207,7 +207,7 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
             if (shb <= kMidSharedMemoryBudgetBytes) {
                 factor_mid_fp16_ptx<<<grid, mblk, shb, stream>>>(
                     b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
                     plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
                 return;
             }
@@ -233,12 +233,12 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
                 if (use_k4) {
                     factor_mid_tf32_ptx<4><<<grid, mblk, shb, stream>>>(
                         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
                         plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
                 } else {
                     factor_mid_tf32_ptx<8><<<grid, mblk, shb, stream>>>(
                         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
                         plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
                 }
                 return;
@@ -262,12 +262,12 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
                 if (prec == Precision::FP64)
                     factor_mid<double><<<grid, mblk, shb_tiled, stream>>>(
                         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
                         plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
                 else
                     factor_mid<float><<<grid, mblk, shb_tiled, stream>>>(
                         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
                         plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
                 return;
             }
@@ -292,11 +292,11 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
         constexpr int T = 128;
         if (big_underfill)
             launch_factor_big_mb<double>(b, e, level_size, B, T, level_max_uc, plan, d_plc,
-                                         st.d_frontB, st.d_sing, do_extend, stream);
+                                         st.d_front_batch, st.d_sing, do_extend, stream);
         else
             factor_big<double><<<grid, T, 0, stream>>>(
                 b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontB,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
                 plan.front_total, st.d_sing, do_extend);
         return;
     }
@@ -317,7 +317,7 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
     if (tf32_severe_underfill) {
         constexpr int bigT_tc = 512;
         launch_factor_big_mb<float>(b, e, level_size, B, bigT_tc, level_max_uc, plan, d_plc,
-                                    st.d_frontBf, st.d_sing, do_extend, stream);
+                                    st.d_front_batch_f, st.d_sing, do_extend, stream);
         return;
     }
     if (prec == Precision::FP16) {
@@ -330,7 +330,7 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
         const size_t shbytes = (size_t)2 * ucp_max * kp_max * sizeof(__half);
         factor_big_fp16_ptx<<<grid, bigT_fp16, shbytes, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
             plan.front_total, st.d_sing, do_extend, ucp_max, kp_max);
         return;
     }
@@ -345,18 +345,18 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
         const size_t shbytes = (size_t)2 * ucp_max * kp_max * sizeof(float);
         factor_big_tf32_ptx<<<grid, bigT_tf32, shbytes, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
             plan.front_total, st.d_sing, do_extend, ucp_max, kp_max);
         return;
     }
     // FP32 big: scalar trailing on the global front, no staging.
     if (big_underfill)
         launch_factor_big_mb<float>(b, e, level_size, B, bigT, level_max_uc, plan, d_plc,
-                                    st.d_frontBf, st.d_sing, do_extend, stream);
+                                    st.d_front_batch_f, st.d_sing, do_extend, stream);
     else
         factor_big<float><<<grid, bigT, 0, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_frontBf,
+            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
             plan.front_total, st.d_sing, do_extend);
 }
 
@@ -412,7 +412,7 @@ static void issue_factor_tiered(const MultifrontalPlan& plan, State& st, cudaStr
     constexpr int NS = MultifrontalPlan::kSmallTiers;
     const long small_cnt = tb[NS] - tb[0];
     const bool mixed = (tb[NT] - tb[0]) > small_cnt;  // a larger-tier front is present
-    if (st.tier_split && small_cnt > 0 && mixed && small_cnt * (long)st.B >= factor_warp_fill()) {
+    if (st.tier_split && small_cnt > 0 && mixed && small_cnt * (long)st.batch_count >= factor_warp_fill()) {
         for (int t = 0; t < NT; ++t)
             if (tb[t + 1] > tb[t])
                 issue_factor_level_range(plan, st, stream, tb[t], tb[t + 1], d_plc, h_plc);
@@ -471,7 +471,7 @@ static void issue_factor_levels(const MultifrontalPlan& plan, State& st, cudaStr
         // Spine levels (if any) on the main stream — cnt=1 chain, nothing to tier-split.
         if (plan.spine_start_level >= 0) {
             for (int L = plan.spine_start_level; L < plan.num_plevels; ++L) {
-                const int b = plan.plptr[L], e = plan.plptr[L + 1];
+                const int b = plan.panel_level_ptr[L], e = plan.panel_level_ptr[L + 1];
                 issue_factor_level_range(plan, st, stream, b, e,
                                          plan.d_plcols, plan.h_plcols.data());
             }
@@ -483,7 +483,7 @@ static void issue_factor_levels(const MultifrontalPlan& plan, State& st, cudaStr
                 issue_factor_tiered(plan, st, stream, lvl_tb + (long)L * (NT + 1),
                                     plan.d_plcols_tier, plan.h_plcols_tier.data());
             else
-                issue_factor_level_range(plan, st, stream, plan.plptr[L], plan.plptr[L + 1],
+                issue_factor_level_range(plan, st, stream, plan.panel_level_ptr[L], plan.panel_level_ptr[L + 1],
                                          plan.d_plcols, plan.h_plcols.data());
         }
     }

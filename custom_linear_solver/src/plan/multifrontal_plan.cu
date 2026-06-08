@@ -14,8 +14,8 @@ MultifrontalPlan::~MultifrontalPlan()
     if (stream && owns_stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
     if (d_spine_panels) cudaFree(d_spine_panels);
     if (d_plcols_tier) cudaFree(d_plcols_tier);
-    if (d_yf) cudaFree(d_yf);
-    if (d_frontf) cudaFree(d_frontf);
+    if (d_y_f) cudaFree(d_y_f);
+    if (d_front_f) cudaFree(d_front_f);
     if (d_pivot_offset) cudaFree(d_pivot_offset);
     if (arena) cudaFree(arena);
 }
@@ -32,20 +32,20 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         if (stream && owns_stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
         if (d_spine_panels) cudaFree(d_spine_panels);
         if (d_plcols_tier) cudaFree(d_plcols_tier);
-        if (d_yf) cudaFree(d_yf);
-        if (d_frontf) cudaFree(d_frontf);
+        if (d_y_f) cudaFree(d_y_f);
+        if (d_front_f) cudaFree(d_front_f);
         if (d_pivot_offset) cudaFree(d_pivot_offset);
         if (arena) cudaFree(arena);
 
-        n = o.n;
+        num_rows = o.num_rows;
         num_panels = o.num_panels;
         num_plevels = o.num_plevels;
-        nnz_a = o.nnz_a;
+        nnz = o.nnz;
         asm_total = o.asm_total;
         front_total = o.front_total;
         arena = o.arena;
         d_front = o.d_front;
-        d_frontf = o.d_frontf;
+        d_front_f = o.d_front_f;
         d_front_off = o.d_front_off;
         d_front_ptr = o.d_front_ptr;
         d_ncols = o.d_ncols;
@@ -57,10 +57,10 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         d_sing = o.d_sing;
         d_front_rows = o.d_front_rows;
         d_y = o.d_y;
-        d_yf = o.d_yf;
+        d_y_f = o.d_y_f;
         front_store = o.front_store;
         a_pos_unique = o.a_pos_unique;
-        plptr = std::move(o.plptr);
+        panel_level_ptr = std::move(o.panel_level_ptr);
         h_front_ptr = std::move(o.h_front_ptr);
         h_ncols = std::move(o.h_ncols);
         h_plcols = std::move(o.h_plcols);
@@ -94,8 +94,8 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         o.owns_stream = false;
         o.graph_exec = nullptr;
         o.solve_graph_exec = nullptr;
-        o.d_frontf = nullptr;
-        o.d_yf = nullptr;
+        o.d_front_f = nullptr;
+        o.d_y_f = nullptr;
         o.d_pivot_offset = nullptr;
         o.solve_graph = nullptr;
     }

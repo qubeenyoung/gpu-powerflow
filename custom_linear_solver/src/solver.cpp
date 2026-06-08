@@ -145,7 +145,7 @@ Status Solver::setup(int batch_size)
 
 Status Solver::set_stream(void* stream)
 {
-    if (!impl_ || !impl_->analyzed || impl_->state.B == 0) return Status::InvalidState;
+    if (!impl_ || !impl_->analyzed || impl_->state.batch_count == 0) return Status::InvalidState;
     custom_linear_solver::set_stream(impl_->state, stream);
     return Status::Success;
 }
@@ -158,7 +158,7 @@ Status Solver::factorize()
     if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::InvalidState;
     if (impl_->matrix.values == nullptr) return Status::InvalidState;
     // Auto-setup with batch size 1 if the caller skipped setup().
-    if (impl_->state.B == 0) {
+    if (impl_->state.batch_count == 0) {
         if (auto st = setup(1); st != Status::Success) return st;
     }
     const int* o2c = impl_->d_ordered_value_to_csr.ptr;
@@ -182,7 +182,7 @@ Status Solver::solve()
                     static_cast<cudaStream_t>(impl_ ? impl_->state.stream : nullptr));
     if (!impl_ || !impl_->has_rhs || !impl_->has_solution || !impl_->analyzed)
         return Status::InvalidState;
-    if (impl_->state.B == 0) return Status::InvalidState;
+    if (impl_->state.batch_count == 0) return Status::InvalidState;
     const int* perm = impl_->d_perm.ptr;
     bool ok = false;
     const auto rt = impl_->rhs.value_type;

@@ -7,12 +7,12 @@
 namespace custom_linear_solver::plan {
 
 struct MultifrontalPlan {
-    int n = 0, num_panels = 0, num_plevels = 0;
-    int nnz_a = 0, asm_total = 0;
+    int num_rows = 0, num_panels = 0, num_plevels = 0;
+    int nnz = 0, asm_total = 0;
     long front_total = 0;
     void* arena = nullptr;
     double* d_front = nullptr;
-    float* d_frontf = nullptr;
+    float* d_front_f = nullptr;
     int *d_front_off = nullptr, *d_front_ptr = nullptr, *d_ncols = nullptr;
     int *d_plcols = nullptr, *d_panel_parent = nullptr;
     int *d_asm_ptr = nullptr, *d_asm_local = nullptr;
@@ -20,10 +20,10 @@ struct MultifrontalPlan {
     int* d_sing = nullptr;
     int* d_front_rows = nullptr;
     double* d_y = nullptr;
-    float* d_yf = nullptr;
+    float* d_y_f = nullptr;
     int front_store = 0;
     bool a_pos_unique = false;  // true when numeric scatter can store instead of atomic-add
-    std::vector<int> plptr;
+    std::vector<int> panel_level_ptr;
     std::vector<int> h_front_ptr;  // host copy of front_ptr (per-panel front size), for kernel dispatch
     std::vector<int> h_ncols;      // host copy of panel ncols, for tensor-core shared sizing
     std::vector<int> h_plcols;     // host copy of panels-by-level order (indexes into h_front_ptr)

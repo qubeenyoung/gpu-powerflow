@@ -45,26 +45,26 @@ inline bool is_tf32_path(Precision p)
 // Per-batch runtime state. Owned by Solver; rebuilt by setup() each time batch_size or
 // precision changes. The kernel launches in multifrontal.cu read State fields directly.
 struct State {
-    int B = 0;
+    int batch_count = 0;
     long front_total = 0;
-    int n = 0;
-    Precision prec = Precision::FP64;
+    int num_rows = 0;
+    Precision precision = Precision::FP64;
     bool tier_split = true;  // occupancy-gated per-front tier split in factor/solve dispatch
-    double* d_frontB  = nullptr;   // B * front_total FP64 front (FP64 mode only)
-    float*  d_frontBf = nullptr;   // B * front_total FP32 front (FP32 / FP16 / TF32 modes)
-    double* d_yB  = nullptr;       // B * n FP64 solve working vector (FP64 mode)
-    float*  d_yBf = nullptr;       // B * n FP32 solve working vector (FP32 / FP16 / TF32 modes)
+    double* d_front_batch = nullptr;    // batch_count * front_total FP64 front (FP64 mode only)
+    float*  d_front_batch_f = nullptr;  // batch_count * front_total FP32 front (FP32 / FP16 / TF32)
+    double* d_y_batch = nullptr;        // batch_count * num_rows FP64 solve vector (FP64 mode)
+    float*  d_y_batch_f = nullptr;      // batch_count * num_rows FP32 solve vector (FP32/FP16/TF32)
     int* d_sing = nullptr;
     void* stream = nullptr;        // internal-graph mode: solver-owned; external: caller-owned
     bool  owns_stream = false;     // true only when this State created `stream`
     void* factor_graph_exec = nullptr;
     void* solve_graph_exec  = nullptr;
-    // Multi-stream subtree dispatch: each independent subtree gets its own stream (capped at 8),
-    // joined before the spine levels which run on the main stream.
+    // Multi-stream subtree dispatch: each independent subtree gets its own stream, joined before
+    // the spine levels which run on the main stream.
     int num_subtree_streams = 0;
-    void* subtree_streams[8] = {nullptr};
+    void* subtree_streams[kMaxSubtreeStreams] = {nullptr};
     void* fork_event = nullptr;
-    void* join_events[8] = {nullptr};
+    void* join_events[kMaxSubtreeStreams] = {nullptr};
     State() = default;
     ~State();
     State(const State&) = delete;
