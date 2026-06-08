@@ -147,139 +147,140 @@ static inline void launch_factor_big_mb(int b, int e, int level_size, int B, int
 //   3. Variant selection by Precision (within tier).
 //   4. Shared-memory budget check. The mid tier may overflow the 96 KB sm_86 cap for the
 //      largest (fsz, kp_max, mblk) triples; in that case it falls through to the big tier.
-static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
-                                     cudaStream_t stream, int b, int e,
-                                     const int* d_plc, const int* h_plc)
+// SMALL tier: sub-group-packed kernel. One sub-group of SG lanes owns one front; 32/SG fronts
+// pack per warp, SG chosen by max_fsz so the dominant tiny fronts keep all SG lanes busy. The
+// factor_small_sg gate keeps the classic one-warp-per-front form (SG=32) until the packed grid
+// fills the GPU.
+static void dispatch_factor_small(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
+                                  int b, int e, const int* d_plc, const LevelMetrics& m)
 {
     const Precision prec = st.precision;
     const int B = st.batch_count;
-    constexpr int do_extend = 1;
-    if (e <= b) return;
     const int level_size = e - b;
+    constexpr int do_extend = 1;
+    const long warps_un = (long)level_size * B;            // unpacked (one-warp-per-front) count
+    const int SG = factor_small_sg(m.max_fsz, warps_un), FPW = kWarpSize / SG;
+    const int blk = kSmallTierWarpsPerBlock * kWarpSize;
+    const int gx = (int)(((warps_un + FPW - 1) / FPW + kSmallTierWarpsPerBlock - 1) / kSmallTierWarpsPerBlock);
+    const int fsz2cap = m.max_fsz * m.max_fsz;
+    const size_t elt = (prec == Precision::FP64) ? sizeof(double) : sizeof(float);
+    const size_t shb = (size_t)kSmallTierWarpsPerBlock * FPW * fsz2cap * elt;
+    if (prec == Precision::FP64)
+        launch_factor_small_t<double>(SG, gx, blk, shb, stream, b, level_size, B, fsz2cap,
+                                      plan, d_plc, st.d_front_batch, st.d_sing, do_extend);
+    else
+        launch_factor_small_t<float>(SG, gx, blk, shb, stream, b, level_size, B, fsz2cap,
+                                     plan, d_plc, st.d_front_batch_f, st.d_sing, do_extend);
+}
 
-    // One host-side pass over the panels in this range to collect dispatch caps.
-    const auto [max_fsz, max_uc, level_max_nc, level_max_uc] =
-        scan_level_metrics(plan, h_plc, b, e);
+// MID tier: shared-resident kernel, one block per (front, batch). Returns false when the chosen
+// shared layout overflows the per-block budget (e.g. FP64 with a large fsz_cap), so the caller
+// falls through to the big tier on the same range.
+static bool dispatch_factor_mid(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
+                                int b, int e, const int* d_plc, const LevelMetrics& m)
+{
+    const auto& [max_fsz, max_uc, level_max_nc, level_max_uc] = m;
+    const Precision prec = st.precision;
+    const int B = st.batch_count;
+    const int level_size = e - b;
+    constexpr int do_extend = 1;
+    const int fsz_cap = max_fsz;
+    const int ucp_max = round_up_to_multiple(max_uc, 16);
+    dim3 grid(level_size, B);
 
-    // ----- SMALL tier: sub-group-packed kernel -------------------------------------------
-    // One sub-group of SG lanes owns one front; FPW = 32/SG fronts pack per warp, SMALL_WARPS
-    // warps per block. SG ≈ fsz (from the level's max_fsz) so the dominant tiny (fsz ≤ 16)
-    // ranges run 2 fronts/warp with all 16 lanes busy (vs 1 front using ~half a 32-lane warp),
-    // raising lane utilisation and per-warp memory-level parallelism on this latency-bound
-    // tier. Packing halves/quarters the warp count, so it only pays once the packed grid still
-    // fills the GPU — gate on factor_warp_fill() (the same HW occupancy quantity the tier-split
-    // uses); otherwise keep the classic one-warp-per-front form (SG=32). Composes with the
-    // tier-split: a size-homogeneous small sub-range gets the tightest SG.
-    if (classify_front_tier(max_fsz) == FrontTier::kSmall) {
-        const long warps_un = (long)level_size * B;        // unpacked (one-warp-per-front) count
-        const int SG = factor_small_sg(max_fsz, warps_un), FPW = kWarpSize / SG;
-        const int blk = kSmallTierWarpsPerBlock * kWarpSize;
-        const int gx = (int)(((warps_un + FPW - 1) / FPW + kSmallTierWarpsPerBlock - 1) / kSmallTierWarpsPerBlock);
-        const int fsz2cap = max_fsz * max_fsz;
-        const size_t elt = (prec == Precision::FP64) ? sizeof(double) : sizeof(float);
-        const size_t shb = (size_t)kSmallTierWarpsPerBlock * FPW * fsz2cap * elt;
-        if (prec == Precision::FP64)
-            launch_factor_small_t<double>(SG, gx, blk, shb, stream, b, level_size, B, fsz2cap,
-                                          plan, d_plc, st.d_front_batch, st.d_sing, do_extend);
-        else
-            launch_factor_small_t<float>(SG, gx, blk, shb, stream, b, level_size, B, fsz2cap,
-                                         plan, d_plc, st.d_front_batch_f, st.d_sing, do_extend);
-        return;
-    }
-
-    // ----- MID tier: shared-resident kernel if the smem budget fits ----------------------
-    // Grid is (level_size, B): blockIdx.x indexes the panel within the level, blockIdx.y the
-    // batch. Per-variant shared layouts and block sizes follow below.
-    if (classify_front_tier(max_fsz) == FrontTier::kMid) {
-        const int fsz_cap = max_fsz;
-        const int ucp_max = round_up_to_multiple(max_uc, 16);
-        dim3 grid(level_size, B);
-
-        if (prec == Precision::FP16) {
-            // FP16 PTX mma.m16n8k8: KP = round_up(level_max_nc, 8), capped at 32 (nc ≤ 32 by
-            // the Phase-3 fallback gate). __half staging panels, no Csc (the inline-asm mma
-            // drains to per-lane registers). Block size scales with fsz so small mid fronts
-            // do not pay the full 256-thread launch cost.
-            const int mblk = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
-            const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
-            const size_t shb = (size_t)fsz_cap * fsz_cap * sizeof(float)        // Fs
-                             + (size_t)2 * ucp_max * kp_max * sizeof(__half);   // Lh + Uh
-            if (shb <= kMidSharedMemoryBudgetBytes) {
-                factor_mid_fp16_ptx<<<grid, mblk, shb, stream>>>(
+    if (prec == Precision::FP16) {
+        // FP16 PTX mma.m16n8k8: KP = round_up(level_max_nc, 8), capped at 32 (nc ≤ 32 by
+        // the Phase-3 fallback gate). __half staging panels, no Csc (the inline-asm mma
+        // drains to per-lane registers). Block size scales with fsz so small mid fronts
+        // do not pay the full 256-thread launch cost.
+        const int mblk = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
+        const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
+        const size_t shb = (size_t)fsz_cap * fsz_cap * sizeof(float)        // Fs
+                         + (size_t)2 * ucp_max * kp_max * sizeof(__half);   // Lh + Uh
+        if (shb <= kMidSharedMemoryBudgetBytes) {
+            factor_mid_fp16_ptx<<<grid, mblk, shb, stream>>>(
+                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
+                plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
+            return true;
+        }
+    } else if (prec == Precision::TF32) {
+        // TF32 PTX hybrid. Picks K=4 vs K=8 per level by the K-padding heuristic
+        //
+        //     use_k4 ↔ round_up(nc, 4) < round_up(nc, 8)
+        //            ↔ level_max_nc % 8 ∈ {1..4}
+        //
+        // K=4 cuts the staging panel and the per-tile FLOP count by ~50% on levels whose
+        // nc lies in the lower half of an 8-step; for the rest the K=8 path avoids the
+        // extra K-loop iterations a K=4 instruction would pay. Both PTX paths omit Csc
+        // (per-lane accumulators write straight to F).
+        const int mblk = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
+        const int level_nc_clipped = std::min(level_max_nc, kTensorCorePivotColumnCap);
+        const int kp_k4 = round_up_to_multiple(level_nc_clipped, 4);
+        const int kp_k8 = round_up_to_multiple(level_nc_clipped, 8);
+        const bool use_k4 = (kp_k4 < kp_k8);
+        const int kp_max = use_k4 ? kp_k4 : kp_k8;
+        const size_t shb = (size_t)fsz_cap * fsz_cap * sizeof(float)        // Fs
+                         + (size_t)2 * ucp_max * kp_max * sizeof(float);    // Ltf + Utf
+        if (shb <= kMidSharedMemoryBudgetBytes) {
+            if (use_k4) {
+                factor_mid_tf32_ptx<4><<<grid, mblk, shb, stream>>>(
                     b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                     plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
                     plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
-                return;
+            } else {
+                factor_mid_tf32_ptx<8><<<grid, mblk, shb, stream>>>(
+                    b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
+                    plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
             }
-        } else if (prec == Precision::TF32) {
-            // TF32 PTX hybrid. Picks K=4 vs K=8 per level by the K-padding heuristic
-            //
-            //     use_k4 ↔ round_up(nc, 4) < round_up(nc, 8)
-            //            ↔ level_max_nc % 8 ∈ {1..4}
-            //
-            // K=4 cuts the staging panel and the per-tile FLOP count by ~50% on levels whose
-            // nc lies in the lower half of an 8-step; for the rest the K=8 path avoids the
-            // extra K-loop iterations a K=4 instruction would pay. Both PTX paths omit Csc
-            // (per-lane accumulators write straight to F).
-            const int mblk = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
-            const int level_nc_clipped = std::min(level_max_nc, kTensorCorePivotColumnCap);
-            const int kp_k4 = round_up_to_multiple(level_nc_clipped, 4);
-            const int kp_k8 = round_up_to_multiple(level_nc_clipped, 8);
-            const bool use_k4 = (kp_k4 < kp_k8);
-            const int kp_max = use_k4 ? kp_k4 : kp_k8;
-            const size_t shb = (size_t)fsz_cap * fsz_cap * sizeof(float)        // Fs
-                             + (size_t)2 * ucp_max * kp_max * sizeof(float);    // Ltf + Utf
-            if (shb <= kMidSharedMemoryBudgetBytes) {
-                if (use_k4) {
-                    factor_mid_tf32_ptx<4><<<grid, mblk, shb, stream>>>(
-                        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                        plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
-                } else {
-                    factor_mid_tf32_ptx<8><<<grid, mblk, shb, stream>>>(
-                        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                        plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
-                }
-                return;
-            }
-        } else {
-            // FP32 / FP64 staged-scalar mid kernel. Shared layout sized by the level cap of
-            // (nc, uc) rather than by single-panel round-ups since this kernel reuses sh_L /
-            // sh_U as compact L / U strips (not WMMA-aligned tiles).
-            const size_t elt = (prec == Precision::FP64) ? sizeof(double) : sizeof(float);
-            const size_t shb_tiled = (size_t)fsz_cap * fsz_cap * elt                  // Fs
-                                   + (size_t)2 * level_max_nc * level_max_uc * elt;   // sh_L + sh_U
-            // Underfilled levels (block count ≤ num_SMs, e.g. B=1 deep narrow levels) each run a
-            // single latency-bound block that uses only a fraction of its SM's warp slots (ncu: 8
-            // of 48 warps, 0.3% util). On the otherwise-idle GPU, widening the block to the device
-            // max parallelises the per-pivot rank-1 update over more of that SM with no occupancy
-            // cost. Once the level fills the GPU with blocks the extra width would only cost
-            // occupancy, so keep the default 256. Both the gate (num_SMs) and the wide size
-            // (maxThreadsPerBlock) are device attributes, not tuned constants. See docs/05-reports/12.
-            const int mblk = ((long)(e - b) * B <= factor_num_sms()) ? factor_max_block() : 256;
-            if (shb_tiled <= kMidSharedMemoryBudgetBytes) {
-                if (prec == Precision::FP64)
-                    factor_mid<double><<<grid, mblk, shb_tiled, stream>>>(
-                        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
-                        plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
-                else
-                    factor_mid<float><<<grid, mblk, shb_tiled, stream>>>(
-                        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                        plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
-                return;
-            }
+            return true;
         }
-        // The mid shared budget did not fit (e.g. FP64 with fsz > ~88, or a wider kp_max with
-        // a large fsz_cap). Fall through to the big tier on the same range.
+    } else {
+        // FP32 / FP64 staged-scalar mid kernel. Shared layout sized by the level cap of
+        // (nc, uc) rather than by single-panel round-ups since this kernel reuses sh_L /
+        // sh_U as compact L / U strips (not WMMA-aligned tiles).
+        const size_t elt = (prec == Precision::FP64) ? sizeof(double) : sizeof(float);
+        const size_t shb_tiled = (size_t)fsz_cap * fsz_cap * elt                  // Fs
+                               + (size_t)2 * level_max_nc * level_max_uc * elt;   // sh_L + sh_U
+        // Underfilled levels (block count ≤ num_SMs, e.g. B=1 deep narrow levels) each run a
+        // single latency-bound block that uses only a fraction of its SM's warp slots (ncu: 8
+        // of 48 warps, 0.3% util). On the otherwise-idle GPU, widening the block to the device
+        // max parallelises the per-pivot rank-1 update over more of that SM with no occupancy
+        // cost. Once the level fills the GPU with blocks the extra width would only cost
+        // occupancy, so keep the default 256. Both the gate (num_SMs) and the wide size
+        // (maxThreadsPerBlock) are device attributes, not tuned constants. See docs/05-reports/12.
+        const int mblk = ((long)(e - b) * B <= factor_num_sms()) ? factor_max_block() : 256;
+        if (shb_tiled <= kMidSharedMemoryBudgetBytes) {
+            if (prec == Precision::FP64)
+                factor_mid<double><<<grid, mblk, shb_tiled, stream>>>(
+                    b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
+                    plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
+            else
+                factor_mid<float><<<grid, mblk, shb_tiled, stream>>>(
+                    b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
+                    plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
+            return true;
+        }
     }
+    // The mid shared layout did not fit; tell the caller to fall through to the big tier.
+    return false;
+}
 
-    // ----- BIG tier: global-memory kernel ------------------------------------------------
-    // Underfilled levels (level_size × B < num_SMs, e.g. the deep levels of a single-system
-    // solve) use the multi-block split on the scalar path so the trailing GEMM fans out across
-    // SMs instead of running one block per front. Filled levels keep the fused kernel.
+// BIG tier: global-memory kernel. Underfilled levels (level_size × B < num_SMs, e.g. the deep
+// levels of a single-system solve) split the scalar path across blocks so the trailing GEMM
+// fans out across SMs instead of running one block per front; filled levels keep the fused kernel.
+static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
+                                int b, int e, const int* d_plc, const LevelMetrics& m)
+{
+    const auto& [max_fsz, max_uc, level_max_nc, level_max_uc] = m;
+    const Precision prec = st.precision;
+    const int B = st.batch_count;
+    const int level_size = e - b;
+    constexpr int do_extend = 1;
+    (void)max_fsz;
     dim3 grid(level_size, B);
 #ifdef CLS_NO_BIG_MB
     const bool big_underfill = false;   // A/B baseline: fused factor_big only (no multi-block)
@@ -358,6 +359,28 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
             plan.front_total, st.d_sing, do_extend);
+}
+
+// Per-range dispatcher: scan the panels in plcols[b..e), pick the tier from the level's max front
+// size, and dispatch one right-sized kernel. A mid range whose shared layout overflows the
+// per-block budget falls through to the big tier on the same range.
+static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
+                                     cudaStream_t stream, int b, int e,
+                                     const int* d_plc, const int* h_plc)
+{
+    if (e <= b) return;
+    const LevelMetrics m = scan_level_metrics(plan, h_plc, b, e);
+    switch (classify_front_tier(m.max_fsz)) {
+        case FrontTier::kSmall:
+            dispatch_factor_small(plan, st, stream, b, e, d_plc, m);
+            return;
+        case FrontTier::kMid:
+            if (dispatch_factor_mid(plan, st, stream, b, e, d_plc, m)) return;
+            [[fallthrough]];
+        case FrontTier::kBig:
+            dispatch_factor_big(plan, st, stream, b, e, d_plc, m);
+            return;
+    }
 }
 
 // ---------------------------------------------------------------------------------------
