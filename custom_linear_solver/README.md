@@ -31,7 +31,7 @@ defaults.
 
 | Field                            | Default      | Description                                                                                              |
 |----------------------------------|--------------|----------------------------------------------------------------------------------------------------------|
-| `precision`                      | `FP64`       | `FP64` / `FP32` / `FP16` (FP16 WMMA) / `TF32_WMMA` (V0 baseline) / `TF32` (V9h+LB PTX, recommended)      |
+| `precision`                      | `FP64`       | `FP64` / `FP32` / `FP16` (PTX) / `FP16_WMMA` alias / `TF32_WMMA` alias / `TF32` (PTX, recommended)       |
 | `panel_cap`                      | `8`          | Max panel width inside a supernode (1..64). Analyzer auto-bumps to 12 for n≥16k, 20 for n≥80k.           |
 | `use_parallel_nested_dissection` | `true`       | METIS-ND uses parallel host threads                                                                       |
 | `use_multistream_subtrees`       | `true`       | Dispatch independent subtrees on separate CUDA streams (capped at 8). Disable for single-stream debugging. |
@@ -57,15 +57,16 @@ CMake options that change build behavior:
 |-------------|---------------|----------------------------------|------------|----------------------------------|
 | `FP64`      | FP64          | scalar FP64                      | FP64       | ~1e-13                            |
 | `FP32`      | FP32          | staged-scalar FP32               | FP32       | ~1e-4                             |
-| `FP16`      | FP32          | FP16 WMMA m16n16k16              | FP32       | ~1e-3 .. 1e-4 (FP16 rounding)     |
-| `TF32_WMMA` | FP32          | TF32 WMMA m16n16k8 + Csc scratch | FP32       | ~1e-4 (TF32 rounding)             |
+| `FP16`      | FP32          | FP16 PTX mma.m16n8k16            | FP32       | ~1e-3 .. 1e-4 (FP16 rounding)     |
+| `FP16_WMMA` | FP32          | Alias for `FP16`                 | FP32       | ~1e-3 .. 1e-4 (FP16 rounding)     |
+| `TF32_WMMA` | FP32          | Alias for `TF32`                 | FP32       | ~1e-4 (TF32 rounding)             |
 | `TF32`      | FP32          | TF32 PTX mma.m16n8k8 / k4 hybrid | FP32       | ~1e-4 (TF32 rounding)             |
 
 `TF32` is the **recommended TF32 path** for power-grid Jacobians: it bakes in
 the V9h stack (`docs/03-optimization-notes/15`) and the EXP-B
 `__launch_bounds__(512, 2)` for the big tier (`docs/03-optimization-notes/17`).
-USA B=64 is ~5.7% faster than `TF32_WMMA` with zero regression across the
-measured cases. `TF32_WMMA` is kept so the V0 → V9h gain can still be measured.
+The legacy `FP16_WMMA` and `TF32_WMMA` names are accepted for compatibility, but
+they dispatch to the PTX paths.
 
 `FP16` and the TF32 modes require Ampere (sm_80+).
 
@@ -75,7 +76,7 @@ Anything you can vary at runtime from the CLI runner without rebuilding:
 
 | Axis                     | Values                                                | CLI flag           |
 |--------------------------|-------------------------------------------------------|--------------------|
-| Precision                | `fp64` / `fp32` / `fp16` / `tf32_wmma` / `tf32`       | `--precision`      |
+| Precision                | `fp64` / `fp32` / `fp16` / `fp16_wmma` / `tf32_wmma` / `tf32` | `--precision`      |
 | Batch size B             | 1, 4, 16, 64, 256, …                                  | `--batch`          |
 | Panel cap                | 1..64                                                 | `--panel-cap`      |
 | Multi-stream subtrees    | on / off                                              | `--no-multistream` |
@@ -107,7 +108,7 @@ build/custom_linear_solver/custom_linear_solver_run \
   --precision tf32 --batch 4 --repeat 5 \
   --solution-out /tmp/case30_cls_solution.mtx
 
-# Compare against the V0 TF32 WMMA baseline:
+# Compatibility alias for the TF32 PTX path:
 build/custom_linear_solver/custom_linear_solver_run \
   /datasets/matpower_linear_systems/case30 \
   --precision tf32_wmma --batch 4 --repeat 5

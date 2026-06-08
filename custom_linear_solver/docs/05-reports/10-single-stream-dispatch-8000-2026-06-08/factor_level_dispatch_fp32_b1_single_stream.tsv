@@ -1,0 +1,29 @@
+level	count	small_fronts	mid_fronts	big_fronts	max_fsz	max_nc	max_uc	dispatch_tier	kernel	threads	shared_bytes	mismatch_fronts	small_to_mid	small_to_big	mid_to_big	reason
+0	4104	4104	0	0	17	6	13	small	factor_small_single<float>	256	9248	0	0	0	0	max_fsz<=32
+1	1513	1513	0	0	20	8	17	small	factor_small_single<float>	256	12800	0	0	0	0	max_fsz<=32
+2	708	707	1	0	33	6	31	mid	factor_mid<float>	256	5844	707	707	0	0	32<max_fsz<=128 and shb<=96KB
+3	403	402	1	0	45	6	43	mid	factor_mid<float>	256	10164	402	402	0	0	32<max_fsz<=128 and shb<=96KB
+4	241	240	1	0	55	8	47	mid	factor_mid<float>	256	15108	240	240	0	0	32<max_fsz<=128 and shb<=96KB
+5	148	147	1	0	49	8	45	mid	factor_mid<float>	256	12484	147	147	0	0	32<max_fsz<=128 and shb<=96KB
+6	99	97	2	0	74	8	66	mid	factor_mid<float>	256	26128	97	97	0	0	32<max_fsz<=128 and shb<=96KB
+7	61	55	6	0	68	8	64	mid	factor_mid<float>	256	22592	55	55	0	0	32<max_fsz<=128 and shb<=96KB
+8	38	33	5	0	72	8	64	mid	factor_mid<float>	256	24832	33	33	0	0	32<max_fsz<=128 and shb<=96KB
+9	28	21	7	0	64	8	56	mid	factor_mid<float>	256	19968	21	21	0	0	32<max_fsz<=128 and shb<=96KB
+10	22	19	3	0	56	8	48	mid	factor_mid<float>	256	15616	19	19	0	0	32<max_fsz<=128 and shb<=96KB
+11	17	13	4	0	60	8	52	mid	factor_mid<float>	256	17728	13	13	0	0	32<max_fsz<=128 and shb<=96KB
+12	12	9	3	0	60	8	52	mid	factor_mid<float>	256	17728	9	9	0	0	32<max_fsz<=128 and shb<=96KB
+13	9	5	4	0	58	8	50	mid	factor_mid<float>	256	16656	5	5	0	0	32<max_fsz<=128 and shb<=96KB
+14	6	4	2	0	50	8	42	mid	factor_mid<float>	256	12688	4	4	0	0	32<max_fsz<=128 and shb<=96KB
+15	4	3	1	0	45	8	37	mid	factor_mid<float>	256	10468	3	3	0	0	32<max_fsz<=128 and shb<=96KB
+16	4	2	2	0	37	8	31	mid	factor_mid<float>	256	7460	2	2	0	0	32<max_fsz<=128 and shb<=96KB
+17	3	2	1	0	40	8	32	mid	factor_mid<float>	256	8448	2	2	0	0	32<max_fsz<=128 and shb<=96KB
+18	2	1	1	0	47	8	39	mid	factor_mid<float>	256	11332	1	1	0	0	32<max_fsz<=128 and shb<=96KB
+19	1	0	1	0	39	8	31	mid	factor_mid<float>	256	8068	0	0	0	0	32<max_fsz<=128 and shb<=96KB
+20	1	0	1	0	57	8	49	mid	factor_mid<float>	256	16132	0	0	0	0	32<max_fsz<=128 and shb<=96KB
+21	1	0	1	0	55	8	47	mid	factor_mid<float>	256	15108	0	0	0	0	32<max_fsz<=128 and shb<=96KB
+22	1	0	1	0	47	8	39	mid	factor_mid<float>	256	11332	0	0	0	0	32<max_fsz<=128 and shb<=96KB
+23	1	0	1	0	39	8	31	mid	factor_mid<float>	256	8068	0	0	0	0	32<max_fsz<=128 and shb<=96KB
+24	1	1	0	0	31	8	23	small	factor_small_single<float>	256	30752	0	0	0	0	max_fsz<=32
+25	1	1	0	0	23	8	15	small	factor_small_single<float>	256	16928	0	0	0	0	max_fsz<=32
+26	1	1	0	0	15	8	7	small	factor_small_single<float>	256	7200	0	0	0	0	max_fsz<=32
+27	1	1	0	0	7	7	0	small	factor_small_single<float>	256	1568	0	0	0	0	max_fsz<=32
