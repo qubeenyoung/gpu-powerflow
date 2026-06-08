@@ -170,25 +170,29 @@ __device__ __forceinline__ void lu_panel_factor(T* F, int fsz, int nc, int t, in
     }
 }
 
-template <typename FT>
-__device__ __forceinline__ void lu_small_warp(FT* F, int fsz, int nc, int lane, int* sing)
+// SG = sub-group lane count (8 / 16 / 32). One sub-group of SG lanes owns one front; SG=32 is
+// the classic one-warp-per-front form. `sl` is the lane within the sub-group (0..SG-1) and
+// `mask` the sub-group's active-lane mask. Tiny fronts (fsz ≤ SG) keep all SG lanes busy
+// instead of idling 32−fsz of a warp, and packing 32/SG fronts per warp raises memory-level
+// parallelism on this latency-bound tier (see factorize/dispatch.cuh).
+template <typename FT, int SG>
+__device__ __forceinline__ void lu_small_warp(FT* F, int fsz, int nc, int sl, unsigned mask,
+                                              int* sing)
 {
-    // Same algorithm as lu_small_front but the barrier is __syncwarp instead of
-    // __syncthreads — exactly one warp (32 lanes) owns this front.
     for (int k = 0; k < nc; ++k) {
         FT piv = F[(long)k * fsz + k];
         if (piv == FT(0)) {
-            if (lane == 0) *sing = 1;
+            if (sl == 0) *sing = 1;
             piv = FT(1);
         }
-        for (int i = k + 1 + lane; i < fsz; i += 32) F[(long)i * fsz + k] /= piv;
-        __syncwarp();
+        for (int i = k + 1 + sl; i < fsz; i += SG) F[(long)i * fsz + k] /= piv;
+        __syncwarp(mask);
         const int m = fsz - k - 1;
-        for (int e = lane; e < m * m; e += 32) {
+        for (int e = sl; e < m * m; e += SG) {
             const int ii = k + 1 + e / m, jj = k + 1 + e % m;
             F[(long)ii * fsz + jj] -= F[(long)ii * fsz + k] * F[(long)k * fsz + jj];
         }
-        __syncwarp();
+        __syncwarp(mask);
     }
 }
 
@@ -227,8 +231,7 @@ __device__ __forceinline__ void u_panel_solve(T* F, int fsz, int nc, int uc, int
 //   --------------------------------+------------------------------+------------------------
 //   trailing_update_scalar<T>       | direct dot products on F     | FP64 (mid+big), scalar fallback
 //   trailing_update_staged<T>       | staged-shared scalar         | FP32 (mid)
-//   trailing_update_wmma_fp16       | FP16 WMMA m16n16k16 + Csc    | FP16 (mid+big)
-//   trailing_update_wmma_tf32       | TF32 WMMA m16n16k8 + Csc     | TF32_WMMA (mid+big)
+//   trailing_update_mma_fp16_ptx    | FP16 PTX mma.m16n8k8         | FP16 (mid+big)
 //   trailing_update_mma_tf32_ptx    | TF32 PTX mma.m16n8k8         | TF32 (mid+big k=8)
 //   trailing_update_mma_tf32_k4_ptx | TF32 PTX mma.m16n8k4         | TF32 (mid k=4, hybrid)
 //
@@ -239,22 +242,16 @@ __device__ __forceinline__ void u_panel_solve(T* F, int fsz, int nc, int uc, int
 //   (c) Subtract C' from C in place: F[(nc + ii), (nc + jj)] -= C'[ii, jj], with
 //       (ii, jj) bounds-checked against uc × uc since the staging buffer is round-up padded.
 //
-// Why the WMMA variants need a per-warp Csc smem scratch (steps (b) → (c)):
-//
-//   wmma::store_matrix_sync is the only public way to read a WMMA accumulator fragment;
-//   it writes the fragment to a typed memory region. So:
-//       (i)   wmma::mma_sync produces a 16×16 accumulator fragment per warp.
-//       (ii)  wmma::store_matrix_sync(&Csc[warp * 256], cf, 16, row_major) spills the tile
-//             into per-warp scratch.
-//       (iii) The warp re-reads Csc, bounds-checks against uc × uc, and subtracts from F.
-//   Cost: 1 KB / warp / 16×16 tile of smem round-trip + an extra __syncwarp.
-//
-//   The PTX variants skip (ii)/(iii) by calling `mma.sync` directly through inline asm and
-//   exploiting the per-lane accumulator register layout: each lane owns exactly four FP32
-//   entries at known (row, col) offsets, so it subtracts straight from F under one bounds
-//   check. The layout is empirically verified — the PTX ISA documentation suggests one
-//   mapping that does not match what nvcc actually emits, so each shape was probed at
-//   runtime before being baked in.
+// All Tensor-Core trailing variants here are PTX (inline-asm `mma.sync`), not WMMA. The PTX
+// form calls the instruction directly and exploits the per-lane accumulator register layout:
+// each lane owns exactly four FP32 entries at known (row, col) offsets, so it subtracts
+// straight from F under one bounds check — no `wmma::store_matrix_sync` → smem-scratch →
+// reload round-trip, and no per-warp Csc scratch. The m16n8 accumulator (C) layout is shared
+// by every shape used here (FP16 and TF32, K∈{4,8}): with groupID = lane >> 2 and
+// tid = lane & 3, the four FP32 regs map to (row, col) = (groupID{,+8}, 2·tid{,+1}). The
+// multiplicand (A/B) layouts differ per element type and are empirically verified — the PTX
+// ISA documentation suggests one mapping that does not always match what nvcc actually emits,
+// so each shape was probed at runtime before being baked in.
 
 template <typename T>
 __device__ __forceinline__ void trailing_update_scalar(T* F, int fsz, int nc, int uc, int t,
@@ -295,106 +292,133 @@ __device__ __forceinline__ void trailing_update_staged(T* F, int fsz, int nc, in
     }
 }
 
-// FP16 input WMMA, FP32 accumulate. Csc is the per-warp 256-float fragment-readback scratch
-// described in the section header above.
-__device__ __forceinline__ void trailing_update_wmma_fp16(float* F, int fsz, int nc, int uc,
-                                                          __half* Lh, __half* Uh, float* Csc,
-                                                          int ucp_stride, int t, int nt)
+// ---------------------------------------------------------------------------------------
+//  FP16 PTX K=8       (mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32)
+//
+// FP16 inputs, FP32 accumulate. Per-lane register-direct trailing, structurally identical to
+// the TF32 K=8 path below (same 16×8 output tile, same (ti, kc, tj8) A-reuse loop, same drain
+// into F) — the only differences are that the staging panels hold __half and that FP16 packs
+// two elements per 32-bit register, so m16n8k8.f16 takes 2 A-regs + 1 B-reg instead of TF32's
+// 4 + 2.
+//
+// Per-lane multiplicand layout (probed). groupID = laneR = lane >> 2 (0..7); tid = lane & 3
+// (0..3); laneC = tid * 2 ∈ {0,2,4,6}:
+//   A (16×8, row-major Lh, ld = KP): two .f16 packed per reg, contiguous in K →
+//       a0 = pack(A[laneR + 0, laneC], A[laneR + 0, laneC + 1])   (M_top, K pair)
+//       a1 = pack(A[laneR + 8, laneC], A[laneR + 8, laneC + 1])   (M_bot, K pair)
+//     loadable as a single 4-byte read of two adjacent halves (laneC even ⇒ aligned).
+//   B (8×8, row-major Uh, ld = UCP): two .f16 packed per reg, contiguous in K (stride UCP in
+//     memory, so packed explicitly) →
+//       b0 = pack(B[laneC, laneR], B[laneC + 1, laneR])           (K pair, N = laneR)
+//   C accumulator: identical to every m16n8 shape — see the section header.
+__device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, int nc, int uc,
+                                                             __half* Lh, __half* Uh,
+                                                             int t, int nt)
 {
-    namespace wmma = nvcuda::wmma;
-    // (a) Stage L → Lh (UCP × KP) and U → Uh (KP × UCP), padded with zeros. WMMA m16n16k16
-    //     requires both K-dimension and the panel dimensions to be multiples of 16.
     const int UCP = ((uc + 15) / 16) * 16;
-    const int KP = ((nc + 15) / 16) * 16;
-    for (int e = t; e < UCP * KP; e += nt) {
-        const int i = e / KP, k = e % KP;
-        Lh[e] = (i < uc && k < nc) ? __float2half(F[(long)(nc + i) * fsz + k]) : __float2half(0.0f);
-    }
-    for (int e = t; e < KP * UCP; e += nt) {
-        const int k = e / UCP, j = e % UCP;
-        Uh[k * ucp_stride + j] =
-            (k < nc && j < uc) ? __float2half(F[(long)k * fsz + (nc + j)]) : __float2half(0.0f);
-    }
-    __syncthreads();
-    // (b) GEMM. One warp owns one 16-row strip ti; A-fragments are loaded once per K-tile
-    //     and reused across all N tiles. B-fragments are loaded per (kc, tj) pair.
-    const int ntj = UCP / 16, nks = KP / 16;
-    const int warp = t >> 5, nwarp = nt >> 5, lane = t & 31;
-    for (int ti = warp; ti < ntj; ti += nwarp) {
-        wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> af[2];
-        for (int kc = 0; kc < nks; ++kc)
-            wmma::load_matrix_sync(af[kc], &Lh[(ti * 16) * KP + kc * 16], KP);
-        for (int tj = 0; tj < ntj; ++tj) {
-            wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;
-            wmma::fill_fragment(cf, 0.0f);
-            for (int kc = 0; kc < nks; ++kc) {
-                wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> bf;
-                wmma::load_matrix_sync(bf, &Uh[(kc * 16) * ucp_stride + tj * 16], ucp_stride);
-                wmma::mma_sync(cf, af[kc], bf, cf);
-            }
-            // (c) Store fragment to Csc, then re-read and subtract from F under uc bounds checks.
-            wmma::store_matrix_sync(&Csc[warp * 256], cf, 16, wmma::mem_row_major);
-            __syncwarp();
-            for (int e = lane; e < 256; e += 32) {
-                const int r = e >> 4, c = e & 15;
-                const int ii = ti * 16 + r, jj = tj * 16 + c;
-                if (ii < uc && jj < uc) F[(long)(nc + ii) * fsz + (nc + jj)] -= Csc[warp * 256 + e];
-            }
-            __syncwarp();
-        }
-    }
-}
+    const int KP  = ((nc + 7)  / 8)  * 8;
 
-// TF32 input WMMA, FP32 accumulate. Same Csc fragment-readback pattern as the FP16 variant;
-// staging panels hold float (TF32 inputs are bit-aliased FP32) instead of __half.
-__device__ __forceinline__ void trailing_update_wmma_tf32(float* F, int fsz, int nc, int uc,
-                                                          float* Ltf, float* Utf,
-                                                          float* Csc, int t, int nt)
-{
-    namespace wmma = nvcuda::wmma;
-    // (a) Stage L → Ltf (UCP × KP) and U → Utf (KP × UCP). TF32 m16n16k8 takes a K-tile of
-    //     8 instead of 16, so KP rounds nc up to 8.
-    const int UCP = ((uc + 15) / 16) * 16;
-    const int KP = ((nc + 7) / 8) * 8;
+    // (a) Stage L → Lh and U → Uh as __half, padded with zeros.
     for (int e = t; e < UCP * KP; e += nt) {
         const int i = e / KP, k = e % KP;
-        Ltf[e] = (i < uc && k < nc)
-                     ? wmma::__float_to_tf32(F[(long)(nc + i) * fsz + k])
-                     : 0.0f;
+        Lh[e] = (i < uc && k < nc) ? __float2half(F[(long)(nc + i) * fsz + k]) : __half(0.0f);
     }
     for (int e = t; e < KP * UCP; e += nt) {
         const int k = e / UCP, j = e % UCP;
-        Utf[e] = (k < nc && j < uc)
-                     ? wmma::__float_to_tf32(F[(long)k * fsz + (nc + j)])
-                     : 0.0f;
+        Uh[e] = (k < nc && j < uc) ? __float2half(F[(long)k * fsz + (nc + j)]) : __half(0.0f);
     }
     __syncthreads();
-    // (b) GEMM. Same A-load reuse pattern as the FP16 variant, scaled to the K=8 tile.
-    const int ntj = UCP / 16, nks = KP / 8;
-    const int warp = t >> 5, nwarp = nt >> 5, lane = t & 31;
-    for (int ti = warp; ti < ntj; ti += nwarp) {
-        wmma::fragment<wmma::matrix_a, 16, 16, 8, wmma::precision::tf32,
-                       wmma::row_major> af[4];
-        for (int kc = 0; kc < nks; ++kc)
-            wmma::load_matrix_sync(af[kc], &Ltf[(ti * 16) * KP + kc * 8], KP);
-        for (int tj = 0; tj < ntj; ++tj) {
-            wmma::fragment<wmma::accumulator, 16, 16, 8, float> cf;
-            wmma::fill_fragment(cf, 0.0f);
+
+    const int ntj16 = UCP / 16;            // 16-row tiles (M)
+    const int ntj8  = UCP / 8;             // 8-col tiles  (N)
+    const int nks   = KP  / 8;             // K-loop count (mma K=8)
+    const int warp  = t >> 5;
+    const int nwarp = nt >> 5;
+    const int lane  = t & 31;
+    const int laneR = lane >> 2;           // 0..7
+    const int laneC = (lane & 3) * 2;      // 0,2,4,6
+
+    // A-reuse hoisted path. Capped at NTJ8_MAX = 8 N-tiles (UCP ≤ 64); the unrolled tj8 loop
+    // keeps the per-tile accumulators in named registers for the inline-asm "+f" binding.
+    constexpr int NTJ8_MAX = 8;
+    if (ntj8 <= NTJ8_MAX) {
+        for (int ti = warp; ti < ntj16; ti += nwarp) {
+            const int r_top = ti * 16 + laneR;
+            const int r_bot = r_top + 8;
+            float c[NTJ8_MAX][4];
+            #pragma unroll
+            for (int j = 0; j < NTJ8_MAX; ++j) { c[j][0]=c[j][1]=c[j][2]=c[j][3]=0.f; }
+            // (b) Outer K loop: load A once per K-tile (two contiguous halves → one 4-byte
+            //     read), then sweep all N tiles inside.
             for (int kc = 0; kc < nks; ++kc) {
-                wmma::fragment<wmma::matrix_b, 16, 16, 8, wmma::precision::tf32,
-                               wmma::row_major> bf;
-                wmma::load_matrix_sync(bf, &Utf[(kc * 8) * UCP + tj * 16], UCP);
-                wmma::mma_sync(cf, af[kc], bf, cf);
+                const unsigned a0 = *reinterpret_cast<const unsigned*>(
+                    &Lh[(long)(ti * 16 + laneR + 0) * KP + kc * 8 + laneC]);
+                const unsigned a1 = *reinterpret_cast<const unsigned*>(
+                    &Lh[(long)(ti * 16 + laneR + 8) * KP + kc * 8 + laneC]);
+                #pragma unroll
+                for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                    if (tj8 >= ntj8) break;
+                    // B pair is strided by UCP in memory → pack the two halves by hand.
+                    const __half2 bh = __halves2half2(
+                        Uh[(long)(kc * 8 + laneC + 0) * UCP + tj8 * 8 + laneR],
+                        Uh[(long)(kc * 8 + laneC + 1) * UCP + tj8 * 8 + laneR]);
+                    const unsigned b0 = *reinterpret_cast<const unsigned*>(&bh);
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+                        "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};\n"
+                        : "+f"(c[tj8][0]), "+f"(c[tj8][1]), "+f"(c[tj8][2]), "+f"(c[tj8][3])
+                        : "r"(a0), "r"(a1), "r"(b0));
+                }
             }
-            // (c) Store fragment to Csc, then re-read and subtract from F.
-            wmma::store_matrix_sync(&Csc[warp * 256], cf, 16, wmma::mem_row_major);
-            __syncwarp();
-            for (int e = lane; e < 256; e += 32) {
-                const int r = e >> 4, c = e & 15;
-                const int ii = ti * 16 + r, jj = tj * 16 + c;
-                if (ii < uc && jj < uc) F[(long)(nc + ii) * fsz + (nc + jj)] -= Csc[warp * 256 + e];
+            // (c) Drain accumulators straight into F with uc bounds checks.
+            #pragma unroll
+            for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                if (tj8 >= ntj8) break;
+                const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
+                if (r_top < uc) {
+                    if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c[tj8][0];
+                    if (col1 < uc) F[(long)(nc + r_top) * fsz + (nc + col1)] -= c[tj8][1];
+                }
+                if (r_bot < uc) {
+                    if (col0 < uc) F[(long)(nc + r_bot) * fsz + (nc + col0)] -= c[tj8][2];
+                    if (col1 < uc) F[(long)(nc + r_bot) * fsz + (nc + col1)] -= c[tj8][3];
+                }
             }
-            __syncwarp();
+        }
+        return;
+    }
+
+    // Fall-through for UCP > 64 (big-tier strips wider than NTJ8_MAX × 8). The (ti, tj8, kc)
+    // ordering reloads A per tj8, but the absolute A-reuse saving is smaller at this size.
+    for (int ti = warp; ti < ntj16; ti += nwarp) {
+        const int r_top = ti * 16 + laneR;
+        const int r_bot = r_top + 8;
+        for (int tj8 = 0; tj8 < ntj8; ++tj8) {
+            float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
+            for (int kc = 0; kc < nks; ++kc) {
+                const unsigned a0 = *reinterpret_cast<const unsigned*>(
+                    &Lh[(long)(ti * 16 + laneR + 0) * KP + kc * 8 + laneC]);
+                const unsigned a1 = *reinterpret_cast<const unsigned*>(
+                    &Lh[(long)(ti * 16 + laneR + 8) * KP + kc * 8 + laneC]);
+                const __half2 bh = __halves2half2(
+                    Uh[(long)(kc * 8 + laneC + 0) * UCP + tj8 * 8 + laneR],
+                    Uh[(long)(kc * 8 + laneC + 1) * UCP + tj8 * 8 + laneR]);
+                const unsigned b0 = *reinterpret_cast<const unsigned*>(&bh);
+                asm volatile(
+                    "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+                    "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};\n"
+                    : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
+                    : "r"(a0), "r"(a1), "r"(b0));
+            }
+            const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
+            if (r_top < uc) {
+                if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c0;
+                if (col1 < uc) F[(long)(nc + r_top) * fsz + (nc + col1)] -= c1;
+            }
+            if (r_bot < uc) {
+                if (col0 < uc) F[(long)(nc + r_bot) * fsz + (nc + col0)] -= c2;
+                if (col1 < uc) F[(long)(nc + r_bot) * fsz + (nc + col1)] -= c3;
+            }
         }
     }
 }

@@ -13,6 +13,7 @@ MultifrontalPlan::~MultifrontalPlan()
     if (solve_graph) cudaGraphDestroy(static_cast<cudaGraph_t>(solve_graph));
     if (stream && owns_stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
     if (d_spine_panels) cudaFree(d_spine_panels);
+    if (d_plcols_tier) cudaFree(d_plcols_tier);
     if (d_yf) cudaFree(d_yf);
     if (d_frontf) cudaFree(d_frontf);
     if (d_pivot_offset) cudaFree(d_pivot_offset);
@@ -30,6 +31,7 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         if (solve_graph) cudaGraphDestroy(static_cast<cudaGraph_t>(solve_graph));
         if (stream && owns_stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
         if (d_spine_panels) cudaFree(d_spine_panels);
+        if (d_plcols_tier) cudaFree(d_plcols_tier);
         if (d_yf) cudaFree(d_yf);
         if (d_frontf) cudaFree(d_frontf);
         if (d_pivot_offset) cudaFree(d_pivot_offset);
@@ -74,6 +76,11 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         h_subtree_of_panel = std::move(o.h_subtree_of_panel);
         h_subtree_level_off = std::move(o.h_subtree_level_off);
         h_subtree_level_cnt = std::move(o.h_subtree_level_cnt);
+        h_subtree_level_tier_off = std::move(o.h_subtree_level_tier_off);
+        h_plcols_tier = std::move(o.h_plcols_tier);
+        h_level_tier_off = std::move(o.h_level_tier_off);
+        d_plcols_tier = o.d_plcols_tier;
+        o.d_plcols_tier = nullptr;
         d_spine_panels = o.d_spine_panels;
         o.d_spine_panels = nullptr;
         stream = o.stream;

@@ -19,30 +19,27 @@ namespace custom_linear_solver {
 //
 //   FP64       – everything double. Reference accuracy (~1e-13), slowest factor.
 //   FP32       – the whole front is float. ~1e-4 accurate, ~2x faster than FP64 on RTX 3090.
-//   FP16       – FP32 front + FP16 tensor-core (WMMA) trailing GEMM with FP32 accumulate.
-//                Accuracy tracks FP32 except for the FP16 rounding of trailing contributions.
-//   TF32_WMMA  – FP32 front + TF32 WMMA m16n16k8 trailing GEMM with FP32 accumulate.
-//                Baseline TF32 path (docs/03-optimization-notes/15 §1, "V0").
-//                Kept for fp32/fp16/tf32-wmma/tf32-ptx benchmark comparisons.
+//   FP16       – FP32 front + FP16 PTX mma.m16n8k8 trailing GEMM with FP32 accumulate
+//                (per-lane register drain, no Csc readback; big fronts use
+//                __launch_bounds__(512, 2)). Accuracy tracks FP32 except for the FP16 rounding
+//                of trailing contributions.
 //   TF32       – FP32 front + TF32 PTX mma.m16n8k8 trailing GEMM + per-level k4/k8 hybrid for
 //                mid fronts + __launch_bounds__(512, 2) for big fronts (docs/15 V9h + docs/17
-//                EXP-B). Recommended TF32 path on power-grid Jacobians (USA B=64 −5.7% wall vs
-//                TF32_WMMA, no regression across measured cases).
+//                EXP-B). Recommended path on power-grid Jacobians.
 //
-// FP16 and the TF32 modes require Ampere (sm80+).
-enum class Precision { FP64, FP32, FP16, TF32_WMMA, TF32 };
+// FP16 and TF32 require Ampere (sm80+).
+enum class Precision { FP64, FP32, FP16, TF32 };
 
 // Small utilities used by both the runtime wrapper (multifrontal.cu) and the dispatchers
 // (factorize/dispatch.cuh, solve/dispatch.cuh). Defined here so there is one canonical copy.
 inline bool is_fp32_front(Precision p)
 {
-    return p == Precision::FP32 || p == Precision::FP16 ||
-           p == Precision::TF32_WMMA || p == Precision::TF32;
+    return p == Precision::FP32 || p == Precision::FP16 || p == Precision::TF32;
 }
 
 inline bool is_tf32_path(Precision p)
 {
-    return p == Precision::TF32_WMMA || p == Precision::TF32;
+    return p == Precision::TF32;
 }
 
 inline int round_up_int(int x, int align)
@@ -57,6 +54,7 @@ struct State {
     long front_total = 0;
     int n = 0;
     Precision prec = Precision::FP64;
+    bool tier_split = true;  // occupancy-gated per-front tier split in factor/solve dispatch
     double* d_frontB  = nullptr;   // B * front_total FP64 front (FP64 mode only)
     float*  d_frontBf = nullptr;   // B * front_total FP32 front (FP32 / FP16 / TF32 modes)
     double* d_yB  = nullptr;       // B * n FP64 solve working vector (FP64 mode)
@@ -87,7 +85,7 @@ struct State {
 // dispatch each on its own CUDA stream. Set false to force single-stream dispatch (debugging /
 // reproducibility); when there is only one subtree the flag has no effect.
 bool setup(const plan::MultifrontalPlan& plan, int B, Precision prec, State& state,
-           bool use_multistream_subtrees = true);
+           bool use_multistream_subtrees = true, bool tier_split = true);
 
 // Bind a caller-owned cudaStream_t (passed as void*). External / capturable mode only.
 void set_stream(State& state, void* stream);

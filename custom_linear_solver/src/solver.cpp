@@ -137,7 +137,8 @@ Status Solver::setup(int batch_size)
     if (!impl_ || !impl_->analyzed) return Status::InvalidState;
     if (batch_size <= 0) return Status::InvalidValue;
     return custom_linear_solver::setup(impl_->plan, batch_size, impl_->config.precision,
-                                       impl_->state, impl_->config.use_multistream_subtrees)
+                                       impl_->state, impl_->config.use_multistream_subtrees,
+                                       impl_->config.tier_split)
                ? Status::Success
                : Status::AllocationFailed;
 }

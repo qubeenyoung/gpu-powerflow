@@ -27,6 +27,21 @@ struct MultifrontalPlan {
     std::vector<int> h_plcols;     // host copy of panels-by-level order (indexes into h_front_ptr)
     std::vector<int> h_front_off;  // host copy of front_off (per-panel arena offset), for per-panel cuBLAS dispatch
 
+    // Tier-homogeneous dispatch order. Same panels as h_plcols, but within each level the panels
+    // are grouped by kernel tier (small ≤32 / mid ≤128 / big) so the single-stream factor walk can
+    // launch one right-sized kernel per (level, tier) instead of promoting a whole mixed level to
+    // its largest front's tier. Tier edges must match tier_of in plan/analyze.cu and SMALL_THRESH /
+    // MID_THRESH in factorize/dispatch.cuh:  0: fsz ≤ 32 (small) | 1: 33..128 (mid) | 2: ≥129 (big).
+    // (A finer 5-class split of the small region was measured but only added ~2% at high B while
+    // regressing B=1 on the largest case — see docs/05-reports/11 — so the 3-tier split is kept.)
+    // h_level_tier_off has stride (kNumTiers+1) per level: entry [L*(kNumTiers+1)+t] is the
+    // absolute start in h_plcols_tier of tier t at level L; [...+kNumTiers] is the level end.
+    static constexpr int kNumTiers = 3;
+    static constexpr int kSmallTiers = 1;  // leading tiers (fsz ≤ 32) that use the small kernel
+    std::vector<int> h_plcols_tier;     // P entries: level-major, tier-contiguous within level
+    std::vector<int> h_level_tier_off;  // num_plevels * (kNumTiers+1) CSR offsets
+    int* d_plcols_tier = nullptr;       // device mirror of h_plcols_tier
+
     // Phase Σ.8 — within-panel partial pivoting infrastructure (CLS_USE_PIVOTING=1).
     // pivot_offset[p] = prefix sum of ncols[0..p-1], giving the start of panel p's pivots in
     // the per-system pivot array (length = sum_p ncols[p] = n). Total per-batch pivot storage
@@ -56,6 +71,12 @@ struct MultifrontalPlan {
     // spine kernel (Phase 4). Sized K * num_plevels.
     std::vector<int> h_subtree_level_off;
     std::vector<int> h_subtree_level_cnt;
+    // Per-(subtree, level) tier boundaries into h_plcols/d_plcols. Each subtree-level cell in
+    // h_plcols is tier-sorted internally (same tier classes as h_level_tier_off), so the multistream
+    // factor/solve dispatch can tier-split each cell exactly like the single-stream walk. Stride
+    // (kNumTiers+1) per (k, L): entry [(k*num_plevels+L)*(kNumTiers+1)+t] is the absolute start in
+    // h_plcols of tier t within that cell; [...+kNumTiers] is the cell end. Empty when no subtrees.
+    std::vector<int> h_subtree_level_tier_off;
 
     void* stream = nullptr;
     bool owns_stream = false;

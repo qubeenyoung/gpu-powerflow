@@ -30,6 +30,64 @@ using custom_linear_solver::plan::MultifrontalPlan;
 
 namespace {
 
+// HW warp-slot count (SMs × warps/SM) — the GPU-fill quantity used by the small-tier sub-group
+// gate (mirrors factorize/dispatch.cuh factor_warp_fill()).
+static long solve_warp_fill()
+{
+    static const long v = [] {
+        int dev = 0; cudaGetDevice(&dev);
+        int sm = 1, tpm = 1536;
+        cudaDeviceGetAttribute(&sm, cudaDevAttrMultiProcessorCount, dev);
+        cudaDeviceGetAttribute(&tpm, cudaDevAttrMaxThreadsPerMultiProcessor, dev);
+        return (long)sm * (tpm / 32);
+    }();
+    return v;
+}
+
+// Small-tier sub-group size: SG ∈ {8,16,32}; packing (SG<32) only applies once the packed grid
+// still fills the GPU (mirrors factorize/dispatch.cuh). Shared by the fwd and bwd small launches.
+static int solve_small_sg(int max_fsz, long warps_unpacked)
+{
+#ifdef CLS_SMALL_SG32_ONLY
+    (void)max_fsz; (void)warps_unpacked;
+    return 32;
+#else
+    int sg = (max_fsz <= 8) ? 8 : (max_fsz <= 16 ? 16 : 32);
+    if (warps_unpacked / (32 / sg) < solve_warp_fill()) sg = 32;
+    return sg;
+#endif
+}
+
+// One launch of a sub-group-packed small solve kernel (forward or backward), with the
+// (front type, SG) resolved at the call site. solve_fwd_small / solve_bwd_small share a
+// signature; `fwd` selects which, `slab` is the per-sub-group shared slab.
+template <typename FT, int SG>
+static inline void launch_solve_small(bool fwd, int gx, int blk, size_t shb, cudaStream_t ks,
+                                      int b, int level_size, int B, int slab,
+                                      const MultifrontalPlan& plan, const int* d_plc,
+                                      FT* frontB, FT* yB)
+{
+    if (fwd)
+        solve_fwd_small<FT, SG><<<gx, blk, shb, ks>>>(
+            b, level_size, B, slab, d_plc, plan.d_front_off, plan.d_front_ptr,
+            plan.d_ncols, plan.d_front_rows, frontB, yB, plan.front_total, plan.n);
+    else
+        solve_bwd_small<FT, SG><<<gx, blk, shb, ks>>>(
+            b, level_size, B, slab, d_plc, plan.d_front_off, plan.d_front_ptr,
+            plan.d_ncols, plan.d_front_rows, frontB, yB, plan.front_total, plan.n);
+}
+
+template <typename FT>
+static inline void launch_solve_small_t(bool fwd, int SG, int gx, int blk, size_t shb,
+                                        cudaStream_t ks, int b, int level_size, int B, int slab,
+                                        const MultifrontalPlan& plan, const int* d_plc,
+                                        FT* frontB, FT* yB)
+{
+    if (SG == 8)       launch_solve_small<FT, 8>(fwd, gx, blk, shb, ks, b, level_size, B, slab, plan, d_plc, frontB, yB);
+    else if (SG == 16) launch_solve_small<FT, 16>(fwd, gx, blk, shb, ks, b, level_size, B, slab, plan, d_plc, frontB, yB);
+    else               launch_solve_small<FT, 32>(fwd, gx, blk, shb, ks, b, level_size, B, slab, plan, d_plc, frontB, yB);
+}
+
 static void issue_solve_levels(const MultifrontalPlan& plan, State& st, cudaStream_t stream)
 {
     const bool float_front = is_fp32_front(st.prec);
@@ -37,92 +95,122 @@ static void issue_solve_levels(const MultifrontalPlan& plan, State& st, cudaStre
     const int SMALL_THRESH = 32, SMALL_WARPS = 8;
     const int selt = float_front ? (int)sizeof(float) : (int)sizeof(double);
 
-    auto level_max_fsz = [&](int b, int e) {
+    auto level_max_fsz = [&](const int* h_plc, int b, int e) {
         int m = 0;
         for (int q = b; q < e; ++q) {
-            const int pp = plan.h_plcols[q];
+            const int pp = h_plc[q];
             const int fsz = plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp];
             if (fsz > m) m = fsz;
         }
         return m;
     };
 
-    auto level_max_cb = [&](int b, int e) {
+    auto level_max_cb = [&](const int* h_plc, int b, int e) {
         int m = 1;
         for (int q = b; q < e; ++q) {
-            const int pp = plan.h_plcols[q];
+            const int pp = h_plc[q];
             const int cbq = (plan.h_front_ptr[pp + 1] - plan.h_front_ptr[pp]) - plan.h_ncols[pp];
             if (cbq > m) m = cbq;
         }
         return m;
     };
 
-    // Per-level forward dispatch on a caller-chosen stream.
-    auto fwd_level = [&](cudaStream_t ks, int b, int e) {
+    // Per-level forward dispatch on a caller-chosen stream over a plcols (sub)range.
+    auto fwd_level = [&](cudaStream_t ks, int b, int e, const int* d_plc, const int* h_plc) {
         if (e <= b) return;
-        if (level_max_fsz(b, e) <= SMALL_THRESH) {
-            const long warps = (long)(e - b) * B;
+        const int mfsz = level_max_fsz(h_plc, b, e);
+
+        // Small tier: sub-group-packed warp kernel (FPW = 32/SG fronts per warp).
+        if (mfsz <= SMALL_THRESH) {
+            const long warps_un = (long)(e - b) * B;
+            const int SG = solve_small_sg(mfsz, warps_un), FPW = 32 / SG;
             const int blk = SMALL_WARPS * 32;
-            const int gx = (int)((warps + SMALL_WARPS - 1) / SMALL_WARPS);
-            const size_t shb = (size_t)SMALL_WARPS * 64 * selt;
+            const int gx = (int)(((warps_un + FPW - 1) / FPW + SMALL_WARPS - 1) / SMALL_WARPS);
+            const size_t shb = (size_t)SMALL_WARPS * FPW * 64 * selt;
             if (float_front)
-                solve_fwd_small<float><<<gx, blk, shb, ks>>>(
-                    b, e - b, B, 64, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
-                    plan.d_ncols, plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total,
-                    plan.n);
+                launch_solve_small_t<float>(/*fwd=*/true, SG, gx, blk, shb, ks, b, e - b, B, 64,
+                                            plan, d_plc, st.d_frontBf, st.d_yBf);
             else
-                solve_fwd_small<double><<<gx, blk, shb, ks>>>(
-                    b, e - b, B, 64, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
-                    plan.d_ncols, plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total,
-                    plan.n);
+                launch_solve_small_t<double>(/*fwd=*/true, SG, gx, blk, shb, ks, b, e - b, B, 64,
+                                             plan, d_plc, st.d_frontB, st.d_yB);
             return;
         }
-        const int mf = level_max_fsz(b, e);
-        const int tsb = mf <= 64 ? 64 : (mf <= 128 ? 128 : 256);
+
+        // Larger levels: one block per (front, batch), thread count tuned to max_fsz.
+        const int tsb = mfsz <= 64 ? 64 : (mfsz <= 128 ? 128 : 256);
         const dim3 fg(e - b, B);
         if (float_front)
             solve_fwd<float><<<fg, tsb, 0, ks>>>(
-                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total, plan.n);
         else
             solve_fwd<double><<<fg, tsb, 0, ks>>>(
-                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n);
     };
 
-    auto bwd_level = [&](cudaStream_t ks, int b, int e) {
+    auto bwd_level = [&](cudaStream_t ks, int b, int e, const int* d_plc, const int* h_plc) {
         if (e <= b) return;
-        const int max_cb = level_max_cb(b, e);
-        if (level_max_fsz(b, e) <= SMALL_THRESH) {
-            const long warps = (long)(e - b) * B;
+        const int mfsz = level_max_fsz(h_plc, b, e);
+        const int max_cb = level_max_cb(h_plc, b, e);
+
+        // Small tier: sub-group-packed warp kernel. slab = 64 (rhs) + max_cb (x cache).
+        if (mfsz <= SMALL_THRESH) {
+            const long warps_un = (long)(e - b) * B;
+            const int SG = solve_small_sg(mfsz, warps_un), FPW = 32 / SG;
             const int blk = SMALL_WARPS * 32;
-            const int gx = (int)((warps + SMALL_WARPS - 1) / SMALL_WARPS);
+            const int gx = (int)(((warps_un + FPW - 1) / FPW + SMALL_WARPS - 1) / SMALL_WARPS);
             const int slab = 64 + max_cb;
-            const size_t shb = (size_t)SMALL_WARPS * slab * selt;
+            const size_t shb = (size_t)SMALL_WARPS * FPW * slab * selt;
             if (float_front)
-                solve_bwd_small<float><<<gx, blk, shb, ks>>>(
-                    b, e - b, B, slab, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
-                    plan.d_ncols, plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total,
-                    plan.n);
+                launch_solve_small_t<float>(/*fwd=*/false, SG, gx, blk, shb, ks, b, e - b, B, slab,
+                                            plan, d_plc, st.d_frontBf, st.d_yBf);
             else
-                solve_bwd_small<double><<<gx, blk, shb, ks>>>(
-                    b, e - b, B, slab, plan.d_plcols, plan.d_front_off, plan.d_front_ptr,
-                    plan.d_ncols, plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total,
-                    plan.n);
+                launch_solve_small_t<double>(/*fwd=*/false, SG, gx, blk, shb, ks, b, e - b, B, slab,
+                                             plan, d_plc, st.d_frontB, st.d_yB);
             return;
         }
-        const int mf = level_max_fsz(b, e);
-        const int tsb = mf <= 64 ? 64 : (mf <= 128 ? 128 : 256);
+
+        // Larger levels: one block per (front, batch); max_cb-sized shared for the x cache.
+        const int tsb = mfsz <= 64 ? 64 : (mfsz <= 128 ? 128 : 256);
         const dim3 bg(e - b, B);
         if (float_front)
             solve_bwd<float><<<bg, tsb, (size_t)max_cb * sizeof(float), ks>>>(
-                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_frontBf, st.d_yBf, plan.front_total, plan.n);
         else
             solve_bwd<double><<<bg, tsb, (size_t)max_cb * sizeof(double), ks>>>(
-                b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_frontB, st.d_yB, plan.front_total, plan.n);
     };
+
+    // Occupancy-gated tier split of one (level- or cell-) range, for either sweep. Mirrors
+    // src/factorize/dispatch.cuh: split a mixed range into tier-homogeneous sub-launches so small
+    // fronts go to the warp-packed solve kernel instead of block-per-front, but only once the small
+    // fronts × B fill the GPU's warp slots — below that (B=1 latency regime) block-per-front's extra
+    // threads/front win, so keep the range merged. Same range = independent fronts → order-free.
+    // See docs/05-reports/11.
+    constexpr int NT = MultifrontalPlan::kNumTiers;
+    constexpr int NS = MultifrontalPlan::kSmallTiers;
+    auto dispatch_tiered = [&](cudaStream_t ks, const int* tb, const int* d_plc, const int* h_plc,
+                               bool fwd) {
+        const long small_cnt = tb[NS] - tb[0];
+        const bool mixed = (tb[NT] - tb[0]) > small_cnt;
+        if (st.tier_split && small_cnt > 0 && mixed && small_cnt * (long)B >= solve_warp_fill()) {
+            for (int t = 0; t < NT; ++t)
+                if (tb[t + 1] > tb[t]) {
+                    if (fwd) fwd_level(ks, tb[t], tb[t + 1], d_plc, h_plc);
+                    else     bwd_level(ks, tb[t], tb[t + 1], d_plc, h_plc);
+                }
+        } else {
+            if (fwd) fwd_level(ks, tb[0], tb[NT], d_plc, h_plc);
+            else     bwd_level(ks, tb[0], tb[NT], d_plc, h_plc);
+        }
+    };
+    const int* lvl_tb = plan.h_level_tier_off.data();
+    const int* sub_tb = plan.h_subtree_level_tier_off.data();
+    const bool have_lvl = !plan.h_level_tier_off.empty() && plan.d_plcols_tier;
+    const bool have_sub = !plan.h_subtree_level_tier_off.empty();
 
     // Multi-stream: replicate the factor's subtree-fork pattern. Subtree streams sweep
     // their own panel slices through all levels independently, allowing per-subtree level
@@ -147,8 +235,14 @@ static void issue_solve_levels(const MultifrontalPlan& plan, State& st, cudaStre
             cudaStream_t ks = static_cast<cudaStream_t>(st.subtree_streams[k]);
             const int* off = plan.h_subtree_level_off.data() + (long)k * plan.num_plevels;
             const int* cnt = plan.h_subtree_level_cnt.data() + (long)k * plan.num_plevels;
-            for (int L = 0; L < spine_lo; ++L)
-                if (cnt[L] > 0) fwd_level(ks, off[L], off[L] + cnt[L]);
+            for (int L = 0; L < spine_lo; ++L) {
+                if (cnt[L] == 0) continue;
+                if (have_sub)
+                    dispatch_tiered(ks, sub_tb + ((long)k * plan.num_plevels + L) * (NT + 1),
+                                    plan.d_plcols, plan.h_plcols.data(), /*fwd=*/true);
+                else
+                    fwd_level(ks, off[L], off[L] + cnt[L], plan.d_plcols, plan.h_plcols.data());
+            }
             cudaEventRecord(static_cast<cudaEvent_t>(st.join_events[k]), ks);
         }
 
@@ -157,11 +251,13 @@ static void issue_solve_levels(const MultifrontalPlan& plan, State& st, cudaStre
             cudaStreamWaitEvent(stream, static_cast<cudaEvent_t>(st.join_events[k]), 0);
 
         for (int L = spine_lo; L < plan.num_plevels; ++L)
-            fwd_level(stream, plan.plptr[L], plan.plptr[L + 1]);
+            fwd_level(stream, plan.plptr[L], plan.plptr[L + 1],
+                      plan.d_plcols, plan.h_plcols.data());
 
         // Backward spine on main first (root → spine bottom), then re-fork for subtrees.
         for (int L = plan.num_plevels - 1; L >= spine_lo; --L)
-            bwd_level(stream, plan.plptr[L], plan.plptr[L + 1]);
+            bwd_level(stream, plan.plptr[L], plan.plptr[L + 1],
+                      plan.d_plcols, plan.h_plcols.data());
 
         cudaEventRecord(static_cast<cudaEvent_t>(st.fork_event), stream);
         for (int k = 0; k < K; ++k)
@@ -173,8 +269,14 @@ static void issue_solve_levels(const MultifrontalPlan& plan, State& st, cudaStre
             cudaStream_t ks = static_cast<cudaStream_t>(st.subtree_streams[k]);
             const int* off = plan.h_subtree_level_off.data() + (long)k * plan.num_plevels;
             const int* cnt = plan.h_subtree_level_cnt.data() + (long)k * plan.num_plevels;
-            for (int L = spine_lo - 1; L >= 0; --L)
-                if (cnt[L] > 0) bwd_level(ks, off[L], off[L] + cnt[L]);
+            for (int L = spine_lo - 1; L >= 0; --L) {
+                if (cnt[L] == 0) continue;
+                if (have_sub)
+                    dispatch_tiered(ks, sub_tb + ((long)k * plan.num_plevels + L) * (NT + 1),
+                                    plan.d_plcols, plan.h_plcols.data(), /*fwd=*/false);
+                else
+                    bwd_level(ks, off[L], off[L] + cnt[L], plan.d_plcols, plan.h_plcols.data());
+            }
             cudaEventRecord(static_cast<cudaEvent_t>(st.join_events[k]), ks);
         }
 
@@ -183,11 +285,21 @@ static void issue_solve_levels(const MultifrontalPlan& plan, State& st, cudaStre
         return;
     }
 
-    // ---- Single-stream fallback ----
-    for (int L = 0; L < plan.num_plevels; ++L)
-        fwd_level(stream, plan.plptr[L], plan.plptr[L + 1]);
-    for (int L = plan.num_plevels - 1; L >= 0; --L)
-        bwd_level(stream, plan.plptr[L], plan.plptr[L + 1]);
+    // ---- Single-stream: per-level occupancy-gated tier split (forward then backward) ----
+    for (int L = 0; L < plan.num_plevels; ++L) {
+        if (have_lvl)
+            dispatch_tiered(stream, lvl_tb + (long)L * (NT + 1),
+                            plan.d_plcols_tier, plan.h_plcols_tier.data(), /*fwd=*/true);
+        else
+            fwd_level(stream, plan.plptr[L], plan.plptr[L + 1], plan.d_plcols, plan.h_plcols.data());
+    }
+    for (int L = plan.num_plevels - 1; L >= 0; --L) {
+        if (have_lvl)
+            dispatch_tiered(stream, lvl_tb + (long)L * (NT + 1),
+                            plan.d_plcols_tier, plan.h_plcols_tier.data(), /*fwd=*/false);
+        else
+            bwd_level(stream, plan.plptr[L], plan.plptr[L + 1], plan.d_plcols, plan.h_plcols.data());
+    }
 }
 
 }  // namespace

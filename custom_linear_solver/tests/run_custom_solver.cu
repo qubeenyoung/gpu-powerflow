@@ -47,14 +47,16 @@ struct Options {
     fs::path dump_fronts_path;
     bool write_solution = false;
     int repeat = 1;
+    int warmup = 0;  // untimed factor/solve iterations discarded before the timed `repeat` set
     int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
     bool batch_only = false;  // skip the single-system factor/solve
     bool single_fp32 = false;
     int panel_cap = 8;  // analyze: max panel width inside a supernode; -1 keeps default
     bool no_multistream = false;     // disable subtree multi-stream dispatch
+    bool no_tier_split = false;      // disable occupancy-gated per-front tier split
     bool analyze_info = false;       // print analyze-phase front/subtree summary
     // Numeric precision. See multifrontal.hpp for what each mode does.
-    //   fp64 / fp32 / fp16 (FP16 WMMA) / tf32_wmma (V0 WMMA) / tf32 (V9h PTX, recommended).
+    //   fp64 / fp32 / fp16 (FP16 PTX mma) / tf32 (V9h PTX, recommended).
     cls::Precision precision = cls::Precision::FP64;
 };
 
@@ -132,6 +134,7 @@ void usage(const char* argv0)
         << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [options]\n"
         << "\nOptions:\n"
         << "  --repeat N            time-averaging trials (median reported)\n"
+        << "  --warmup N            untimed factor/solve iters discarded before timing\n"
         << "  --single-precision fp64|fp32\n"
         << "                        single-system (non-batch) input precision\n"
         << "  --batch B             also run a uniform-batch experiment with B systems\n"
@@ -139,11 +142,11 @@ void usage(const char* argv0)
         << "  --precision MODE      batched factor precision; MODE one of\n"
         << "                          fp64       (reference, ~1e-13)\n"
         << "                          fp32       (~1e-4, ~2x speed of FP64)\n"
-        << "                          fp16       (FP32 + FP16 WMMA trailing)\n"
-        << "                          tf32_wmma  (FP32 + TF32 WMMA trailing — V0 baseline)\n"
+        << "                          fp16       (FP32 + FP16 PTX mma.m16n8k8 trailing)\n"
         << "                          tf32       (FP32 + TF32 PTX trailing — V9h+LB, recommended)\n"
         << "  --panel-cap N         analyze: max panel width inside a supernode (1..64)\n"
         << "  --no-multistream      disable subtree multi-stream dispatch (single stream)\n"
+        << "  --no-tier-split       disable occupancy-gated per-front tier split (whole-level)\n"
         << "  --analyze-info        print front-size and subtree summary after analyze\n"
         << "  --dump-fronts <path>  write (q,p,fsz,nc,uc,level) CSV after analyze\n"
         << "  --solution-out <path> write the recovered x as MatrixMarket\n";
@@ -170,6 +173,10 @@ Options parse_args(int argc, char** argv)
             if (++i >= argc) throw std::runtime_error("--repeat requires a count");
             options.repeat = std::stoi(argv[i]);
             if (options.repeat <= 0) throw std::runtime_error("--repeat must be positive");
+        } else if (arg == "--warmup") {
+            if (++i >= argc) throw std::runtime_error("--warmup requires a count");
+            options.warmup = std::stoi(argv[i]);
+            if (options.warmup < 0) throw std::runtime_error("--warmup must be >= 0");
         } else if (arg == "--batch") {
             if (++i >= argc) throw std::runtime_error("--batch requires a count");
             options.batch = std::stoi(argv[i]);
@@ -186,6 +193,8 @@ Options parse_args(int argc, char** argv)
             options.panel_cap = std::stoi(argv[i]);
         } else if (arg == "--no-multistream") {
             options.no_multistream = true;
+        } else if (arg == "--no-tier-split") {
+            options.no_tier_split = true;
         } else if (arg == "--analyze-info") {
             options.analyze_info = true;
         } else if (arg == "--dump-fronts") {
@@ -193,16 +202,15 @@ Options parse_args(int argc, char** argv)
             options.dump_fronts_path = argv[i];
         } else if (arg == "--precision") {
             if (++i >= argc) throw std::runtime_error(
-                "--precision requires fp64|fp32|fp16|tf32_wmma|tf32");
+                "--precision requires fp64|fp32|fp16|tf32");
             const std::string value = argv[i];
             using cls::Precision;
             if      (value == "fp64")      options.precision = Precision::FP64;
             else if (value == "fp32")      options.precision = Precision::FP32;
             else if (value == "fp16")      options.precision = Precision::FP16;
-            else if (value == "tf32_wmma") options.precision = Precision::TF32_WMMA;
             else if (value == "tf32")      options.precision = Precision::TF32;
             else throw std::runtime_error(
-                "--precision must be fp64|fp32|fp16|tf32_wmma|tf32");
+                "--precision must be fp64|fp32|fp16|tf32");
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -324,6 +332,7 @@ int main(int argc, char** argv)
         solver_config.precision = options.precision;
         if (options.panel_cap > 0) solver_config.panel_cap = options.panel_cap;
         solver_config.use_multistream_subtrees = !options.no_multistream;
+        solver_config.tier_split = !options.no_tier_split;
         solver_config.analyze_emit_info = options.analyze_info;
         if (!options.dump_fronts_path.empty()) {
             solver_config.analyze_dump_fronts_path = options.dump_fronts_path.string();
@@ -376,9 +385,19 @@ int main(int argc, char** argv)
         solve_ms.reserve(static_cast<std::size_t>(options.repeat));
         if (options.batch_only) { factor_ms.push_back(0); solve_ms.push_back(0); }
 
+        // Warmup (untimed): excludes first-call graph instantiation / lazy allocation from the
+        // timed median. The timed loop syncs inside the measured region so the wall-clock span
+        // covers GPU execution, not just async launch — matching the batched path below (B-1/B-2).
+        for (int r = 0; r < options.warmup && !options.batch_only; ++r) {
+            require_success(solver.factorize(), "factorize(warmup)");
+            require_success(solver.solve(), "solve(warmup)");
+        }
+        cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize after warmup");
+
         for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
             const auto start = std::chrono::steady_clock::now();
             require_success(solver.factorize(), "factorize");
+            cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize after factorize");
             const auto stop = std::chrono::steady_clock::now();
             factor_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
         }
@@ -386,6 +405,7 @@ int main(int argc, char** argv)
         for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
             const auto start = std::chrono::steady_clock::now();
             require_success(solver.solve(), "solve");
+            cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize after solve");
             const auto stop = std::chrono::steady_clock::now();
             solve_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
         }
@@ -450,6 +470,14 @@ int main(int argc, char** argv)
                 std::chrono::steady_clock::now() - t_setup0).count();
             std::cout << "setup_ms=" << setup_ms << " (one-time, outside Newton loop)\n";
 
+            // Warmup (untimed): same purpose as the single-system path — drop graph-instantiation
+            // and lazy-alloc cost from the first measured iteration.
+            for (int r = 0; r < options.warmup; ++r) {
+                require_success(solver.factorize(), "factorize(batched warmup)");
+                require_success(solver.solve(), "solve(batched warmup)");
+            }
+            cudaDeviceSynchronize();
+
             std::vector<double> bf, bs;
             for (int r = 0; r < options.repeat; ++r) {
                 const std::string fname = "factorize/iter=" + std::to_string(r);
@@ -490,7 +518,7 @@ int main(int argc, char** argv)
         std::cout << "matrix=" << options.matrix_path << '\n'
                   << "rhs=" << options.rhs_path << '\n'
                   << "n=" << matrix.rows << " nnz=" << matrix.nnz() << '\n'
-                  << "repeat=" << options.repeat << '\n'
+                  << "repeat=" << options.repeat << " warmup=" << options.warmup << '\n'
                   << "read_ms=" << ms(t0, t_read) << '\n'
                   << "upload_ms=" << ms(t_read, t_upload) << '\n'
                   << "set_ms=" << ms(t_upload, t_set) << '\n'

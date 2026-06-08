@@ -153,7 +153,11 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     plan.h_ncols = panels.ncols;
     // h_plcols filled after plcols is built below.
 
-    // Per-panel front offset (in doubles) into the front arena = prefix sum of fsz².
+    // Per-panel front offset (in doubles) into the front arena = prefix sum of fsz², in panel-id
+    // (postorder) order. NB: a level-contiguous arena was tried (offsets assigned in plcols/level
+    // order) and measured a regression — postorder already keeps each parent front adjacent to its
+    // children, which is the dominant locality for child→parent extend-add. See
+    // docs/04-benchmarks-profiling/15. Keep postorder.
     std::vector<int> front_off(P + 1, 0);
     long total = 0;
     for (int p = 0; p < P; ++p) {
@@ -166,7 +170,7 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     }
     front_off[P] = static_cast<int>(total);
     plan.front_total = total;
-    plan.h_front_off = front_off;  // host mirror for per-panel cuBLAS dispatch (host mirror of front offsets)
+    plan.h_front_off = front_off;  // host mirror for per-panel cuBLAS dispatch
 
     // Per-panel pivot offsets (one slot per pivot column). The within-pivot pivoting code path is
     plan.h_pivot_offset.assign(P + 1, 0);
@@ -346,32 +350,44 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
         // independent. Selected B>1 factor dispatch builds a temporary band-sorted order
         // in setup(B), leaving this canonical order untouched for B=1 and smaller B paths.
         if (plan.num_subtrees > 0) {
+            constexpr int NT = MultifrontalPlan::kNumTiers;
+            auto tier_of = [&](int p) {  // must match the single-stream tier block below
+                const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+                return fsz <= 32 ? 0 : (fsz <= 128 ? 1 : 2);
+            };
             plan.h_subtree_level_off.assign((long)plan.num_subtrees * num_plevels, 0);
             plan.h_subtree_level_cnt.assign((long)plan.num_subtrees * num_plevels, 0);
-            // For each level: bucket-sort panels by subtree_of_panel (spine=-1 goes last)
+            plan.h_subtree_level_tier_off.assign(
+                (long)plan.num_subtrees * num_plevels * (NT + 1), 0);
+            // For each level: bucket panels by subtree (spine=-1 last); each subtree cell is then
+            // ordered tier-major so multistream dispatch can tier-split it (see h_subtree_level_*).
             for (int L = 0; L < num_plevels; ++L) {
                 const int lo = plan.plptr[L], hi = plan.plptr[L + 1];
                 std::vector<int> bucketed;
                 bucketed.reserve(hi - lo);
-                // First, subtree 0..K-1
                 for (int k = 0; k < plan.num_subtrees; ++k) {
-                    plan.h_subtree_level_off[(long)k * num_plevels + L] = (int)bucketed.size() + lo;
+                    const int cell_start = (int)bucketed.size() + lo;
+                    plan.h_subtree_level_off[(long)k * num_plevels + L] = cell_start;
+                    const long tb = ((long)k * num_plevels + L) * (NT + 1);
                     int cnt = 0;
-                    for (int q = lo; q < hi; ++q) {
-                        const int p = plcols[q];
-                        if (plan.h_subtree_of_panel[p] == k) {
-                            bucketed.push_back(p);
-                            ++cnt;
+                    for (int t = 0; t < NT; ++t) {  // tier-major within the cell
+                        plan.h_subtree_level_tier_off[tb + t] = (int)bucketed.size() + lo;
+                        for (int q = lo; q < hi; ++q) {
+                            const int p = plcols[q];
+                            if (plan.h_subtree_of_panel[p] == k && tier_of(p) == t) {
+                                bucketed.push_back(p);
+                                ++cnt;
+                            }
                         }
                     }
+                    plan.h_subtree_level_tier_off[tb + NT] = (int)bucketed.size() + lo;
                     plan.h_subtree_level_cnt[(long)k * num_plevels + L] = cnt;
                 }
-                // Then spine panels (subtree_of_panel == -1) at the end
+                // Then spine panels (subtree_of_panel == -1) at the end (cnt=1 chain; no split).
                 for (int q = lo; q < hi; ++q) {
                     const int p = plcols[q];
                     if (plan.h_subtree_of_panel[p] == -1) bucketed.push_back(p);
                 }
-                // Write back to plcols
                 for (size_t i = 0; i < bucketed.size(); ++i) plcols[lo + i] = bucketed[i];
             }
             // h_plcols was already assigned from plcols above; refresh.
@@ -392,6 +408,39 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
                     if (c > 0) fprintf(stderr, "    sub%d L%d cnt=%d\n", k, L, c);
                 }
             }
+        }
+    }
+
+    // Tier-homogeneous dispatch order. Within each level, group panels by kernel tier so the
+    // single-stream factor walk launches one right-sized kernel per (level, tier) instead of
+    // promoting a whole mixed level to its largest front's tier (which sent ~24% of fronts in
+    // case8387 from the warp-packed small kernel to the block-per-front mid kernel — see
+    // docs/05-reports/11). Tier cut points MUST match SMALL_THRESH=32 / MID_THRESH=128 in
+    // src/factorize/dispatch.cuh. The grouping is stable, so subtree/locality order is preserved
+    // within each tier. front sizes are value-independent, so this is computed once at analyze.
+    {
+        constexpr int NT = MultifrontalPlan::kNumTiers;  // 3: small / mid / big (see plan hpp)
+        auto tier_of = [&](int p) {
+            const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+            return fsz <= 32 ? 0 : (fsz <= 128 ? 1 : 2);
+        };
+        plan.h_plcols_tier.assign(P, 0);
+        plan.h_level_tier_off.assign((long)num_plevels * (NT + 1), 0);
+        int w = 0;
+        for (int L = 0; L < num_plevels; ++L) {
+            const int lo = plan.plptr[L], hi = plan.plptr[L + 1];
+            for (int t = 0; t < NT; ++t) {
+                plan.h_level_tier_off[(long)L * (NT + 1) + t] = w;
+                for (int q = lo; q < hi; ++q) {
+                    const int p = plcols[q];
+                    if (tier_of(p) == t) plan.h_plcols_tier[w++] = p;
+                }
+            }
+            plan.h_level_tier_off[(long)L * (NT + 1) + NT] = w;  // == hi
+        }
+        if (cudaMalloc(&plan.d_plcols_tier, (size_t)std::max(1, P) * sizeof(int)) == cudaSuccess) {
+            cudaMemcpy(plan.d_plcols_tier, plan.h_plcols_tier.data(),
+                       (size_t)P * sizeof(int), cudaMemcpyHostToDevice);
         }
     }
 

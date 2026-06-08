@@ -4,7 +4,7 @@
 #include <string>
 
 #include "matrix/view.hpp"
-#include "multifrontal.hpp"   // Precision { FP64, FP32, FP16, TF32_WMMA, TF32 }
+#include "multifrontal.hpp"   // Precision { FP64, FP32, FP16, TF32 }
 
 namespace custom_linear_solver {
 
@@ -33,10 +33,14 @@ struct SolverConfig {
     bool enable_shift_retry = true;                  // (reserved) diagonal-shift fallback on
                                                      // singular pivot
     double shift_retry_epsilon = 1.0e-8;             // (reserved) shift magnitude
-    Precision precision = Precision::FP64;           // FP64 / FP32 / FP16 (FP16 WMMA) /
-                                                     // TF32_WMMA (V0 baseline) / TF32 (V9h PTX
-                                                     // + LB(512,2), recommended for TF32)
+    Precision precision = Precision::FP64;           // FP64 / FP32 / FP16 (FP16 PTX mma) /
+                                                     // TF32 (V9h PTX + LB(512,2), recommended)
     // ---- Runtime dispatch ----
+    bool tier_split = true;                          // occupancy-gated per-front tier split in the
+                                                     // factor/solve level dispatch. false = original
+                                                     // whole-level dispatch (small fronts promoted
+                                                     // to the larger tier's kernel). See
+                                                     // docs/05-reports/11.
     bool use_multistream_subtrees = true;            // dispatch independent subtrees on
                                                      // separate streams (capped at 8). Set
                                                      // false for single-stream debugging.

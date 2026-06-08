@@ -20,28 +20,24 @@
 //
 //   tier   | block  | front | kernel                  | Phase-3 trailing
 //   -------+--------+-------+-------------------------+-------------------------------------
-//   small  | 8 warp | smem  | factor_small<T>         | lu_small_warp (fused Phase 1+3)
+//   small  | 8 warp | smem  | factor_small<T, SG>     | lu_small_warp (fused Phase 1+3)
 //   mid    | 64..256| smem  | factor_mid<T>           | trailing_update_staged<T>
-//          |        |       | factor_mid_tc           | trailing_update_wmma_fp16
-//          |        |       | factor_mid_tf32_wmma    | trailing_update_wmma_tf32
+//          |        |       | factor_mid_fp16_ptx     | trailing_update_mma_fp16_ptx
 //          |        |       | factor_mid_tf32_ptx<K>  | trailing_update_mma_tf32{_k4}_ptx
 //   big    | 1024   | gmem  | factor_big<T>           | trailing_update_scalar<T>
-//          | 1024   | gmem  | factor_big_tc           | trailing_update_wmma_fp16
-//          | 1024   | gmem  | factor_big_tf32_wmma    | trailing_update_wmma_tf32
+//          | 512    | gmem  | factor_big_fp16_ptx     | trailing_update_mma_fp16_ptx
 //          | 512    | gmem  | factor_big_tf32_ptx     | trailing_update_mma_tf32_ptx
 //
 // Why a separate kernel symbol per variant:
 //   * The <T> templates parameterise over the front element type (double / float).
-//   * The Tensor-Core variants differ in shared-memory layout: FP16 stages __half panels,
-//     TF32 stages float panels, and the PTX variants omit the Csc fragment-readback scratch
-//     because the inline-asm mma.sync writes the accumulator straight to per-lane registers
-//     (the WMMA wrappers cannot — wmma::store_matrix_sync is the only public path out of an
-//     accumulator fragment, so they need Csc).
+//   * The Tensor-Core variants differ in shared-memory layout: the FP16 PTX path stages
+//     __half panels, the TF32 PTX paths stage float panels. None need a Csc fragment-readback
+//     scratch — the inline-asm mma.sync writes the accumulator straight to per-lane registers.
 //   * factor_mid_tf32_ptx<K> templates the K=4 / K=8 mma shapes into a single kernel because
 //     only the inline-asm form differs; smem layout and block geometry are identical.
-//   * factor_big_tf32_ptx is split from factor_big_tf32_wmma not just for the trailing
-//     function but because it carries __launch_bounds__(512, 2) and a different block size,
-//     neither of which can be selected inside one kernel.
+//   * The big PTX kernels (factor_big_fp16_ptx, factor_big_tf32_ptx) carry
+//     __launch_bounds__(512, 2) and a 512-thread block so two blocks stay resident per SM on
+//     sm_86 — neither can be selected inside a 1024-thread kernel.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -69,7 +65,12 @@ namespace {
 //      __syncwarp.
 //   3. writeback Fs → global F (factored L | U panel only; the uc×uc CB stays in Fs).
 //   4. extend_add: scatter the CB straight from shared into the parent front via atomicAdd.
-template <typename FT>
+// SG = sub-group lane count (8 / 16 / 32). One sub-group of SG lanes owns one (front, batch);
+// FPW = 32/SG sub-groups (fronts) pack per warp, SMALL_WARPS warps per block. SG=32 is the
+// classic one-warp-per-front form. The dispatcher picks SG from the level's max_fsz so the
+// tiny fronts (fsz ≤ 16) keep all SG lanes busy and expose FPW independent fronts' memory
+// traffic per warp (latency hiding on this memory-latency-bound tier).
+template <typename FT, int SG>
 __global__ void factor_small(int lbegin, int level_size, int B, int fsz2cap,
                               const int* __restrict__ plcols,
                               const int* __restrict__ front_off,
@@ -80,16 +81,23 @@ __global__ void factor_small(int lbegin, int level_size, int B, int fsz2cap,
                               const int* __restrict__ asm_local, FT* frontB,
                               long front_total, int* sing, int do_extend)
 {
+    constexpr int FPW = 32 / SG;                          // fronts per warp
     extern __shared__ unsigned char smem_sw_raw[];
     FT* smem_sw = reinterpret_cast<FT*>(smem_sw_raw);
 
-    // Identify this warp's (front, batch) — one warp per (front in this level, batch index).
+    // Sub-group identity: which front this group of SG lanes owns, and the lane within it.
     const int warp_in_blk = threadIdx.x >> 5;
-    const int warp_global = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
     const int lane = threadIdx.x & 31;
-    if (warp_global >= level_size * B) return;
-    const int fl = warp_global % level_size;
-    const int bb = warp_global / level_size;
+    const int sg = lane / SG;                             // sub-group id in warp (0..FPW-1)
+    const int sl = lane % SG;                             // lane within sub-group (0..SG-1)
+    const unsigned mask = (SG == 32) ? 0xffffffffu : (((1u << SG) - 1u) << (sg * SG));
+
+    const int warps_per_blk = blockDim.x >> 5;
+    const int warp_global = blockIdx.x * warps_per_blk + warp_in_blk;
+    const int slot = warp_global * FPW + sg;              // global (front, batch) index
+    if (slot >= level_size * B) return;                   // whole sub-group exits together
+    const int fl = slot % level_size;
+    const int bb = slot / level_size;
 
     // Locate the front buffer for (batch bb, panel p).
     FT* front = frontB + (long)bb * front_total;
@@ -100,19 +108,19 @@ __global__ void factor_small(int lbegin, int level_size, int B, int fsz2cap,
     const int fsz2 = fsz * fsz;
     FT* F = front + front_off[p];
 
-    // Per-warp shared scratch for this front (slot fsz2cap reserved per warp).
-    FT* Fs = smem_sw + (long)warp_in_blk * fsz2cap;
+    // Per-sub-group shared scratch (slot fsz2cap reserved per sub-group).
+    FT* Fs = smem_sw + (long)(warp_in_blk * FPW + sg) * fsz2cap;
 
-    // 1. global F → per-warp Fs.
-    for (int e = lane; e < fsz2; e += 32) Fs[e] = F[e];
-    __syncwarp();
+    // 1. global F → per-sub-group Fs.
+    for (int e = sl; e < fsz2; e += SG) Fs[e] = F[e];
+    __syncwarp(mask);
 
     // 2. fused panel LU + trailing on Fs.
-    lu_small_warp<FT>(Fs, fsz, nc, lane, sing);
-    __syncwarp();
+    lu_small_warp<FT, SG>(Fs, fsz, nc, sl, mask, sing);
+    __syncwarp(mask);
 
     // 3. writeback factored panel.
-    writeback_factored<FT, FT>(F, Fs, fsz, nc, uc, lane, 32);
+    writeback_factored<FT, FT>(F, Fs, fsz, nc, uc, sl, SG);
 
     // 4. CB extend-add into parent front (skip for roots / when disabled).
     const int par = panel_parent[p];
@@ -120,7 +128,7 @@ __global__ void factor_small(int lbegin, int level_size, int B, int fsz2cap,
     FT* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
     const int abase = asm_ptr[p];
-    for (int e = lane; e < uc * uc; e += 32) {
+    for (int e = sl; e < uc * uc; e += SG) {
         const int a = e / uc, b = e % uc;
         atomicAdd(&Fp[(long)asm_local[abase + a] * pfsz + asm_local[abase + b]],
                   Fs[(long)(nc + a) * fsz + (nc + b)]);
@@ -194,21 +202,20 @@ __global__ void factor_mid(int lbegin, int lend, const int* __restrict__ plcols,
     extend_add<T, T>(Fp, pfsz, Fs, fsz, nc, uc, asm_local, abase, t, nt);
 }
 
-// FP16 WMMA trailing (Precision::FP16). Stages L / U into __half panels for
-// wmma::mma_sync m16n16k16, accumulates in FP32, reads the accumulator back via the per-warp
-// Csc smem scratch (wmma::store_matrix_sync is the only public way to read the fragment),
-// and subtracts from Fs with bounds checks.
-// Shared layout:  Lh[ucp_max · 32] (__half) | Uh[32 · ucp_max] (__half)
-//               | Csc[(nt/32) · 256] (float)  | Fs[fsz_cap²] (float).
-__global__ void factor_mid_tc(int lbegin, int lend, const int* __restrict__ plcols,
-                              const int* __restrict__ front_off,
-                              const int* __restrict__ front_ptr,
-                              const int* __restrict__ ncols,
-                              const int* __restrict__ panel_parent,
-                              const int* __restrict__ asm_ptr,
-                              const int* __restrict__ asm_local, float* frontB,
-                              long front_total, int* sing, int do_extend, int ucp_max,
-                              int fsz_cap)
+// FP16 PTX trailing (Precision::FP16). Stages L / U into __half panels and calls
+// mma.sync.m16n8k8.f16 via inline asm, subtracting the FP32 accumulator straight from Fs from
+// per-lane registers — no Csc scratch. KP aligns nc up to 8 (the mma K-tile). Scalar fallback
+// for nc > 32 / uc > 256.
+// Shared layout:  Lh[ucp_max · kp_max] | Uh[kp_max · ucp_max]  (__half) | Fs[fsz_cap²] (float).
+__global__ void factor_mid_fp16_ptx(int lbegin, int lend, const int* __restrict__ plcols,
+                                    const int* __restrict__ front_off,
+                                    const int* __restrict__ front_ptr,
+                                    const int* __restrict__ ncols,
+                                    const int* __restrict__ panel_parent,
+                                    const int* __restrict__ asm_ptr,
+                                    const int* __restrict__ asm_local, float* frontB,
+                                    long front_total, int* sing, int do_extend, int ucp_max,
+                                    int kp_max, int fsz_cap)
 {
     const int idx = lbegin + blockIdx.x;
     if (idx >= lend) return;
@@ -221,72 +228,16 @@ __global__ void factor_mid_tc(int lbegin, int lend, const int* __restrict__ plco
     const int uc = fsz - nc;
     const int fsz2 = fsz * fsz;
 
-    extern __shared__ char smem_mid_tc[];
-    __half* Lh  = reinterpret_cast<__half*>(smem_mid_tc);
-    __half* Uh  = Lh + (long)ucp_max * 32;
-    float*  Csc = reinterpret_cast<float*>(Uh + (long)32 * ucp_max);
-    float*  Fs  = Csc + (nt / 32) * 256;
-
-    stage_in_async<float>(Fs, F, fsz2, t, nt);
-    __syncthreads();
-    factorize_front<float>(Fs, fsz, nc, uc, t, nt, sing, [&] {
-        // WMMA tile constraints: 16×16×16 needs nc ≤ 32, uc ≤ 256. Anything larger falls
-        // back to the scalar dot-product trailing on Fs.
-        if (nc <= 32 && uc <= 256) {
-            trailing_update_wmma_fp16(Fs, fsz, nc, uc, Lh, Uh, Csc, ucp_max, t, nt);
-        } else {
-            trailing_update_scalar<float>(Fs, fsz, nc, uc, t, nt);
-        }
-    });
-    __syncthreads();
-    writeback_factored<float, float>(F, Fs, fsz, nc, uc, t, nt);
-
-    const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
-    __syncthreads();
-    float* Fp = front + front_off[par];
-    const int pfsz = front_ptr[par + 1] - front_ptr[par];
-    const int abase = asm_ptr[p];
-    extend_add<float, float>(Fp, pfsz, Fs, fsz, nc, uc, asm_local, abase, t, nt);
-}
-
-// TF32 WMMA trailing (Precision::TF32_WMMA). Same shape as factor_mid_tc but the staging
-// panels hold FP32 (TF32 inputs are bit-aliased FP32), KP aligns to 8 not 16, and Csc is
-// still required for the fragment readback.
-// Shared layout:  Ltf[ucp_max · kp_max] | Utf[kp_max · ucp_max]
-//               | Csc[(nt/32) · 256]    | Fs[fsz_cap²]   (all float).
-__global__ void factor_mid_tf32_wmma(int lbegin, int lend, const int* __restrict__ plcols,
-                                      const int* __restrict__ front_off,
-                                      const int* __restrict__ front_ptr,
-                                      const int* __restrict__ ncols,
-                                      const int* __restrict__ panel_parent,
-                                      const int* __restrict__ asm_ptr,
-                                      const int* __restrict__ asm_local, float* frontB,
-                                      long front_total, int* sing, int do_extend, int ucp_max,
-                                      int kp_max, int fsz_cap)
-{
-    const int idx = lbegin + blockIdx.x;
-    if (idx >= lend) return;
-    float* front = frontB + (long)blockIdx.y * front_total;
-    const int p = plcols[idx];
-    const int fsz = front_ptr[p + 1] - front_ptr[p];
-    const int nc = ncols[p];
-    float* F = front + front_off[p];
-    const int t = threadIdx.x, nt = blockDim.x;
-    const int uc = fsz - nc;
-    const int fsz2 = fsz * fsz;
-
-    extern __shared__ char smem_mid_tf32_wmma[];
-    float* Ltf = reinterpret_cast<float*>(smem_mid_tf32_wmma);
-    float* Utf = Ltf + (long)ucp_max * kp_max;
-    float* Csc = Utf + (long)kp_max * ucp_max;
-    float* Fs  = Csc + (nt / 32) * 256;
+    extern __shared__ char smem_mid_fp16_ptx[];
+    __half* Lh = reinterpret_cast<__half*>(smem_mid_fp16_ptx);
+    __half* Uh = Lh + (long)ucp_max * kp_max;
+    float*  Fs = reinterpret_cast<float*>(Uh + (long)kp_max * ucp_max);
 
     stage_in_async<float>(Fs, F, fsz2, t, nt);
     __syncthreads();
     factorize_front<float>(Fs, fsz, nc, uc, t, nt, sing, [&] {
         if (nc <= 32 && uc <= 256) {
-            trailing_update_wmma_tf32(Fs, fsz, nc, uc, Ltf, Utf, Csc, t, nt);
+            trailing_update_mma_fp16_ptx(Fs, fsz, nc, uc, Lh, Uh, t, nt);
         } else {
             trailing_update_scalar<float>(Fs, fsz, nc, uc, t, nt);
         }
@@ -416,16 +367,20 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
     extend_add<T, T>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
 }
 
-// FP16 WMMA trailing on the global front (Precision::FP16). Shared scratch is for the
-// __half L/U staging panels plus the Csc fragment readback only.
-__global__ void factor_big_tc(int lbegin, int lend, const int* __restrict__ plcols,
-                              const int* __restrict__ front_off,
-                              const int* __restrict__ front_ptr,
-                              const int* __restrict__ ncols,
-                              const int* __restrict__ panel_parent,
-                              const int* __restrict__ asm_ptr,
-                              const int* __restrict__ asm_local, float* frontB,
-                              long front_total, int* sing, int do_extend, int ucp_max)
+// FP16 PTX trailing on the global front (Precision::FP16). 512-thread block with
+// __launch_bounds__(512, 2) so two blocks stay resident per SM on sm_86. Shared scratch is
+// only the __half L/U staging panels; the inline-asm mma writes the accumulator to per-lane
+// registers, so no Csc readback scratch is needed.
+__global__ void __launch_bounds__(512, 2)
+                                factor_big_fp16_ptx(int lbegin, int lend, const int* __restrict__ plcols,
+                                const int* __restrict__ front_off,
+                                const int* __restrict__ front_ptr,
+                                const int* __restrict__ ncols,
+                                const int* __restrict__ panel_parent,
+                                const int* __restrict__ asm_ptr,
+                                const int* __restrict__ asm_local, float* frontB,
+                                long front_total, int* sing, int do_extend, int ucp_max,
+                                int kp_max)
 {
     const int idx = lbegin + blockIdx.x;
     if (idx >= lend) return;
@@ -441,54 +396,10 @@ __global__ void factor_big_tc(int lbegin, int lend, const int* __restrict__ plco
         if (nc > 32 || uc > 256) {
             trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);
         } else {
-            extern __shared__ char smem_big_tc[];
-            __half* Lh  = reinterpret_cast<__half*>(smem_big_tc);
-            __half* Uh  = Lh + (long)ucp_max * 32;
-            float*  Csc = reinterpret_cast<float*>(Uh + (long)32 * ucp_max);
-            trailing_update_wmma_fp16(F, fsz, nc, uc, Lh, Uh, Csc, ucp_max, t, nt);
-        }
-    });
-
-    const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
-    __syncthreads();
-    float* Fp = front + front_off[par];
-    const int pfsz = front_ptr[par + 1] - front_ptr[par];
-    const int abase = asm_ptr[p];
-    extend_add<float, float>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
-}
-
-// TF32 WMMA trailing on the global front (Precision::TF32_WMMA). Same Csc-via-wmma::store
-// flow as the FP16 big variant, with float staging panels instead of __half.
-__global__ void factor_big_tf32_wmma(int lbegin, int lend, const int* __restrict__ plcols,
-                                      const int* __restrict__ front_off,
-                                      const int* __restrict__ front_ptr,
-                                      const int* __restrict__ ncols,
-                                      const int* __restrict__ panel_parent,
-                                      const int* __restrict__ asm_ptr,
-                                      const int* __restrict__ asm_local, float* frontB,
-                                      long front_total, int* sing, int do_extend, int ucp_max,
-                                      int kp_max)
-{
-    const int idx = lbegin + blockIdx.x;
-    if (idx >= lend) return;
-    float* front = frontB + (long)blockIdx.y * front_total;
-    const int p = plcols[idx];
-    const int fsz = front_ptr[p + 1] - front_ptr[p];
-    const int nc = ncols[p];
-    float* F = front + front_off[p];
-    const int t = threadIdx.x, nt = blockDim.x;
-    const int uc = fsz - nc;
-
-    factorize_front<float>(F, fsz, nc, uc, t, nt, sing, [&] {
-        if (nc > 32 || uc > 256) {
-            trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);
-        } else {
-            extern __shared__ char smem_big_tf32_wmma[];
-            float* Ltf = reinterpret_cast<float*>(smem_big_tf32_wmma);
-            float* Utf = Ltf + (long)ucp_max * kp_max;
-            float* Csc = Utf + (long)kp_max * ucp_max;
-            trailing_update_wmma_tf32(F, fsz, nc, uc, Ltf, Utf, Csc, t, nt);
+            extern __shared__ char smem_big_fp16_ptx[];
+            __half* Lh = reinterpret_cast<__half*>(smem_big_fp16_ptx);
+            __half* Uh = Lh + (long)ucp_max * kp_max;
+            trailing_update_mma_fp16_ptx(F, fsz, nc, uc, Lh, Uh, t, nt);
         }
     });
 

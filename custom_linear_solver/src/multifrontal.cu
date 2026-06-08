@@ -57,14 +57,15 @@ State::~State()
 // ---------------------------------------------------------------------------
 
 bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
-           bool use_multistream_subtrees)
+           bool use_multistream_subtrees, bool tier_split)
 {
     if (plan.num_panels == 0 || B <= 0) return false;
     st.B = B;
     st.front_total = plan.front_total;
     st.n = plan.n;
     st.prec = prec;
-    // Float-front modes: FP32 / TC (FP16 WMMA) / TF32_WMMA / TF32 (PTX) all run on the f32 arena.
+    st.tier_split = tier_split;
+    // Float-front modes: FP32 / FP16 (PTX) / TF32 (PTX) all run on the f32 arena.
     const bool float_front = is_fp32_front(prec);
     const long fe = (long)B * plan.front_total;
     if (float_front) {
@@ -81,22 +82,26 @@ bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
     if (cudaMalloc(&st.d_sing, sizeof(int)) != cudaSuccess) return false;
 
     // All shared-resident kernels can exceed the 48 KB default; opt them in to the sm_86 cap.
-    cudaFuncSetAttribute(factor_small<float>,
+    cudaFuncSetAttribute(factor_small<float, 8>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
-    cudaFuncSetAttribute(factor_small<double>,
+    cudaFuncSetAttribute(factor_small<float, 16>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+    cudaFuncSetAttribute(factor_small<float, 32>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+    cudaFuncSetAttribute(factor_small<double, 8>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+    cudaFuncSetAttribute(factor_small<double, 16>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+    cudaFuncSetAttribute(factor_small<double, 32>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
     cudaFuncSetAttribute(factor_mid<float>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
     cudaFuncSetAttribute(factor_mid<double>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
     if (is_fp32_front(prec)) {
-        cudaFuncSetAttribute(factor_mid_tc,
+        cudaFuncSetAttribute(factor_mid_fp16_ptx,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
-        cudaFuncSetAttribute(factor_big_tc,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
-        cudaFuncSetAttribute(factor_mid_tf32_wmma,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
-        cudaFuncSetAttribute(factor_big_tf32_wmma,
+        cudaFuncSetAttribute(factor_big_fp16_ptx,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
         cudaFuncSetAttribute(factor_mid_tf32_ptx<8>,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
