@@ -220,10 +220,13 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
     constexpr int do_extend = 1;
     (void)max_fsz;
     dim3 grid(level_size, B);
-#ifdef CLS_NO_BIG_MB
-    const bool big_underfill = false;   // A/B baseline: fused factor_big only (no multi-block)
-#else
+#ifdef CLS_BIG_MB
     const bool big_underfill = ((long)level_size * B < factor_num_sms());
+#else
+    // Default: no multi-block. Every big front runs the fused single-block kernel, so tf32/fp16
+    // use the tensor-core trailing everywhere (the MB path was scalar). Define CLS_BIG_MB to
+    // restore the underfill multi-block path (faster for fp32 at B=1; see docs note 30).
+    const bool big_underfill = false;
 #endif
     if (precision == Precision::FP64) {
         // FP64 uses a smaller block (128) — the scalar trailing on global memory does not
@@ -258,7 +261,7 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
     // path (≈ num_SMs/8) so moderately-underfilled levels, where TC-fused still wins, keep the
     // TC kernel. (FP16 stays on the fused kernel — its TC trailing is fast enough that even
     // severe-underfill routing nets a small loss on the smaller cases.)
-#ifndef CLS_NO_BIG_MB
+#ifdef CLS_BIG_MB
     const bool tf32_severe_underfill = (precision == Precision::TF32) &&
                                        ((long)level_size * B * 8 < factor_num_sms());
 #else
