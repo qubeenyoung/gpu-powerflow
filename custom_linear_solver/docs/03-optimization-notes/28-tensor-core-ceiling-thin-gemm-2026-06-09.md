@@ -28,8 +28,24 @@ ncu (70K B=64):
   (그대로 0), **long_scoreboard 11** (순수 global memory 지연), warps_active 16%, grid 19-39.
 
 → **trailing 을 분리해도 TC pipe 가 안 올랐다.** batched-TC 의 전제("분리/batching 하면 TC 가
-채워진다")가 반증됨. isolated trailing 은 mma 가 아니라 **L/U staging + C global 트래픽의
-memory-latency** 가 지배. (분리 실험은 correctness 버그도 있어 revert.)
+채워진다")가 반증됨. (분리 실험은 correctness 버그도 있어 revert.)
+
+### 2-1. trailing 시간 분해 (CLS_TRAIL_NO_MMA / NO_STAGE 토글, fused 커널 nsys, /30 repeats)
+
+`factor_big_tf32_ptx` 를 staging / mma+drain / panel+extend 로 분해:
+
+| 구성요소 | 70K | USA |
+|---|---|---|
+| **staging** (L/U 준비, global→shared) | 3.5ms (**1%**) | 15ms (**4%**) |
+| **mma+drain** (TC 연산 + C global write) | 92ms (35%) | 133ms (39%) |
+| panel+extend (나머지) | 164ms (63%) | 196ms (57%) |
+
+핵심: **staging(준비)은 1–4% 로 싸다** (L/U 패널 작고 L2 캐시). **TC mma 자체도 ~0%**(pipe 0.2%).
+"mma+drain" 35–39% 의 정체는 mma 가 아니라 **C drain** — uc²(≈140²) trailing 결과를 **global 에
+write** 하는 bandwidth (검산: 50 front × 140² × 4B × 64 batch × 30 ≈ 84ms ≈ 측정 92ms). big front
+이 global-resident 라 결과를 global 에 써야 하는 비용. **즉 TC 도 staging 도 느린 게 아니라, 비용은
+(a) panel barrier(57–63%) + (b) C drain memory(≈35%).** TC 가 가속할 "느린 연산"이 없음.
+(앞서 "staging 지배"라 적은 표현 정정 — 실제 trailing memory 비용은 C drain.)
 
 ## 3. 근본 원인: big trailing GEMM 은 thin (K=nc≈20)
 
