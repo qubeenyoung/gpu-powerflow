@@ -346,7 +346,9 @@ __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, 
             const int r_bot = r_top + 8;
             float c[NTJ8_MAX][4];
             #pragma unroll
-            for (int j = 0; j < NTJ8_MAX; ++j) { c[j][0]=c[j][1]=c[j][2]=c[j][3]=0.f; }
+            for (int j = 0; j < NTJ8_MAX; ++j) { 
+                c[j][0]=c[j][1]=c[j][2]=c[j][3]=0.f; 
+            }
             // (b) Outer K loop: load A once per K-tile (two contiguous halves → one 4-byte
             //     read), then sweep all N tiles inside.
             for (int kc = 0; kc < nks; ++kc) {
@@ -455,6 +457,9 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
 {
     const int UCP = ((uc + 15) / 16) * 16;
     const int KP  = ((nc + 7)  / 8)  * 8;
+    const int LDB = UCP + 4;          // Utf column stride padded by 4: 2·UCP is a multiple of 32,
+                                      // which made the B-read a 4-way shared bank conflict; +4
+                                      // spreads laneC across banks 0/8/16/24 → conflict-free.
 
     // (a) Stage L → Ltf and U → Utf, padded with zeros, no explicit TF32 conversion.
     for (int e = t; e < UCP * KP; e += nt) {
@@ -463,7 +468,7 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
     }
     for (int e = t; e < KP * UCP; e += nt) {
         const int k = e / UCP, j = e % UCP;
-        Utf[e] = (k < nc && j < uc) ? F[(long)k * fsz + (nc + j)] : 0.0f;
+        Utf[k * LDB + j] = (k < nc && j < uc) ? F[(long)k * fsz + (nc + j)] : 0.0f;
     }
     __syncthreads();
 
@@ -502,9 +507,9 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
                     if (tj8 >= ntj8) break;
                     // B-fragment per (kc, tj8): b0 = B[K_even, N=laneR], b1 = B[K_odd, N=laneR].
                     const unsigned b0 = __float_as_uint(
-                        Utf[(kc * 8 + laneC + 0) * UCP + tj8 * 8 + laneR]);
+                        Utf[(kc * 8 + laneC + 0) * LDB + tj8 * 8 + laneR]);
                     const unsigned b1 = __float_as_uint(
-                        Utf[(kc * 8 + laneC + 1) * UCP + tj8 * 8 + laneR]);
+                        Utf[(kc * 8 + laneC + 1) * LDB + tj8 * 8 + laneR]);
                     asm volatile(
                         "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
                         "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
@@ -549,9 +554,9 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
                 const unsigned a2 = __float_as_uint(A_top[1]);
                 const unsigned a3 = __float_as_uint(A_bot[1]);
                 const unsigned b0 = __float_as_uint(
-                    Utf[(kc * 8 + laneC + 0) * UCP + tj8 * 8 + laneR]);
+                    Utf[(kc * 8 + laneC + 0) * LDB + tj8 * 8 + laneR]);
                 const unsigned b1 = __float_as_uint(
-                    Utf[(kc * 8 + laneC + 1) * UCP + tj8 * 8 + laneR]);
+                    Utf[(kc * 8 + laneC + 1) * LDB + tj8 * 8 + laneR]);
                 asm volatile(
                     "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
                     "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"

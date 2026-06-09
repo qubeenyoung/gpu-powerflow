@@ -292,7 +292,7 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
         constexpr int bigT_tf32 = 512;
         const int ucp_max = round_up_to_multiple(max_uc, 16);
         const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
-        const size_t shbytes = (size_t)2 * ucp_max * kp_max * sizeof(float);
+        const size_t shbytes = (size_t)(2 * ucp_max * kp_max + 4 * kp_max) * sizeof(float);  // +4*kp_max: Utf LDB pad
         factor_big_tf32_ptx<<<grid, bigT_tf32, shbytes, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
