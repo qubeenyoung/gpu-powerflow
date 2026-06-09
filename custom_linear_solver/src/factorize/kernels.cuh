@@ -473,7 +473,11 @@ __global__ void __launch_bounds__(512, 2)
 // __launch_bounds__(512, 2) caps register usage so two blocks resident per SM is reachable
 // on sm_86; the inline-asm mma.sync writes directly to per-lane accumulators so no Csc
 // scratch is needed.
+#ifdef CLS_TF32X3
+__global__ void __launch_bounds__(512, 1)
+#else
 __global__ void __launch_bounds__(512, 2)
+#endif
                                 factor_big_tf32_ptx(int lbegin, int lend, const int* __restrict__ plcols,
                                 const int* __restrict__ front_off,
                                 const int* __restrict__ front_ptr,

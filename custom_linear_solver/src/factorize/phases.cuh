@@ -44,6 +44,14 @@
 namespace custom_linear_solver {
 namespace {
 
+// TF32 truncation to a 10-bit significand. For the x3 split we feed this truncated value as the
+// "hi" operand explicitly (so the mma uses exactly it) and lo = x - hi — making hi+lo == x exactly,
+// independent of the mma's internal f32→tf32 rounding.
+__device__ __forceinline__ float tf32t(float x)
+{
+    return __uint_as_float(__float_as_uint(x) & 0xFFFFE000u);
+}
+
 // =======================================================================================
 //  STAGE-IN  —  global → shared
 // =======================================================================================
@@ -557,19 +565,51 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
             for (int kc = 0; kc < nks; ++kc) {
                 const float* A_top = &Ltf[(ti * 16 + laneR + 0) * KP + kc * 8 + laneC];
                 const float* A_bot = &Ltf[(ti * 16 + laneR + 8) * KP + kc * 8 + laneC];
-                const unsigned a0 = __float_as_uint(A_top[0]);
-                const unsigned a1 = __float_as_uint(A_bot[0]);
-                const unsigned a2 = __float_as_uint(A_top[1]);
-                const unsigned a3 = __float_as_uint(A_bot[1]);
-                const unsigned b0 = __float_as_uint(
-                    Utf[(kc * 8 + laneC + 0) * LDB + tj8 * 8 + laneR]);
-                const unsigned b1 = __float_as_uint(
-                    Utf[(kc * 8 + laneC + 1) * LDB + tj8 * 8 + laneR]);
+                const float at0 = A_top[0], at1 = A_top[1], ab0 = A_bot[0], ab1 = A_bot[1];
+                const float bv0 = Utf[(kc * 8 + laneC + 0) * LDB + tj8 * 8 + laneR];
+                const float bv1 = Utf[(kc * 8 + laneC + 1) * LDB + tj8 * 8 + laneR];
+#ifdef CLS_TF32X3
+                // Ootomo–Yokota error-corrected TF32. hi/lo split (hi + lo == at exactly), and
+                // CRITICAL: accumulate every mma product OUTSIDE the tensor core (zero-input mma →
+                // FP32 SIMT add). The TC accumulates partial sums round-toward-zero (RZ), which
+                // biases the small hi·lo / lo·hi corrections away; the SIMT `+=` is round-to-nearest.
+                // TF32x5: 2-level lo split (lo = lo_hi + lo_lo) captures the FULL 13-bit residual.
+                // A single tf32 lo keeps only 10 bits; catastrophic cancellation in ill-conditioned
+                // fronts amplifies the dropped 3 bits, so 3-term recovers only to ~3e-4 there. The
+                // 2nd lo level restores fp32-equivalent products. All mma products accumulated OUTSIDE
+                // the tensor core (zero-input mma → SIMT RN add) to avoid the TC's RZ bias.
+                unsigned ah[4], alh[4], all[4], bh[2], blh[2], bll[2];
+                { const float av[4] = {at0, ab0, at1, ab1};
+                  #pragma unroll
+                  for (int z = 0; z < 4; ++z) { float h = tf32t(av[z]); float lo = av[z] - h; float lh = tf32t(lo);
+                    ah[z] = __float_as_uint(h); alh[z] = __float_as_uint(lh); all[z] = __float_as_uint(lo - lh); } }
+                { const float bv[2] = {bv0, bv1};
+                  #pragma unroll
+                  for (int z = 0; z < 2; ++z) { float h = tf32t(bv[z]); float lo = bv[z] - h; float lh = tf32t(lo);
+                    bh[z] = __float_as_uint(h); blh[z] = __float_as_uint(lh); bll[z] = __float_as_uint(lo - lh); } }
+                float t0, t1, t2, t3;
+                #define X5MMA(A0,A1,A2,A3,B0,B1) { t0=t1=t2=t3=0.f; \
+                    asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 " \
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n" \
+                        : "+f"(t0),"+f"(t1),"+f"(t2),"+f"(t3) \
+                        : "r"(A0),"r"(A1),"r"(A2),"r"(A3),"r"(B0),"r"(B1)); \
+                    c0+=t0; c1+=t1; c2+=t2; c3+=t3; }
+                X5MMA(ah[0],ah[1],ah[2],ah[3], bh[0],bh[1]);        // hi·hi
+                X5MMA(ah[0],ah[1],ah[2],ah[3], blh[0],blh[1]);      // hi·lo_hi
+                X5MMA(alh[0],alh[1],alh[2],alh[3], bh[0],bh[1]);    // lo_hi·hi
+                X5MMA(ah[0],ah[1],ah[2],ah[3], bll[0],bll[1]);      // hi·lo_lo
+                X5MMA(all[0],all[1],all[2],all[3], bh[0],bh[1]);    // lo_lo·hi
+                #undef X5MMA
+#else
+                const unsigned a0 = __float_as_uint(at0), a1 = __float_as_uint(ab0),
+                               a2 = __float_as_uint(at1), a3 = __float_as_uint(ab1);
+                const unsigned b0 = __float_as_uint(bv0), b1 = __float_as_uint(bv1);
                 asm volatile(
                     "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
                     "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
                     : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
                     : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+#endif
             }
             const int col0 = tj8 * 8 + laneC;
             const int col1 = col0 + 1;
