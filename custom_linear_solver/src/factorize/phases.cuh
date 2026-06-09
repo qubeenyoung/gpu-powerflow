@@ -2,7 +2,7 @@
 
 // FACTORIZE — per-phase device building blocks.
 //
-// Internal — included only by multifrontal.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
+// Internal — included only by numeric_engine.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
 // A front is a square dense block with two contiguous regions (row-major, leading dim = fsz):
 //

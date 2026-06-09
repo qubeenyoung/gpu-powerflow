@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "plan/solver_constants.hpp"
+#include "solver_constants.hpp"
 
 namespace custom_linear_solver::plan {
 

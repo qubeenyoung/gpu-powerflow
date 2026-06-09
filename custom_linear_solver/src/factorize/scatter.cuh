@@ -1,6 +1,6 @@
 #pragma once
 
-// Internal — included only by multifrontal.cu (single TU).
+// Internal — included only by numeric_engine.cu (single TU).
 
 #include <cuda_runtime.h>
 

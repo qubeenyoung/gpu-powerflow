@@ -2,7 +2,7 @@
 
 // FACTORIZE — per-tier __global__ kernel entry points.
 //
-// Internal — included only by multifrontal.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
+// Internal — included only by numeric_engine.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
 // Per-front canonical flow (all kernels):
 //

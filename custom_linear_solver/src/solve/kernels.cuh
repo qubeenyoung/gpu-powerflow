@@ -2,7 +2,7 @@
 
 // SOLVE — kernel entry points (__global__).
 //
-// Internal — included only by multifrontal.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
+// Internal — included only by numeric_engine.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
 // Two kernel families × two directions:
 //

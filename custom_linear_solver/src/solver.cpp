@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "matrix/pattern_kernels.hpp"  // IntDeviceBuffer
-#include "multifrontal.hpp"             // setup, factorize, solve, set_stream, State
+#include "numeric_engine.hpp"             // setup, factorize, solve, set_stream, State
 #include "plan/build.hpp"               // build_plan_from_csr
 #include "profile/profile.hpp"          // cls::profile::init / flush + CLS_PROFILE_* macros
 

@@ -2,7 +2,7 @@
 
 // FACTORIZE — host-side level dispatch.
 //
-// Internal — included only by multifrontal.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
+// Internal — included only by numeric_engine.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
 // Two layers:
 //
@@ -16,7 +16,7 @@
 //                                level walk on the main stream.
 //
 //   issue_factor_level_range   — per-range dispatcher. For one (sub)range of panels at one
-//                                level it scans the range (scan_level_metrics), picks a tier
+//                                level it scans the range (scan_front_range), picks a tier
 //                                with classify_front_tier, and calls dispatch_factor_small /
 //                                _mid / _big. The mid dispatch falls through to the big tier
 //                                when its shared layout overflows kMidSharedMemoryBudgetBytes.
@@ -26,8 +26,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-#include "level_metrics.hpp"
-#include "multifrontal.hpp"
+#include "plan/front_range_caps.hpp"
+#include "numeric_engine.hpp"
 #include "factorize/kernels.cuh"
 
 namespace custom_linear_solver {
@@ -142,7 +142,7 @@ static inline void launch_factor_big_mb(int b, int e, int level_size, int B, int
 // factor_small_sg gate keeps the classic one-warp-per-front form (SG=32) until the packed grid
 // fills the GPU.
 static void dispatch_factor_small(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
-                                  int b, int e, const int* d_plc, const LevelMetrics& m)
+                                  int b, int e, const int* d_plc, const FrontRangeCaps& m)
 {
     const Precision prec = st.precision;
     const int B = st.batch_count;
@@ -167,7 +167,7 @@ static void dispatch_factor_small(const MultifrontalPlan& plan, State& st, cudaS
 // shared layout overflows the per-block budget (e.g. FP64 with a large fsz_cap), so the caller
 // falls through to the big tier on the same range.
 static bool dispatch_factor_mid(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
-                                int b, int e, const int* d_plc, const LevelMetrics& m)
+                                int b, int e, const int* d_plc, const FrontRangeCaps& m)
 {
     const auto& [max_fsz, max_uc, level_max_nc, level_max_uc] = m;
     const Precision prec = st.precision;
@@ -263,7 +263,7 @@ static bool dispatch_factor_mid(const MultifrontalPlan& plan, State& st, cudaStr
 // levels of a single-system solve) split the scalar path across blocks so the trailing GEMM
 // fans out across SMs instead of running one block per front; filled levels keep the fused kernel.
 static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
-                                int b, int e, const int* d_plc, const LevelMetrics& m)
+                                int b, int e, const int* d_plc, const FrontRangeCaps& m)
 {
     const auto& [max_fsz, max_uc, level_max_nc, level_max_uc] = m;
     const Precision prec = st.precision;
@@ -359,7 +359,7 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
                                      const int* d_plc, const int* h_plc)
 {
     if (e <= b) return;
-    const LevelMetrics m = scan_level_metrics(plan, h_plc, b, e);
+    const FrontRangeCaps m = scan_front_range(plan, h_plc, b, e);
     switch (classify_front_tier(m.max_fsz)) {
         case FrontTier::kSmall:
             dispatch_factor_small(plan, st, stream, b, e, d_plc, m);

@@ -30,7 +30,7 @@ namespace custom_linear_solver {
 // FP16 and TF32 require Ampere (sm80+).
 enum class Precision { FP64, FP32, FP16, TF32 };
 
-// Small utilities used by both the runtime wrapper (multifrontal.cu) and the dispatchers
+// Small utilities used by both the runtime wrapper (numeric_engine.cu) and the dispatchers
 // (factorize/dispatch.cuh, solve/dispatch.cuh). Defined here so there is one canonical copy.
 inline bool is_fp32_front(Precision p)
 {
@@ -43,7 +43,7 @@ inline bool is_tf32_path(Precision p)
 }
 
 // Per-batch runtime state. Owned by Solver; rebuilt by setup() each time batch_size or
-// precision changes. The kernel launches in multifrontal.cu read State fields directly.
+// precision changes. The kernel launches in numeric_engine.cu read State fields directly.
 struct State {
     int batch_count = 0;
     long front_total = 0;

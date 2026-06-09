@@ -70,7 +70,7 @@ if(CLS_BUILD_CUDA_OPS)
     src/plan/multifrontal_plan.cu
     src/plan/analyze.cu
     src/plan/build.cpp
-    src/multifrontal.cu
+    src/numeric_engine.cu
     src/symbolic/elimination_tree.cpp
     src/symbolic/supernode.cpp
     src/symbolic/multifrontal.cpp

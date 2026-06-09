@@ -2,7 +2,7 @@
 
 // SOLVE — host-side level dispatch.
 //
-// Internal — included only by multifrontal.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
+// Internal — included only by numeric_engine.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
 // Two layers of dispatch:
 //
@@ -21,8 +21,8 @@
 
 #include <cuda_runtime.h>
 
-#include "level_metrics.hpp"
-#include "multifrontal.hpp"
+#include "plan/front_range_caps.hpp"
+#include "numeric_engine.hpp"
 #include "solve/kernels.cuh"
 
 namespace custom_linear_solver {
@@ -97,7 +97,7 @@ static void fwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
     const int B = st.batch_count;
     const bool float_front = is_fp32_front(st.precision);
     const int selt = float_front ? (int)sizeof(float) : (int)sizeof(double);
-    const int mfsz = scan_level_metrics(plan, h_plc, b, e).max_fsz;
+    const int mfsz = scan_front_range(plan, h_plc, b, e).max_fsz;
 
     // Small tier: sub-group-packed warp kernel (FPW = kWarpSize/SG fronts per warp).
     if (classify_front_tier(mfsz) == FrontTier::kSmall) {
@@ -136,7 +136,7 @@ static void bwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
     const int B = st.batch_count;
     const bool float_front = is_fp32_front(st.precision);
     const int selt = float_front ? (int)sizeof(float) : (int)sizeof(double);
-    const LevelMetrics metrics = scan_level_metrics(plan, h_plc, b, e);
+    const FrontRangeCaps metrics = scan_front_range(plan, h_plc, b, e);
     const int mfsz = metrics.max_fsz;
     const int max_cb = metrics.level_max_uc;
 

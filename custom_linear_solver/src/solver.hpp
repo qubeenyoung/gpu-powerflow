@@ -4,7 +4,7 @@
 #include <string>
 
 #include "matrix/view.hpp"
-#include "multifrontal.hpp"   // Precision { FP64, FP32, FP16, TF32 }
+#include "numeric_engine.hpp"   // Precision { FP64, FP32, FP16, TF32 }
 
 namespace custom_linear_solver {
 

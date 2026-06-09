@@ -1,4 +1,4 @@
-#include "multifrontal.hpp"
+#include "numeric_engine.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -26,7 +26,7 @@ namespace custom_linear_solver {
 
 using custom_linear_solver::plan::MultifrontalPlan;
 
-// is_fp32_front / round_up_int are inline in multifrontal.hpp (shared with the dispatchers).
+// is_fp32_front is inline in numeric_engine.hpp (shared with the dispatchers).
 
 State::~State()
 {

@@ -2,7 +2,7 @@
 
 // SOLVE — I/O permutation kernels.
 //
-// Internal — included only by multifrontal.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
+// Internal — included only by numeric_engine.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
 // These run at the entry and exit of the solve phase to convert between the user's RHS /
 // solution layout (original column order) and the working-vector layout used by the level

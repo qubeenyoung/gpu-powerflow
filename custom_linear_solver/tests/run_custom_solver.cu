@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "multifrontal.hpp"
+#include "numeric_engine.hpp"
 #include "io.hpp"
 #include "solver.hpp"
 

@@ -2,7 +2,7 @@
 
 // SOLVE — per-phase device building blocks.
 //
-// Internal — included only by multifrontal.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
+// Internal — included only by numeric_engine.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
 // Per-front phases (all run inside a __global__ solve kernel):
 //
@@ -26,7 +26,7 @@
 
 #include <cuda_runtime.h>
 
-#include "plan/solver_constants.hpp"
+#include "solver_constants.hpp"
 
 namespace custom_linear_solver {
 namespace {
