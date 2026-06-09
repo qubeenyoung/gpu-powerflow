@@ -58,8 +58,12 @@ int main(int argc, char** argv)
                                   : CudaLinearSolverKind::CuDSS;
 
     NRConfig config;
-    config.tolerance = 1e-6;
+    config.tolerance = 1e-8;
+    if (const char* t = std::getenv("CUPF_BENCH_TOL")) config.tolerance = std::stod(t);
     config.max_iter = 30;
+    if (const char* m = std::getenv("CUPF_BENCH_MAX_ITER")) config.max_iter = std::stoi(m);
+    double load_scale_step = 0.001;
+    if (const char* s = std::getenv("CUPF_BENCH_SCALE_STEP")) load_scale_step = std::stod(s);
     SolveOptions solve_options;
 
     std::cout << "case=" << data.case_name << " n_bus=" << n
@@ -68,12 +72,12 @@ int main(int argc, char** argv)
     std::cout << "B,solve_total_us,ibus_us,mismatch_us,mnorm_us,jac_us,prep_us,fac_us,sol_us,vupd_us,upload_us,download_us\n";
 
     for (int32_t B : batches) {
-        // Replicate sbus/V0 into B contiguous cases (stride = n), with a tiny
-        // per-case load scaling so the systems are distinct yet converge.
+        // Replicate sbus/V0 into B contiguous cases (stride = n). A configurable
+        // per-case load step can make cases distinct; step=0 repeats the same load.
         std::vector<std::complex<double>> sbus(static_cast<size_t>(B) * n);
         std::vector<std::complex<double>> v0(static_cast<size_t>(B) * n);
         for (int32_t b = 0; b < B; ++b) {
-            const double scale = 1.0 + 0.001 * b;
+            const double scale = 1.0 + load_scale_step * b;
             for (int32_t i = 0; i < n; ++i) {
                 sbus[static_cast<size_t>(b) * n + i] = data.sbus[i] * scale;
                 v0[static_cast<size_t>(b) * n + i] = data.v0[i];
