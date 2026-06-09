@@ -63,6 +63,31 @@ panel 최적화는 fp32/tf32 **양쪽에 동등**하게 적용된다(같은 scal
 - TC 가 fp32 를 실제로 이기려면 trailing 을 compute-bound 로 바꿔야 함(별개 과제). 본 lever 는
   "TC 가속이 보이게" + "factor 가속" 두 목적을 동시에 달성하는 현실적 다음 스텝.
 
+## 4-1. blocked LU 프로토타입 — **반증 (2026-06-09)**
+
+right-looking blocked LU (BW=4 strip row-fused + rank-BW GEMM) 프로토타입으로 sync 횟수를
+**2·nc=40 → ~nc+nc/BW=25** 로 줄였으나 (`CLS_BLOCKED_LU` 토글):
+
+| case | B | baseline(two-phase) | blocked | |
+|---|---|---|---|---|
+| 70K | 1 | 1.93 | 2.06 | **+7.0%** |
+| 70K | 64 | 0.421 | 0.412 | −2.1% |
+| USA | 1 | 2.03 | 2.12 | **+4.7%** |
+| USA | 64 | 0.480 | 0.492 | **+2.6%** |
+
+정확성 OK (fp64 relres e-11~e-14, rank-BW GEMM 누적순서 차이 + ND 변동권). **그러나 더 느림**, 그리고
+**panel barrier stall 이 13.5 → 20.8 으로 악화**.
+
+**메커니즘**: sync 횟수는 줄였지만 blocked 의 strip 은 좁아(O(BW)=4 inner) **sync 사이 일감이 더 적다**.
+barrier stall ratio = barrier 대기 / 발행 명령 → sync 당 일감이 적으면 barrier 가 **더** 노출된다. 즉
+panel 은 sync **횟수**가 아니라 **sync latency 노출**이 문제이고, 노출은 **sync 사이 일감 부족(underfill)**
+에서 온다. blocked 는 일감을 더 잘게 쪼개 노출을 악화시켰다 (block-size 반증과 동일 원리).
+
+→ **panel lever 정리**: block-size 축소(반증) + blocked LU(반증) 모두 실패. panel barrier 노출은
+**구조적 underfill**(power-grid 얕은 트리 = 큰 front 적음)에서 오므로, sync 를 줄이거나 일을 쪼개는
+것으로는 안 된다. 유일한 정공법은 **동시 front 수↑**인데 구조적으로 막혀 있다 (B 를 키워도 §5 처럼
+per-sys 포화).
+
 ## 5. 다음 실험 (우선순위)
 - ~~block-size A/B~~ **완료 → 반증** (1024 최적, §3-2). barrier 는 block-size 로 못 줄임.
 - 남은 후보 (둘 다 sync **횟수** 또는 **노출**을 건드림):
