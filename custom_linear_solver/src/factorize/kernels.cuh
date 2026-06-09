@@ -367,6 +367,49 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
     extend_add<T, T>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
 }
 
+// FP64 / FP32 big front with L/U-staged trailing. Identical to factor_big except the rank-nc
+// trailing stages the L (uc x nc) and U (nc x uc) panels into shared once (trailing_update_staged)
+// instead of re-reading them from the global front ~uc times per output. The front itself stays
+// global-resident; only the L/U panels are staged. Shared is sized by (level_max_nc, level_max_uc)
+// — the caller gates on the 96 KB budget and falls back to factor_big when it overflows. Measured
+// factor_big -23%, end-to-end factor -11% (USA fp64 B=64) / -5.7% (25K) for the filled big tier.
+template <typename T>
+__global__ void factor_big_staged(int lbegin, int lend, const int* __restrict__ plcols,
+                                  const int* __restrict__ front_off,
+                                  const int* __restrict__ front_ptr,
+                                  const int* __restrict__ ncols,
+                                  const int* __restrict__ panel_parent,
+                                  const int* __restrict__ asm_ptr,
+                                  const int* __restrict__ asm_local, T* frontB,
+                                  long front_total, int* sing, int do_extend,
+                                  int level_max_nc, int level_max_uc)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    T* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    T* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+
+    extern __shared__ char smem_big_staged[];
+    T* sh_L = reinterpret_cast<T*>(smem_big_staged);
+    T* sh_U = sh_L + (long)level_max_uc * level_max_nc;
+
+    factorize_front<T>(F, fsz, nc, uc, t, nt, sing,
+        [&] { trailing_update_staged<T>(F, fsz, nc, uc, t, nt, sh_L, sh_U); });
+
+    const int par = panel_parent[p];
+    if (par < 0 || !do_extend) return;
+    __syncthreads();
+    T* Fp = front + front_off[par];
+    const int pfsz = front_ptr[par + 1] - front_ptr[par];
+    const int abase = asm_ptr[p];
+    extend_add<T, T>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
+}
+
 // ----- Multi-block big-front split (B=1 / underfilled-level path) ----------------------------
 //
 // When a big level has too few fronts to fill the GPU (level_size × B < num_SMs, e.g. the deep

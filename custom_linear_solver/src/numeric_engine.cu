@@ -101,6 +101,10 @@ static void register_kernel_attributes(Precision precision)
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_mid<double>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
+    cudaFuncSetAttribute(factor_big_staged<float>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
+    cudaFuncSetAttribute(factor_big_staged<double>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     if (is_fp32_front(precision)) {
         cudaFuncSetAttribute(factor_mid_fp16_ptx,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);

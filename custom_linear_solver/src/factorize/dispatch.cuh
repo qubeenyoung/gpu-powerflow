@@ -281,14 +281,25 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
         // FP64 uses a smaller block (128) — the scalar trailing on global memory does not
         // amortise the larger occupancy cost of a 1024-thread block at FP64 register pressure.
         constexpr int T = 128;
-        if (big_underfill)
+        if (big_underfill) {
             launch_factor_big_mb<double>(b, e, level_size, B, T, level_max_uc, plan, d_plc,
                                          st.d_front_batch, st.d_sing, do_extend, stream);
-        else
-            factor_big<double><<<grid, T, 0, stream>>>(
+            return;
+        }
+        const size_t big_lu_bytes = (size_t)2 * level_max_nc * level_max_uc * sizeof(double);
+#ifndef CLS_NO_BIG_STAGED
+        if (big_lu_bytes <= kMidSharedMemoryBudgetBytes) {
+            factor_big_staged<double><<<grid, T, big_lu_bytes, stream>>>(
                 b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
-                plan.front_total, st.d_sing, do_extend);
+                plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc);
+            return;
+        }
+#endif
+        factor_big<double><<<grid, T, 0, stream>>>(
+            b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
+            plan.front_total, st.d_sing, do_extend);
         return;
     }
     constexpr int bigT = 1024;
@@ -340,15 +351,26 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
             plan.front_total, st.d_sing, do_extend, ucp_max, kp_max);
         return;
     }
-    // FP32 big: scalar trailing on the global front, no staging.
-    if (big_underfill)
+    // FP32 big trailing on the global front.
+    if (big_underfill) {
         launch_factor_big_mb<float>(b, e, level_size, B, bigT, level_max_uc, plan, d_plc,
                                     st.d_front_batch_f, st.d_sing, do_extend, stream);
-    else
-        factor_big<float><<<grid, bigT, 0, stream>>>(
+        return;
+    }
+    const size_t big_lu_bytes = (size_t)2 * level_max_nc * level_max_uc * sizeof(float);
+#ifndef CLS_NO_BIG_STAGED
+    if (big_lu_bytes <= kMidSharedMemoryBudgetBytes) {
+        factor_big_staged<float><<<grid, bigT, big_lu_bytes, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-            plan.front_total, st.d_sing, do_extend);
+            plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc);
+        return;
+    }
+#endif
+    factor_big<float><<<grid, bigT, 0, stream>>>(
+        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+        plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
+        plan.front_total, st.d_sing, do_extend);
 }
 
 // Per-range dispatcher: scan the panels in plcols[b..e), pick the tier from the level's max front
