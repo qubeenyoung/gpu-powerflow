@@ -79,28 +79,28 @@ struct State {
 // `use_multistream_subtrees` (default true): when the plan has 2..8 independent subtrees,
 // dispatch each on its own CUDA stream. Set false to force single-stream dispatch (debugging /
 // reproducibility); when there is only one subtree the flag has no effect.
-bool setup(const plan::MultifrontalPlan& plan, int B, Precision prec, State& state,
+bool setup(const plan::MultifrontalPlan& plan, int B, Precision precision, State& state,
            bool use_multistream_subtrees = true, bool tier_split = true);
 
 // Bind a caller-owned cudaStream_t (passed as void*). External / capturable mode only.
 void set_stream(State& state, void* stream);
 
-// Factor / solve. d_valuesB has B * nnz_a entries, d_rhsB / d_solB have B * n entries.
+// Factor / solve. d_values_batch has B * nnz_a entries, d_rhs_batch / d_solution_batch have B * n entries.
 // d_ordered_value_to_csr maps the analyze-time CSR ordering to the symbolic value slots;
 // d_perm is the symmetric permutation produced by analyze.
 bool factorize(const plan::MultifrontalPlan& plan, State& state,
-               const double* d_valuesB, const int* d_ordered_value_to_csr);
+               const double* d_values_batch, const int* d_ordered_value_to_csr);
 bool solve(const plan::MultifrontalPlan& plan, State& state,
-           const double* d_rhsB, double* d_solB, const int* d_perm);
+           const double* d_rhs_batch, double* d_solution_batch, const int* d_perm);
 
 // FP32-input overloads. The factor reads an FP32 value array straight into the working buffers
 // (no FP64 staging). The solve overloads cover combinations of (FP64 or FP32) RHS and
 // (FP64 or FP32) solution buffer.
 bool factorize(const plan::MultifrontalPlan& plan, State& state,
-               const float* d_valuesB, const int* d_ordered_value_to_csr);
+               const float* d_values_batch, const int* d_ordered_value_to_csr);
 bool solve(const plan::MultifrontalPlan& plan, State& state,
-           const double* d_rhsB, float* d_solB, const int* d_perm);
+           const double* d_rhs_batch, float* d_solution_batch, const int* d_perm);
 bool solve(const plan::MultifrontalPlan& plan, State& state,
-           const float* d_rhsB, float* d_solB, const int* d_perm);
+           const float* d_rhs_batch, float* d_solution_batch, const int* d_perm);
 
 }  // namespace custom_linear_solver

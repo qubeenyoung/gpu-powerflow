@@ -20,7 +20,7 @@
 //
 //   tier   | block  | front | kernel                  | Phase-3 trailing
 //   -------+--------+-------+-------------------------+-------------------------------------
-//   small  | 8 warp | smem  | factor_small<T, SG>     | lu_small_warp (fused Phase 1+3)
+//   small  | 8 warp | smem  | factor_small<T, sub_group_size>     | lu_small_warp (fused Phase 1+3)
 //   mid    | 64..256| smem  | factor_mid<T>           | trailing_update_staged<T>
 //          |        |       | factor_mid_fp16_ptx     | trailing_update_mma_fp16_ptx
 //          |        |       | factor_mid_tf32_ptx<K>  | trailing_update_mma_tf32{_k4}_ptx
@@ -65,70 +65,70 @@ namespace {
 //      __syncwarp.
 //   3. writeback Fs → global F (factored L | U panel only; the uc×uc CB stays in Fs).
 //   4. extend_add: scatter the CB straight from shared into the parent front via atomicAdd.
-// SG = sub-group lane count (8 / 16 / 32). One sub-group of SG lanes owns one (front, batch);
-// FPW = 32/SG sub-groups (fronts) pack per warp, kSmallTierWarpsPerBlock warps per block. SG=32 is the
-// classic one-warp-per-front form. The dispatcher picks SG from the level's max_fsz so the
-// tiny fronts (fsz ≤ 16) keep all SG lanes busy and expose FPW independent fronts' memory
+// sub_group_size = sub-group lane count (8 / 16 / 32). One sub-group of sub_group_size lanes owns one (front, batch);
+// fronts_per_warp = 32/sub_group_size sub-groups (fronts) pack per warp, kSmallTierWarpsPerBlock warps per block. sub_group_size=32 is the
+// classic one-warp-per-front form. The dispatcher picks sub_group_size from the level's max_fsz so the
+// tiny fronts (fsz ≤ 16) keep all sub_group_size lanes busy and expose fronts_per_warp independent fronts' memory
 // traffic per warp (latency hiding on this memory-latency-bound tier).
-template <typename FT, int SG>
-__global__ void factor_small(int lbegin, int level_size, int B, int fsz2cap,
+template <typename FrontType, int sub_group_size>
+__global__ void factor_small(int lbegin, int level_size, int B, int front_area,
                               const int* __restrict__ plcols,
                               const int* __restrict__ front_off,
                               const int* __restrict__ front_ptr,
                               const int* __restrict__ ncols,
                               const int* __restrict__ panel_parent,
                               const int* __restrict__ asm_ptr,
-                              const int* __restrict__ asm_local, FT* frontB,
+                              const int* __restrict__ asm_local, FrontType* frontB,
                               long front_total, int* sing, int do_extend)
 {
-    constexpr int FPW = 32 / SG;                          // fronts per warp
+    constexpr int fronts_per_warp = 32 / sub_group_size;                          // fronts per warp
     extern __shared__ unsigned char smem_sw_raw[];
-    FT* smem_sw = reinterpret_cast<FT*>(smem_sw_raw);
+    FrontType* smem_sw = reinterpret_cast<FrontType*>(smem_sw_raw);
 
-    // Sub-group identity: which front this group of SG lanes owns, and the lane within it.
+    // Sub-group identity: which front this group of sub_group_size lanes owns, and the lane within it.
     const int warp_in_blk = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
-    const int sg = lane / SG;                             // sub-group id in warp (0..FPW-1)
-    const int sl = lane % SG;                             // lane within sub-group (0..SG-1)
-    const unsigned mask = (SG == 32) ? 0xffffffffu : (((1u << SG) - 1u) << (sg * SG));
+    const int sg = lane / sub_group_size;                             // sub-group id in warp (0..fronts_per_warp-1)
+    const int sl = lane % sub_group_size;                             // lane within sub-group (0..sub_group_size-1)
+    const unsigned mask = (sub_group_size == 32) ? 0xffffffffu : (((1u << sub_group_size) - 1u) << (sg * sub_group_size));
 
     const int warps_per_blk = blockDim.x >> 5;
     const int warp_global = blockIdx.x * warps_per_blk + warp_in_blk;
-    const int slot = warp_global * FPW + sg;              // global (front, batch) index
+    const int slot = warp_global * fronts_per_warp + sg;              // global (front, batch) index
     if (slot >= level_size * B) return;                   // whole sub-group exits together
     const int fl = slot % level_size;
     const int bb = slot / level_size;
 
     // Locate the front buffer for (batch bb, panel p).
-    FT* front = frontB + (long)bb * front_total;
+    FrontType* front = frontB + (long)bb * front_total;
     const int p = plcols[lbegin + fl];
     const int fsz = front_ptr[p + 1] - front_ptr[p];
     const int nc = ncols[p];
     const int uc = fsz - nc;
     const int fsz2 = fsz * fsz;
-    FT* F = front + front_off[p];
+    FrontType* F = front + front_off[p];
 
-    // Per-sub-group shared scratch (slot fsz2cap reserved per sub-group).
-    FT* Fs = smem_sw + (long)(warp_in_blk * FPW + sg) * fsz2cap;
+    // Per-sub-group shared scratch (slot front_area reserved per sub-group).
+    FrontType* Fs = smem_sw + (long)(warp_in_blk * fronts_per_warp + sg) * front_area;
 
     // 1. global F → per-sub-group Fs.
-    for (int e = sl; e < fsz2; e += SG) Fs[e] = F[e];
+    for (int e = sl; e < fsz2; e += sub_group_size) Fs[e] = F[e];
     __syncwarp(mask);
 
     // 2. fused panel LU + trailing on Fs.
-    lu_small_warp<FT, SG>(Fs, fsz, nc, sl, mask, sing);
+    lu_small_warp<FrontType, sub_group_size>(Fs, fsz, nc, sl, mask, sing);
     __syncwarp(mask);
 
     // 3. writeback factored panel.
-    writeback_factored<FT, FT>(F, Fs, fsz, nc, uc, sl, SG);
+    writeback_factored<FrontType, FrontType>(F, Fs, fsz, nc, uc, sl, sub_group_size);
 
     // 4. CB extend-add into parent front (skip for roots / when disabled).
     const int par = panel_parent[p];
     if (par < 0 || !do_extend) return;
-    FT* Fp = front + front_off[par];
+    FrontType* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
     const int abase = asm_ptr[p];
-    for (int e = sl; e < uc * uc; e += SG) {
+    for (int e = sl; e < uc * uc; e += sub_group_size) {
         const int a = e / uc, b = e % uc;
         atomicAdd(&Fp[(long)asm_local[abase + a] * pfsz + asm_local[abase + b]],
                   Fs[(long)(nc + a) * fsz + (nc + b)]);

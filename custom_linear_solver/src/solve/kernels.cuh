@@ -35,10 +35,10 @@ namespace {
 // (front, batch) → block-launch / scheduling overhead + poor SM packing. solve_fwd_small /
 // solve_bwd_small pack W warps per block (one (front, batch) per warp) and use __syncwarp.
 
-// SG = sub-group lane count (8 / 16 / 32). One sub-group of SG lanes owns one (front, batch);
-// FPW = 32/SG fronts pack per warp (same tiny-front-packing idea as factor_small). SG=32 is the
-// classic one-warp-per-front form. The dispatcher picks SG from the level's max_fsz.
-template <typename T, int SG>
+// sub_group_size = sub-group lane count (8 / 16 / 32). One sub-group of sub_group_size lanes owns one (front, batch);
+// fronts_per_warp = 32/sub_group_size fronts pack per warp (same tiny-front-packing idea as factor_small). sub_group_size=32 is the
+// classic one-warp-per-front form. The dispatcher picks sub_group_size from the level's max_fsz.
+template <typename T, int sub_group_size>
 __global__ void solve_fwd_small(int lbegin, int level_size, int B, int slab,
                                 const int* __restrict__ plcols,
                                 const int* __restrict__ front_off,
@@ -47,15 +47,15 @@ __global__ void solve_fwd_small(int lbegin, int level_size, int B, int slab,
                                 const int* __restrict__ front_rows,
                                 const T* frontB, T* yB, long front_total, int n)
 {
-    constexpr int FPW = 32 / SG;
+    constexpr int fronts_per_warp = 32 / sub_group_size;
     extern __shared__ unsigned char fsm_raw[];
     T* slabs = reinterpret_cast<T*>(fsm_raw);
     const int warp_in_blk = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
-    const int sg = lane / SG, sl = lane % SG;
-    const unsigned mask = (SG == 32) ? 0xffffffffu : (((1u << SG) - 1u) << (sg * SG));
+    const int sg = lane / sub_group_size, sl = lane % sub_group_size;
+    const unsigned mask = (sub_group_size == 32) ? 0xffffffffu : (((1u << sub_group_size) - 1u) << (sg * sub_group_size));
     const int warps_per_blk = blockDim.x >> 5;
-    const int slot = (blockIdx.x * warps_per_blk + warp_in_blk) * FPW + sg;
+    const int slot = (blockIdx.x * warps_per_blk + warp_in_blk) * fronts_per_warp + sg;
     if (slot >= level_size * B) return;
     const int fl = slot % level_size, bb = slot / level_size;
     const T* front = frontB + (long)bb * front_total;
@@ -66,14 +66,14 @@ __global__ void solve_fwd_small(int lbegin, int level_size, int B, int slab,
     const int nc = ncols[p];
     const T* F = front + front_off[p];
     const int* fr = front_rows + s;
-    T* sh_piv = slabs + (long)(warp_in_blk * FPW + sg) * slab;
+    T* sh_piv = slabs + (long)(warp_in_blk * fronts_per_warp + sg) * slab;
 
-    fwd_substitute<T, SG>(F, fsz, nc, fr, y, sh_piv, sl, mask);
+    fwd_substitute<T, sub_group_size>(F, fsz, nc, fr, y, sh_piv, sl, mask);
     __syncwarp(mask);
-    fwd_cb_update<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, sl, /*nt=*/SG);
+    fwd_cb_update<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, sl, /*nt=*/sub_group_size);
 }
 
-template <typename T, int SG>
+template <typename T, int sub_group_size>
 __global__ void solve_bwd_small(int lbegin, int level_size, int B, int slab,
                                 const int* __restrict__ plcols,
                                 const int* __restrict__ front_off,
@@ -82,15 +82,15 @@ __global__ void solve_bwd_small(int lbegin, int level_size, int B, int slab,
                                 const int* __restrict__ front_rows,
                                 const T* frontB, T* yB, long front_total, int n)
 {
-    constexpr int FPW = 32 / SG;
+    constexpr int fronts_per_warp = 32 / sub_group_size;
     extern __shared__ unsigned char bsm_raw[];
     T* slabs = reinterpret_cast<T*>(bsm_raw);
     const int warp_in_blk = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
-    const int sg = lane / SG, sl = lane % SG;
-    const unsigned mask = (SG == 32) ? 0xffffffffu : (((1u << SG) - 1u) << (sg * SG));
+    const int sg = lane / sub_group_size, sl = lane % sub_group_size;
+    const unsigned mask = (sub_group_size == 32) ? 0xffffffffu : (((1u << sub_group_size) - 1u) << (sg * sub_group_size));
     const int warps_per_blk = blockDim.x >> 5;
-    const int slot = (blockIdx.x * warps_per_blk + warp_in_blk) * FPW + sg;
+    const int slot = (blockIdx.x * warps_per_blk + warp_in_blk) * fronts_per_warp + sg;
     if (slot >= level_size * B) return;
     const int fl = slot % level_size, bb = slot / level_size;
     const T* front = frontB + (long)bb * front_total;
@@ -102,14 +102,14 @@ __global__ void solve_bwd_small(int lbegin, int level_size, int B, int slab,
     const T* F = front + front_off[p];
     const int* fr = front_rows + s;
     const int cb = fsz - nc;
-    T* rhs = slabs + (long)(warp_in_blk * FPW + sg) * slab;   // [0, nc)
+    T* rhs = slabs + (long)(warp_in_blk * fronts_per_warp + sg) * slab;   // [0, nc)
     T* xsh = rhs + kMaxPivotColumns;                                 // [0, cb)
 
-    bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, sl, /*nt=*/SG);
+    bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, sl, /*nt=*/sub_group_size);
     __syncwarp(mask);
-    bwd_cb_subtract<T, SG>(F, fsz, nc, cb, xsh, rhs, sl, /*width=*/SG, mask);
+    bwd_cb_subtract<T, sub_group_size>(F, fsz, nc, cb, xsh, rhs, sl, /*width=*/sub_group_size, mask);
     __syncwarp(mask);
-    bwd_substitute<T, SG>(F, fsz, nc, fr, y, rhs, sl, mask);
+    bwd_substitute<T, sub_group_size>(F, fsz, nc, fr, y, rhs, sl, mask);
 }
 
 // =======================================================================================

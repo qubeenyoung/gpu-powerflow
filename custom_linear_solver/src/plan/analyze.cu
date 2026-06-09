@@ -115,26 +115,26 @@ static bool determine_a_pos_unique(const int* d_a_pos, int nnz_a, long front_tot
 // margin to amalgamate more aggressively. Upper bound 64 from the shared pivot buffer (nc <= cap).
 static int compute_effective_panel_cap(int n, int panel_cap, bool float_front)
 {
-    int eff_cap = n >= 80000 ? 20 : (n >= 16000 ? 12 : panel_cap);
+    int effective_panel_cap = n >= 80000 ? 20 : (n >= 16000 ? 12 : panel_cap);
     // B=1 float-front factorization benefits from a slightly wider panel around the 3K-bus /
     // 6K-unknown class: it removes tiny-front overhead without the large-front padding that hurts
     // the 6K-8K bus cases.
-    if (float_front && n >= 5000 && n < 8000 && eff_cap < 18) eff_cap = 18;
-    if (eff_cap < 1) eff_cap = 1;
-    if (eff_cap > 64) eff_cap = 64;
-    return eff_cap;
+    if (float_front && n >= 5000 && n < 8000 && effective_panel_cap < 18) effective_panel_cap = 18;
+    if (effective_panel_cap < 1) effective_panel_cap = 1;
+    if (effective_panel_cap > 64) effective_panel_cap = 64;
+    return effective_panel_cap;
 }
 
 // Per-panel front offset (in doubles) into the front arena = prefix sum of fsz², in panel-id
 // (postorder) order, which keeps each parent front adjacent to its children for extend-add.
 // Returns false if the arena would exceed 1G doubles (8 GB).
-static bool layout_front_arena(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& mf,
+static bool layout_front_arena(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& symbolic_factor,
                                int P, std::vector<int>& front_off, long& total)
 {
     front_off.assign(P + 1, 0);
     total = 0;
     for (int p = 0; p < P; ++p) {
-        const long fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+        const long fsz = symbolic_factor.front_ptr[p + 1] - symbolic_factor.front_ptr[p];
         front_off[p] = static_cast<int>(total);
         total += fsz * fsz;
         if (total > (1L << 30)) return false;
@@ -161,12 +161,12 @@ static void build_pivot_offsets(MultifrontalPlan& plan, const symbolic::PanelPar
 
 // Panel-etree levels (parent id > child in postorder, so one forward pass suffices). Fills plevel
 // and plan.panel_level_ptr (the level CSR); returns the level count.
-static int build_panel_levels(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& mf,
+static int build_panel_levels(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& symbolic_factor,
                               int P, std::vector<int>& plevel)
 {
     plevel.assign(P, 0);
     for (int p = 0; p < P; ++p) {
-        const int par = mf.panel_parent[p];
+        const int par = symbolic_factor.panel_parent[p];
         if (par != -1) plevel[par] = std::max(plevel[par], plevel[p] + 1);
     }
     int num_plevels = 0;
@@ -180,9 +180,9 @@ static int build_panel_levels(MultifrontalPlan& plan, const symbolic::Multifront
 }
 
 // Front-size distribution + per-level structure (analyze-info dump, stderr).
-static void dump_front_distribution(const symbolic::MultifrontalSymbolic& mf,
+static void dump_front_distribution(const symbolic::MultifrontalSymbolic& symbolic_factor,
                                     const std::vector<int>& plevel, int n, int P, int num_plevels,
-                                    int eff_cap, long total)
+                                    int effective_panel_cap, long total)
 {
     const int NB = 7;
     const int edges[NB] = {16, 32, 48, 64, 96, 160, 1 << 30};
@@ -190,13 +190,13 @@ static void dump_front_distribution(const symbolic::MultifrontalSymbolic& mf,
     double sf3[NB] = {0};
     long tot2 = 0; double tot3 = 0;
     for (int p = 0; p < P; ++p) {
-        const long fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+        const long fsz = symbolic_factor.front_ptr[p + 1] - symbolic_factor.front_ptr[p];
         int bck = 0; while (fsz > edges[bck]) ++bck;
         cnt[bck]++; sf2[bck] += fsz * fsz; sf3[bck] += (double)fsz * fsz * fsz;
         tot2 += fsz * fsz; tot3 += (double)fsz * fsz * fsz;
     }
     fprintf(stderr, "[analyze] n=%d P=%d levels=%d cap=%d front_total(MB f32)=%.1f\n",
-            n, P, num_plevels, eff_cap, total * 4.0 / 1e6);
+            n, P, num_plevels, effective_panel_cap, total * 4.0 / 1e6);
     const int lo[NB] = {1, 17, 33, 49, 65, 97, 161};
     for (int bk = 0; bk < NB; ++bk)
         fprintf(stderr, "  fsz[%4d..%-9d] cnt=%-8ld f2%%=%5.1f f3%%=%5.1f\n", lo[bk],
@@ -206,7 +206,7 @@ static void dump_front_distribution(const symbolic::MultifrontalSymbolic& mf,
         long c = 0, m = 0, s2 = 0;
         for (int p = 0; p < P; ++p)
             if (plevel[p] == L) {
-                const long fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+                const long fsz = symbolic_factor.front_ptr[p + 1] - symbolic_factor.front_ptr[p];
                 ++c; m = std::max(m, fsz); s2 += fsz * fsz;
             }
         fprintf(stderr, "  L%-2d cnt=%-7ld maxfsz=%-4ld f2=%ld\n", L, c, m, s2);
@@ -218,7 +218,7 @@ static void dump_front_distribution(const symbolic::MultifrontalSymbolic& mf,
 // (or -1); panels sharing a root form one subtree. Roots are capped at kMaxSubtreeStreams (largest
 // kept, the rest merged into one spillover subtree), then plcols is re-sorted so each level groups
 // panels subtree-major and tier-major within each subtree (spine last).
-static void partition_subtrees(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& mf,
+static void partition_subtrees(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& symbolic_factor,
                                std::vector<int>& plcols, int P, int num_plevels, bool emit_info)
 {
     auto level_cnt = [&](int L) { return plan.panel_level_ptr[L + 1] - plan.panel_level_ptr[L]; };
@@ -254,7 +254,7 @@ static void partition_subtrees(MultifrontalPlan& plan, const symbolic::Multifron
     std::vector<int> subtree_root_of(P, -1);
     for (int p = P - 1; p >= 0; --p) {
         if (is_spine[p]) continue;
-        const int par = mf.panel_parent[p];
+        const int par = symbolic_factor.panel_parent[p];
         if (par < 0 || is_spine[par]) {
             subtree_root_of[p] = p;
         } else {
@@ -306,7 +306,7 @@ static void partition_subtrees(MultifrontalPlan& plan, const symbolic::Multifron
     if (plan.num_subtrees > 0) {
         constexpr int NT = MultifrontalPlan::kNumTiers;
         auto tier_of = [&](int p) {
-            const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+            const int fsz = symbolic_factor.front_ptr[p + 1] - symbolic_factor.front_ptr[p];
             return front_bucket(fsz);
         };
         plan.h_subtree_level_off.assign((long)plan.num_subtrees * num_plevels, 0);
@@ -322,10 +322,10 @@ static void partition_subtrees(MultifrontalPlan& plan, const symbolic::Multifron
             for (int k = 0; k < plan.num_subtrees; ++k) {
                 const int cell_start = (int)bucketed.size() + lo;
                 plan.h_subtree_level_off[(long)k * num_plevels + L] = cell_start;
-                const long tb = ((long)k * num_plevels + L) * (NT + 1);
+                const long tier_base = ((long)k * num_plevels + L) * (NT + 1);
                 int cnt = 0;
                 for (int t = 0; t < NT; ++t) {  // tier-major within the cell
-                    plan.h_subtree_level_tier_off[tb + t] = (int)bucketed.size() + lo;
+                    plan.h_subtree_level_tier_off[tier_base + t] = (int)bucketed.size() + lo;
                     for (int q = lo; q < hi; ++q) {
                         const int p = plcols[q];
                         if (plan.h_subtree_of_panel[p] == k && tier_of(p) == t) {
@@ -334,7 +334,7 @@ static void partition_subtrees(MultifrontalPlan& plan, const symbolic::Multifron
                         }
                     }
                 }
-                plan.h_subtree_level_tier_off[tb + NT] = (int)bucketed.size() + lo;
+                plan.h_subtree_level_tier_off[tier_base + NT] = (int)bucketed.size() + lo;
                 plan.h_subtree_level_cnt[(long)k * num_plevels + L] = cnt;
             }
             // Then spine panels (subtree_of_panel == -1) at the end (cnt=1 chain; no split).
@@ -352,10 +352,10 @@ static void partition_subtrees(MultifrontalPlan& plan, const symbolic::Multifron
                 P, num_plevels, plan.spine_start_level, num_plevels - 1,
                 plan.h_spine_panels.size(), plan.num_subtrees);
         for (int k = 0; k < plan.num_subtrees; ++k) {
-            int sz = 0;
-            for (int p = 0; p < P; ++p) if (plan.h_subtree_of_panel[p] == k) ++sz;
+            int subtree_size = 0;
+            for (int p = 0; p < P; ++p) if (plan.h_subtree_of_panel[p] == k) ++subtree_size;
             fprintf(stderr, "  subtree %d: root panel %d, %d panels\n",
-                    k, plan.h_subtree_roots[k], sz);
+                    k, plan.h_subtree_roots[k], subtree_size);
             for (int L = 0; L < num_plevels && L < 12; ++L) {
                 const int c = plan.h_subtree_level_cnt[(long)k * num_plevels + L];
                 if (c > 0) fprintf(stderr, "    sub%d L%d cnt=%d\n", k, L, c);
@@ -367,12 +367,12 @@ static void partition_subtrees(MultifrontalPlan& plan, const symbolic::Multifron
 // Tier-homogeneous dispatch order. Within each level, group panels by kernel tier
 // (classify_front_tier) so the single-stream factor walk launches one right-sized kernel per
 // (level, tier) instead of promoting a whole mixed level to its largest front's tier.
-static void build_tier_order(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& mf,
+static void build_tier_order(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& symbolic_factor,
                              const std::vector<int>& plcols, int P, int num_plevels)
 {
     constexpr int NT = MultifrontalPlan::kNumTiers;
     auto tier_of = [&](int p) {
-        const int fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+        const int fsz = symbolic_factor.front_ptr[p + 1] - symbolic_factor.front_ptr[p];
         return front_bucket(fsz);
     };
     plan.h_plcols_tier.assign(P, 0);
@@ -398,14 +398,14 @@ static void build_tier_order(MultifrontalPlan& plan, const symbolic::Multifronta
 // Parent-local extend-add map: asm_idx is a global front_rows index; subtract the parent front's
 // start so the kernel indexes into the parent's fsz x fsz. Returns the map; sets plan.asm_total.
 static std::vector<int> build_assembly_map(MultifrontalPlan& plan,
-                                           const symbolic::MultifrontalSymbolic& mf, int P)
+                                           const symbolic::MultifrontalSymbolic& symbolic_factor, int P)
 {
-    std::vector<int> asm_local(mf.asm_idx.size());
+    std::vector<int> asm_local(symbolic_factor.asm_idx.size());
     for (int p = 0; p < P; ++p) {
-        const int par = mf.panel_parent[p];
-        const int base = (par >= 0) ? mf.front_ptr[par] : 0;
-        for (int a = mf.asm_ptr[p]; a < mf.asm_ptr[p + 1]; ++a)
-            asm_local[a] = mf.asm_idx[a] - base;
+        const int par = symbolic_factor.panel_parent[p];
+        const int base = (par >= 0) ? symbolic_factor.front_ptr[par] : 0;
+        for (int a = symbolic_factor.asm_ptr[p]; a < symbolic_factor.asm_ptr[p + 1]; ++a)
+            asm_local[a] = symbolic_factor.asm_idx[a] - base;
     }
     plan.asm_total = static_cast<int>(asm_local.size());
     return asm_local;
@@ -415,7 +415,7 @@ static std::vector<int> build_assembly_map(MultifrontalPlan& plan,
 // the host plan arrays, and build the assembly position map (a_pos) on device. Returns false if
 // the a_pos kernel fails.
 static bool allocate_and_upload_plan(MultifrontalPlan& plan,
-                                     const symbolic::MultifrontalSymbolic& mf,
+                                     const symbolic::MultifrontalSymbolic& symbolic_factor,
                                      const symbolic::PanelPartition& panels,
                                      const std::vector<int>& front_off,
                                      const std::vector<int>& plcols,
@@ -424,26 +424,26 @@ static bool allocate_and_upload_plan(MultifrontalPlan& plan,
                                      bool emit_info)
 {
     // One arena with kArenaAlignmentBytes-aligned sub-arrays (avoids an L2 cache-line straddle).
-    auto al = [](long b) {
+    auto align_up = [](long b) {
         return (b + kArenaAlignmentBytes - 1) & ~static_cast<long>(kArenaAlignmentBytes - 1);
     };
     long off = 0;
-    const long o_front = off; off = al(off + total * sizeof(double));
-    const long o_foff = off;  off = al(off + (long)(P + 1) * sizeof(int));
-    const long o_fptr = off;  off = al(off + (long)(P + 1) * sizeof(int));
-    const long o_nc = off;    off = al(off + (long)P * sizeof(int));
-    const long o_plc = off;   off = al(off + (long)P * sizeof(int));
-    const long o_par = off;   off = al(off + (long)P * sizeof(int));
-    const long o_aptr = off;  off = al(off + (long)(P + 1) * sizeof(int));
-    const long o_aloc = off;  off = al(off + (long)std::max(1, plan.asm_total) * sizeof(int));
-    const long o_apos = off;  off = al(off + (long)std::max(1, plan.nnz) * sizeof(int));
-    const int front_store = mf.front_ptr[P];
+    const long o_front = off; off = align_up(off + total * sizeof(double));
+    const long o_foff = off;  off = align_up(off + (long)(P + 1) * sizeof(int));
+    const long o_fptr = off;  off = align_up(off + (long)(P + 1) * sizeof(int));
+    const long o_nc = off;    off = align_up(off + (long)P * sizeof(int));
+    const long o_plc = off;   off = align_up(off + (long)P * sizeof(int));
+    const long o_par = off;   off = align_up(off + (long)P * sizeof(int));
+    const long o_aptr = off;  off = align_up(off + (long)(P + 1) * sizeof(int));
+    const long o_aloc = off;  off = align_up(off + (long)std::max(1, plan.asm_total) * sizeof(int));
+    const long o_apos = off;  off = align_up(off + (long)std::max(1, plan.nnz) * sizeof(int));
+    const int front_store = symbolic_factor.front_ptr[P];
     plan.front_store = front_store;
-    const long o_fr = off;    off = al(off + (long)std::max(1, front_store) * sizeof(int));
-    const long o_pf = off;    off = al(off + (long)std::max(1, P) * sizeof(int));
-    const long o_pof = off;   off = al(off + (long)std::max(1, n) * sizeof(int));
-    const long o_y = off;     off = al(off + (long)n * sizeof(double));
-    const long o_sing = off;  off = al(off + sizeof(int));
+    const long o_fr = off;    off = align_up(off + (long)std::max(1, front_store) * sizeof(int));
+    const long o_pf = off;    off = align_up(off + (long)std::max(1, P) * sizeof(int));
+    const long o_pof = off;   off = align_up(off + (long)std::max(1, n) * sizeof(int));
+    const long o_y = off;     off = align_up(off + (long)n * sizeof(double));
+    const long o_sing = off;  off = align_up(off + sizeof(int));
     cudaMalloc(&plan.arena, off);
     char* base = static_cast<char*>(plan.arena);
     plan.d_front = reinterpret_cast<double*>(base + o_front);
@@ -464,25 +464,25 @@ static bool allocate_and_upload_plan(MultifrontalPlan& plan,
     int* d_panel_first = reinterpret_cast<int*>(base + o_pf);
     int* d_panel_of = reinterpret_cast<int*>(base + o_pof);
 
-    auto H2D = [](int* d, const std::vector<int>& v) {
+    auto copy_to_device = [](int* d, const std::vector<int>& v) {
         if (!v.empty()) cudaMemcpy(d, v.data(), v.size() * sizeof(int), cudaMemcpyHostToDevice);
     };
-    H2D(plan.d_front_off, front_off);
-    H2D(plan.d_front_ptr, mf.front_ptr);
-    H2D(plan.d_ncols, panels.ncols);
-    H2D(plan.d_plcols, plcols);
-    H2D(plan.d_panel_parent, mf.panel_parent);
-    H2D(plan.d_asm_ptr, mf.asm_ptr);
-    H2D(plan.d_asm_local, asm_local);
-    H2D(plan.d_front_rows, mf.front_rows);
+    copy_to_device(plan.d_front_off, front_off);
+    copy_to_device(plan.d_front_ptr, symbolic_factor.front_ptr);
+    copy_to_device(plan.d_ncols, panels.ncols);
+    copy_to_device(plan.d_plcols, plcols);
+    copy_to_device(plan.d_panel_parent, symbolic_factor.panel_parent);
+    copy_to_device(plan.d_asm_ptr, symbolic_factor.asm_ptr);
+    copy_to_device(plan.d_asm_local, asm_local);
+    copy_to_device(plan.d_front_rows, symbolic_factor.front_rows);
     // Upload spine panel list. Separate allocation so it survives plan moves.
     if (!plan.h_spine_panels.empty()) {
         cudaMalloc(&plan.d_spine_panels, plan.h_spine_panels.size() * sizeof(int));
         cudaMemcpy(plan.d_spine_panels, plan.h_spine_panels.data(),
                    plan.h_spine_panels.size() * sizeof(int), cudaMemcpyHostToDevice);
     }
-    H2D(d_panel_first, panels.first);
-    H2D(d_panel_of, panels.panel_of);
+    copy_to_device(d_panel_first, panels.first);
+    copy_to_device(d_panel_of, panels.panel_of);
     build_a_pos_device<<<n, 128>>>(n, d_Ap, d_Ai, d_panel_of, d_panel_first, plan.d_ncols,
                                    plan.d_front_off, plan.d_front_ptr, plan.d_front_rows,
                                    plan.d_a_pos);
@@ -510,26 +510,26 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
 
     std::vector<int> colcount(n);
     for (int j = 0; j < n; ++j) colcount[j] = Lp[j + 1] - Lp[j];
-    const int eff_cap = compute_effective_panel_cap(n, panel_cap, float_front);
+    const int effective_panel_cap = compute_effective_panel_cap(n, panel_cap, float_front);
     const sym::PanelPartition panels =
-        forced_panels ? *forced_panels : sym::relaxed_panels(n, parent, colcount, eff_cap);
-    const sym::MultifrontalSymbolic mf = sym::multifrontal_symbolic(n, Lp, Li, panels);
+        forced_panels ? *forced_panels : sym::relaxed_panels(n, parent, colcount, effective_panel_cap);
+    const sym::MultifrontalSymbolic symbolic_factor = sym::multifrontal_symbolic(n, Lp, Li, panels);
     const int P = panels.num_panels;
     plan.num_panels = P;
-    plan.h_front_ptr = mf.front_ptr;   // host copies for batched dispatch / TC shared sizing
+    plan.h_front_ptr = symbolic_factor.front_ptr;   // host copies for batched dispatch / TC shared sizing
     plan.h_ncols = panels.ncols;
 
     std::vector<int> front_off;
     long total = 0;
-    if (!layout_front_arena(plan, mf, P, front_off, total)) return MultifrontalPlan{};
+    if (!layout_front_arena(plan, symbolic_factor, P, front_off, total)) return MultifrontalPlan{};
 
     build_pivot_offsets(plan, panels, P);
 
     std::vector<int> plevel;
-    const int num_plevels = build_panel_levels(plan, mf, P, plevel);
+    const int num_plevels = build_panel_levels(plan, symbolic_factor, P, plevel);
     std::vector<int> plcols(P);
 
-    if (emit_info) dump_front_distribution(mf, plevel, n, P, num_plevels, eff_cap, total);
+    if (emit_info) dump_front_distribution(symbolic_factor, plevel, n, P, num_plevels, effective_panel_cap, total);
 
     {
         std::vector<int> next(plan.panel_level_ptr.begin(), plan.panel_level_ptr.end());
@@ -537,10 +537,10 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     }
     plan.h_plcols = plcols;
 
-    partition_subtrees(plan, mf, plcols, P, num_plevels, emit_info);
-    build_tier_order(plan, mf, plcols, P, num_plevels);
-    const std::vector<int> asm_local = build_assembly_map(plan, mf, P);
-    if (!allocate_and_upload_plan(plan, mf, panels, front_off, plcols, asm_local, d_Ap, d_Ai,
+    partition_subtrees(plan, symbolic_factor, plcols, P, num_plevels, emit_info);
+    build_tier_order(plan, symbolic_factor, plcols, P, num_plevels);
+    const std::vector<int> asm_local = build_assembly_map(plan, symbolic_factor, P);
+    if (!allocate_and_upload_plan(plan, symbolic_factor, panels, front_off, plcols, asm_local, d_Ap, d_Ai,
                                   n, P, total, float_front, emit_info))
         return MultifrontalPlan{};
 

@@ -58,22 +58,22 @@ State::~State()
 
 // Set the per-batch scalar state and allocate the front + solve-vector arenas. Float-front modes
 // (FP32 / FP16 / TF32) use the f32 arena; FP64 uses the double arena.
-static bool allocate_state(const MultifrontalPlan& plan, int B, Precision prec, State& st,
+static bool allocate_state(const MultifrontalPlan& plan, int B, Precision precision, State& st,
                            bool tier_split)
 {
     st.batch_count = B;
     st.front_total = plan.front_total;
     st.num_rows = plan.num_rows;
-    st.precision = prec;
+    st.precision = precision;
     st.tier_split = tier_split;
-    const bool float_front = is_fp32_front(prec);
-    const long fe = (long)B * plan.front_total;
+    const bool float_front = is_fp32_front(precision);
+    const long front_elements = (long)B * plan.front_total;
     if (float_front) {
-        if (cudaMalloc(&st.d_front_batch_f, fe * sizeof(float)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_front_batch_f, front_elements * sizeof(float)) != cudaSuccess) return false;
         if (cudaMalloc(&st.d_y_batch_f, (long)B * plan.num_rows * sizeof(float)) != cudaSuccess)
             return false;
     } else {
-        if (cudaMalloc(&st.d_front_batch, fe * sizeof(double)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_front_batch, front_elements * sizeof(double)) != cudaSuccess) return false;
         if (cudaMalloc(&st.d_y_batch, (long)B * plan.num_rows * sizeof(double)) != cudaSuccess)
             return false;
     }
@@ -83,7 +83,7 @@ static bool allocate_state(const MultifrontalPlan& plan, int B, Precision prec, 
 
 // Opt the shared-resident kernels into the sm_86 dynamic-shared cap (they exceed the 48 KB
 // default). The PTX tensor-core variants only run on the float-front path.
-static void register_kernel_attributes(Precision prec)
+static void register_kernel_attributes(Precision precision)
 {
     cudaFuncSetAttribute(factor_small<float, 8>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
@@ -101,7 +101,7 @@ static void register_kernel_attributes(Precision prec)
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_mid<double>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    if (is_fp32_front(prec)) {
+    if (is_fp32_front(precision)) {
         cudaFuncSetAttribute(factor_mid_fp16_ptx,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
         cudaFuncSetAttribute(factor_big_fp16_ptx,
@@ -127,16 +127,16 @@ static void create_subtree_streams(const MultifrontalPlan& plan, State& st,
         return;
     st.num_subtree_streams = plan.num_subtrees;
     for (int k = 0; k < st.num_subtree_streams; ++k) {
-        cudaStream_t ks;
-        cudaStreamCreateWithFlags(&ks, cudaStreamNonBlocking);
-        st.subtree_streams[k] = ks;
-        cudaEvent_t je;
-        cudaEventCreateWithFlags(&je, cudaEventDisableTiming);
-        st.join_events[k] = je;
+        cudaStream_t subtree_stream;
+        cudaStreamCreateWithFlags(&subtree_stream, cudaStreamNonBlocking);
+        st.subtree_streams[k] = subtree_stream;
+        cudaEvent_t join_evt;
+        cudaEventCreateWithFlags(&join_evt, cudaEventDisableTiming);
+        st.join_events[k] = join_evt;
     }
-    cudaEvent_t fe;
-    cudaEventCreateWithFlags(&fe, cudaEventDisableTiming);
-    st.fork_event = fe;
+    cudaEvent_t fork_evt;
+    cudaEventCreateWithFlags(&fork_evt, cudaEventDisableTiming);
+    st.fork_event = fork_evt;
 }
 
 // Capture the factor and solve kernel sequences into replayable CUDA graphs on `stream`.
@@ -144,30 +144,30 @@ static void capture_phase_graphs(const MultifrontalPlan& plan, State& st, cudaSt
 {
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     issue_factor_levels(plan, st, stream);
-    cudaGraph_t g;
-    cudaStreamEndCapture(stream, &g);
-    cudaGraphExec_t ge;
-    cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0);
-    cudaGraphDestroy(g);
-    st.factor_graph_exec = ge;
+    cudaGraph_t factor_graph;
+    cudaStreamEndCapture(stream, &factor_graph);
+    cudaGraphExec_t factor_exec;
+    cudaGraphInstantiate(&factor_exec, factor_graph, nullptr, nullptr, 0);
+    cudaGraphDestroy(factor_graph);
+    st.factor_graph_exec = factor_exec;
 
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     issue_solve_levels(plan, st, stream);
-    cudaGraph_t sg;
-    cudaStreamEndCapture(stream, &sg);
-    cudaGraphExec_t sge;
-    cudaGraphInstantiate(&sge, sg, nullptr, nullptr, 0);
-    cudaGraphDestroy(sg);
-    st.solve_graph_exec = sge;
+    cudaGraph_t solve_graph;
+    cudaStreamEndCapture(stream, &solve_graph);
+    cudaGraphExec_t solve_exec;
+    cudaGraphInstantiate(&solve_exec, solve_graph, nullptr, nullptr, 0);
+    cudaGraphDestroy(solve_graph);
+    st.solve_graph_exec = solve_exec;
 }
 #endif
 
-bool setup(const MultifrontalPlan& plan, int B, Precision prec, State& st,
+bool setup(const MultifrontalPlan& plan, int B, Precision precision, State& st,
            bool use_multistream_subtrees, bool tier_split)
 {
     if (plan.num_panels == 0 || B <= 0) return false;
-    if (!allocate_state(plan, B, prec, st, tier_split)) return false;
-    register_kernel_attributes(prec);
+    if (!allocate_state(plan, B, precision, st, tier_split)) return false;
+    register_kernel_attributes(precision);
 
 #ifdef CLS_INTERNAL_GRAPH
     // Internal-graph mode: own a private stream and capture the factor / solve kernel sequences
@@ -197,27 +197,27 @@ void set_stream(State& st, void* stream)
     st.owns_stream = false;
 }
 
-// Shared factorize body, templated on the input value type VT. The scatter casts VT into
+// Shared factorize body, templated on the input value type ValueT. The scatter casts ValueT into
 // whichever front the active precision mode consumes.
-template <typename VT>
-static bool factorize_impl(const MultifrontalPlan& plan, State& st, const VT* d_valuesB,
+template <typename ValueT>
+static bool factorize_impl(const MultifrontalPlan& plan, State& st, const ValueT* d_values_batch,
                            const int* d_ordered_value_to_csr)
 {
     cudaStream_t stream = static_cast<cudaStream_t>(st.stream);
-    const long fe = (long)st.batch_count * plan.front_total;
-    constexpr int T = 256;
-    const dim3 sgrid((plan.nnz + T - 1) / T, st.batch_count);
+    const long front_elements = (long)st.batch_count * plan.front_total;
+    constexpr int threads_per_block = 256;
+    const dim3 scatter_grid((plan.nnz + threads_per_block - 1) / threads_per_block, st.batch_count);
     // Zero + scatter A into the front the factor consumes.
     auto issue_scatter = [&]() {
         cudaMemsetAsync(st.d_sing, 0, sizeof(int), stream);
         if (is_fp32_front(st.precision)) {
-            cudaMemsetAsync(st.d_front_batch_f, 0, fe * sizeof(float), stream);
-            scatter_values<float, VT><<<sgrid, T, 0, stream>>>(plan.nnz, plan.front_total, d_ordered_value_to_csr,
-                                                               plan.d_a_pos, d_valuesB, st.d_front_batch_f);
+            cudaMemsetAsync(st.d_front_batch_f, 0, front_elements * sizeof(float), stream);
+            scatter_values<float, ValueT><<<scatter_grid, threads_per_block, 0, stream>>>(plan.nnz, plan.front_total, d_ordered_value_to_csr,
+                                                               plan.d_a_pos, d_values_batch, st.d_front_batch_f);
         } else {
-            cudaMemsetAsync(st.d_front_batch, 0, fe * sizeof(double), stream);
-            scatter_values<double, VT><<<sgrid, T, 0, stream>>>(plan.nnz, plan.front_total, d_ordered_value_to_csr,
-                                                                plan.d_a_pos, d_valuesB, st.d_front_batch);
+            cudaMemsetAsync(st.d_front_batch, 0, front_elements * sizeof(double), stream);
+            scatter_values<double, ValueT><<<scatter_grid, threads_per_block, 0, stream>>>(plan.nnz, plan.front_total, d_ordered_value_to_csr,
+                                                                plan.d_a_pos, d_values_batch, st.d_front_batch);
         }
     };
 #ifdef CLS_INTERNAL_GRAPH
@@ -236,24 +236,24 @@ static bool factorize_impl(const MultifrontalPlan& plan, State& st, const VT* d_
 #endif
 }
 
-// Shared solve body, templated on the RHS type RT and the solution type ST. gather casts
-// RT → (FP32 / FP64) working vector; scatter casts working vector → ST.
-template <typename RT, typename ST>
-static bool solve_impl(const MultifrontalPlan& plan, State& st, const RT* d_rhsB,
-                       ST* d_solB, const int* d_perm)
+// Shared solve body, templated on the RHS type RhsT and the solution type SolutionT. gather casts
+// RhsT → (FP32 / FP64) working vector; scatter casts working vector → SolutionT.
+template <typename RhsT, typename SolutionT>
+static bool solve_impl(const MultifrontalPlan& plan, State& st, const RhsT* d_rhs_batch,
+                       SolutionT* d_solution_batch, const int* d_perm)
 {
     cudaStream_t stream = static_cast<cudaStream_t>(st.stream);
     const int n = plan.num_rows;
-    constexpr int T = 256;
-    const dim3 vg((n + T - 1) / T, st.batch_count);
+    constexpr int threads_per_block = 256;
+    const dim3 permute_grid((n + threads_per_block - 1) / threads_per_block, st.batch_count);
     const bool float_front = is_fp32_front(st.precision);
     auto issue_gather = [&]() {
-        if (float_front) gather_rhs<RT, float><<<vg, T, 0, stream>>>(n, d_rhsB, d_perm, st.d_y_batch_f);
-        else           gather_rhs<RT, double><<<vg, T, 0, stream>>>(n, d_rhsB, d_perm, st.d_y_batch);
+        if (float_front) gather_rhs<RhsT, float><<<permute_grid, threads_per_block, 0, stream>>>(n, d_rhs_batch, d_perm, st.d_y_batch_f);
+        else           gather_rhs<RhsT, double><<<permute_grid, threads_per_block, 0, stream>>>(n, d_rhs_batch, d_perm, st.d_y_batch);
     };
     auto issue_scatter_sol = [&]() {
-        if (float_front) scatter_sol<float, ST><<<vg, T, 0, stream>>>(n, st.d_y_batch_f, d_perm, d_solB);
-        else           scatter_sol<double, ST><<<vg, T, 0, stream>>>(n, st.d_y_batch, d_perm, d_solB);
+        if (float_front) scatter_sol<float, SolutionT><<<permute_grid, threads_per_block, 0, stream>>>(n, st.d_y_batch_f, d_perm, d_solution_batch);
+        else           scatter_sol<double, SolutionT><<<permute_grid, threads_per_block, 0, stream>>>(n, st.d_y_batch, d_perm, d_solution_batch);
     };
 #ifdef CLS_INTERNAL_GRAPH
     issue_gather();
@@ -270,35 +270,35 @@ static bool solve_impl(const MultifrontalPlan& plan, State& st, const RT* d_rhsB
 }
 
 // FP64-input entry points.
-bool factorize(const MultifrontalPlan& plan, State& st, const double* d_valuesB,
+bool factorize(const MultifrontalPlan& plan, State& st, const double* d_values_batch,
                const int* d_ordered_value_to_csr)
 {
-    return factorize_impl<double>(plan, st, d_valuesB, d_ordered_value_to_csr);
+    return factorize_impl<double>(plan, st, d_values_batch, d_ordered_value_to_csr);
 }
 
-bool solve(const MultifrontalPlan& plan, State& st, const double* d_rhsB,
-           double* d_solB, const int* d_perm)
+bool solve(const MultifrontalPlan& plan, State& st, const double* d_rhs_batch,
+           double* d_solution_batch, const int* d_perm)
 {
-    return solve_impl<double, double>(plan, st, d_rhsB, d_solB, d_perm);
+    return solve_impl<double, double>(plan, st, d_rhs_batch, d_solution_batch, d_perm);
 }
 
 // FP32-input overloads (float values / RHS / solution combinations).
-bool factorize(const MultifrontalPlan& plan, State& st, const float* d_valuesB,
+bool factorize(const MultifrontalPlan& plan, State& st, const float* d_values_batch,
                const int* d_ordered_value_to_csr)
 {
-    return factorize_impl<float>(plan, st, d_valuesB, d_ordered_value_to_csr);
+    return factorize_impl<float>(plan, st, d_values_batch, d_ordered_value_to_csr);
 }
 
-bool solve(const MultifrontalPlan& plan, State& st, const double* d_rhsB,
-           float* d_solB, const int* d_perm)
+bool solve(const MultifrontalPlan& plan, State& st, const double* d_rhs_batch,
+           float* d_solution_batch, const int* d_perm)
 {
-    return solve_impl<double, float>(plan, st, d_rhsB, d_solB, d_perm);
+    return solve_impl<double, float>(plan, st, d_rhs_batch, d_solution_batch, d_perm);
 }
 
-bool solve(const MultifrontalPlan& plan, State& st, const float* d_rhsB,
-           float* d_solB, const int* d_perm)
+bool solve(const MultifrontalPlan& plan, State& st, const float* d_rhs_batch,
+           float* d_solution_batch, const int* d_perm)
 {
-    return solve_impl<float, float>(plan, st, d_rhsB, d_solB, d_perm);
+    return solve_impl<float, float>(plan, st, d_rhs_batch, d_solution_batch, d_perm);
 }
 
 }  // namespace custom_linear_solver
