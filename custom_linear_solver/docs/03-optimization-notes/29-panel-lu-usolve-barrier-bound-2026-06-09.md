@@ -43,8 +43,13 @@ sync. 즉 occupancy 도 충분하고 memory 도 L2 가 받쳐주는데, **sync l
 1. **Blocked right-looking LU (rank-b panel)**: b 폭 panel 을 먼저 분해(작은 b 회 sync, 좁은 strip)
    후 나머지를 **rank-b GEMM** 한 번으로 갱신. 전 폭 update + sync 횟수가 nc → nc/b 로 감소
    (barrier 비용의 주축 제거). 부수효과: rank-b 갱신이 GEMM 이라 (작은 K=b 지만) 연산이 정규화됨.
-2. **Block-size 축소**: 현재 panel 이 1024-thread. per-pivot 일감이 작아 1024-barrier 가 과대.
-   256–512 로 줄이면 barrier 비용↓ (parallelism 손실은 일감이 작아 미미할 가능성). 가장 싼 실험.
+2. ~~**Block-size 축소**~~ **(반증 — 2026-06-09)**: 256/512/1024 A/B 결과 **1024 가 최적**, 줄이면
+   더 느림 (70K B=1: 256→2.50, 512→2.22, 1024→2.08 ms/sys; B=64·USA 동일 경향). 해석: barrier
+   latency 자체가 아니라 **순차 pivot 깊이 × 각 pivot 의 parallel update(uc 행 × nc)** 가 비용 →
+   thread 가 많을수록 update 가 빨라 net 이득. 1024 가 이미 max block 이라 더 늘릴 수도 없음. barrier
+   가 **노출되는** 진짜 이유는 **big 레벨 underfill**(동시 front 부족 → barrier 가 다른 front 일로
+   가려지지 않음; B=1 최악, B=64 도 20–52 블록). → 진짜 lever 는 sync **횟수 감축**(blocked LU) 또는
+   **underfill 완화**(동시성↑).
 3. **Warp-specialized / 2-stage pipeline**: pivot k+1 의 column 준비를 pivot k 의 update 와 겹쳐
    sync 노출을 줄임 (doc 26 의 pipelining 아이디어를 panel 에 적용).
 4. **U-solve 융합**: Phase 2 의 per-k sync 를 panel LU 의 sync 와 공유/축소.
@@ -59,7 +64,13 @@ panel 최적화는 fp32/tf32 **양쪽에 동등**하게 적용된다(같은 scal
   "TC 가속이 보이게" + "factor 가속" 두 목적을 동시에 달성하는 현실적 다음 스텝.
 
 ## 5. 다음 실험 (우선순위)
-- (싱겁고 싼 것 먼저) **block-size 256/512 vs 1024** A/B — barrier 비용 가설 직접 검증.
-- 효과 있으면 **blocked LU(rank-b)** 프로토타입 → sync 횟수 nc→nc/b, factor wall 측정.
-- 예측 판별: block-size 축소가 barrier stall 을 낮추면 lever 2 유효; blocked LU 가 추가로 낮추면
-  lever 1 유효. 둘 다 무효면 sync latency 가 irreducible (pivot 깊이 nc 가 한계).
+- ~~block-size A/B~~ **완료 → 반증** (1024 최적, §3-2). barrier 는 block-size 로 못 줄임.
+- 남은 후보 (둘 다 sync **횟수** 또는 **노출**을 건드림):
+  - **blocked LU(rank-b)**: 전폭 update+sync 를 nc→nc/b. 단 총 update FLOP 은 동일하고 sync
+    **횟수**(narrow+wide)는 비슷 — barrier latency 가 아니라 update **효율**(rank-b GEMM 재사용)에서
+    이득이 와야 함. 효과 불확실, 프로토타입 비용 큼.
+  - **underfill 완화**: big 레벨이 동시 front 부족이라 barrier 가 노출됨. 여러 big 레벨/front 의
+    panel 을 **한 grid 로 batch**하면 동시성↑ → barrier 가 다른 front 일로 가려짐. (doc 26 의
+    latency-hiding 계열; mid 와 동형 문제.)
+- 판별: block-size 가 무효였으므로 sync **latency** 는 (1024 max 에서) irreducible. 남은 건 sync
+  **횟수↓**(blocked) 또는 **동시성↑**(underfill 완화). 후자가 더 근본적(big 전 구조가 underfill).
