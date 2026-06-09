@@ -12,6 +12,7 @@
 //   custom_graph - cuda_linear_solver=Custom, use_cuda_graph=true (needs a CUPF_ENABLE_CUDA_GRAPH build)
 #include "dump_case_loader.hpp"
 #include "newton_solver/core/newton_solver.hpp"
+#include "utils/timer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -130,6 +131,18 @@ int main(int argc, char** argv)
         std::cout << B << "," << init_ms << "," << warmup_ms << "," << avg_ms << ","
                   << (avg_ms / B) << "," << iters << "," << relmis
                   << "   (best_solve_ms=" << best_ms << ", setup~=" << (warmup_ms - avg_ms) << ")\n";
+
+#ifdef CUPF_ENABLE_TIMING
+        // Per-operation breakdown for one batch solve (ENABLE_TIMING build, non-capture modes only).
+        // The per-stage ScopedTimers inject device syncs, so this perturbs wall time — run it AFTER
+        // the timed loop, in its own solve. Emit "TIMING,<B>,<timer>,<count>,<total_us>" for parsing.
+        newton_solver::utils::resetTimingCollector();
+        run();
+        for (const auto& e : newton_solver::utils::timingSnapshot()) {
+            std::cout << "TIMING," << B << "," << (e.name ? e.name : "") << ","
+                      << e.count << "," << e.total_us << "\n";
+        }
+#endif
     }
     return 0;
 }
