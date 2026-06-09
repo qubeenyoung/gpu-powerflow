@@ -416,6 +416,38 @@ __global__ void __launch_bounds__(512, 2)
     const int t = threadIdx.x, nt = blockDim.x;
     const int uc = fsz - nc;
 
+#ifdef CLS_FUSE_FP16_TRAIL_EXTEND
+    const int par = panel_parent[p];
+    const bool use_fused_trailing = (par >= 0 && do_extend && fsz > 48 && nc <= 32 && uc <= 256);
+    float* Fp = use_fused_trailing ? (front + front_off[par]) : nullptr;
+    const int pfsz = use_fused_trailing ? (front_ptr[par + 1] - front_ptr[par]) : 0;
+    const int abase = use_fused_trailing ? asm_ptr[p] : 0;
+    factorize_front<float>(F, fsz, nc, uc, t, nt, sing, [&] {
+        if (nc > 32 || uc > 256) {
+            trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);
+        } else {
+            extern __shared__ char smem_big_fp16_ptx[];
+            __half* Lh = reinterpret_cast<__half*>(smem_big_fp16_ptx);
+            __half* Uh = Lh + (long)ucp_max * kp_max;
+            if (use_fused_trailing) {
+                trailing_update_mma_fp16_ptx<true>(F, fsz, nc, uc, Lh, Uh, t, nt, Fp, pfsz,
+                                                   asm_local, abase);
+            } else {
+                trailing_update_mma_fp16_ptx<false>(F, fsz, nc, uc, Lh, Uh, t, nt);
+            }
+        }
+    });
+
+    if (use_fused_trailing || par < 0 || !do_extend) return;
+    __syncthreads();
+    {
+        float* parent_front = front + front_off[par];
+        const int parent_fsz = front_ptr[par + 1] - front_ptr[par];
+        const int asm_base = asm_ptr[p];
+        extend_add<float, float>(parent_front, parent_fsz, F, fsz, nc, uc, asm_local, asm_base,
+                                 t, nt);
+    }
+#else
     factorize_front<float>(F, fsz, nc, uc, t, nt, sing, [&] {
         if (nc > 32 || uc > 256) {
             trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);
@@ -434,6 +466,7 @@ __global__ void __launch_bounds__(512, 2)
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
     const int abase = asm_ptr[p];
     extend_add<float, float>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
+#endif
 }
 
 // TF32 PTX trailing on the global front (Precision::TF32). The 512-thread block plus

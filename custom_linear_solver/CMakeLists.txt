@@ -18,6 +18,8 @@ option(CLS_INTERNAL_GRAPH "Capture batched factor/solve into internal CUDA graph
 option(CLS_BUILD_SCRIPTS "Build custom_linear_solver command-line scripts" ON)
 option(CLS_BUILD_CUDSS_SCRIPT "Build cuDSS command-line comparison script" OFF)
 option(CLS_ENABLE_NVTX "Enable NVTX ranges in command-line profiling scripts" OFF)
+option(CLS_FUSE_FP16_TRAIL_EXTEND
+  "Fuse FP16 tensor-core trailing drain with extend-add for big fronts" ON)
 
 # Compile-time gate for the profile/dump toolkit (src/profile/). Default ON for Debug builds,
 # OFF for Release/RelWithDebInfo/MinSizeRel — when OFF, all profile macros expand to no-ops,
@@ -120,6 +122,9 @@ if(CLS_BUILD_CUDA_OPS)
   endif()
   if(CLS_INTERNAL_GRAPH)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_INTERNAL_GRAPH)
+  endif()
+  if(CLS_FUSE_FP16_TRAIL_EXTEND)
+    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_FUSE_FP16_TRAIL_EXTEND)
   endif()
   set_target_properties(custom_linear_solver_ops PROPERTIES
     CUDA_ARCHITECTURES "${CLS_CUDA_ARCHITECTURES}"

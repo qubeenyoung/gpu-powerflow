@@ -310,9 +310,14 @@ __device__ __forceinline__ void trailing_update_staged(T* F, int fsz, int nc, in
 //     memory, so packed explicitly) →
 //       b0 = pack(B[laneC, laneR], B[laneC + 1, laneR])           (K pair, N = laneR)
 //   C accumulator: identical to every m16n8 shape — see the section header.
+template <bool FuseExtend = false>
 __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, int nc, int uc,
                                                              __half* Lh, __half* Uh,
-                                                             int t, int nt)
+                                                             int t, int nt,
+                                                             float* Fp = nullptr,
+                                                             int pfsz = 0,
+                                                             const int* asm_local = nullptr,
+                                                             int abase = 0)
 {
     const int UCP = ((uc + 15) / 16) * 16;
     const int KP  = ((nc + 7)  / 8)  * 8;
@@ -336,6 +341,17 @@ __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, 
     const int lane  = t & 31;
     const int laneR = lane >> 2;           // 0..7
     const int laneC = (lane & 3) * 2;      // 0,2,4,6
+
+    auto drain = [&](int r, int col, float c) {
+        if (r >= uc || col >= uc) return;
+        const long off = (long)(nc + r) * fsz + (nc + col);
+        if constexpr (FuseExtend) {
+            atomicAdd(&Fp[(long)asm_local[abase + r] * pfsz + asm_local[abase + col]],
+                      F[off] - c);
+        } else {
+            F[off] -= c;
+        }
+    };
 
     // A-reuse hoisted path. Capped at NTJ8_MAX = 8 N-tiles (UCP ≤ 64); the unrolled tj8 loop
     // keeps the per-tile accumulators in named registers for the inline-asm "+f" binding.
@@ -376,14 +392,10 @@ __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, 
             for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
                 if (tj8 >= ntj8) break;
                 const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
-                if (r_top < uc) {
-                    if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c[tj8][0];
-                    if (col1 < uc) F[(long)(nc + r_top) * fsz + (nc + col1)] -= c[tj8][1];
-                }
-                if (r_bot < uc) {
-                    if (col0 < uc) F[(long)(nc + r_bot) * fsz + (nc + col0)] -= c[tj8][2];
-                    if (col1 < uc) F[(long)(nc + r_bot) * fsz + (nc + col1)] -= c[tj8][3];
-                }
+                drain(r_top, col0, c[tj8][0]);
+                drain(r_top, col1, c[tj8][1]);
+                drain(r_bot, col0, c[tj8][2]);
+                drain(r_bot, col1, c[tj8][3]);
             }
         }
         return;
@@ -412,14 +424,10 @@ __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, 
                     : "r"(a0), "r"(a1), "r"(b0));
             }
             const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
-            if (r_top < uc) {
-                if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c0;
-                if (col1 < uc) F[(long)(nc + r_top) * fsz + (nc + col1)] -= c1;
-            }
-            if (r_bot < uc) {
-                if (col0 < uc) F[(long)(nc + r_bot) * fsz + (nc + col0)] -= c2;
-                if (col1 < uc) F[(long)(nc + r_bot) * fsz + (nc + col1)] -= c3;
-            }
+            drain(r_top, col0, c0);
+            drain(r_top, col1, c1);
+            drain(r_bot, col0, c2);
+            drain(r_bot, col1, c3);
         }
     }
 }
