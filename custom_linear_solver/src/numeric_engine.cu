@@ -106,13 +106,9 @@ static void register_kernel_attributes(Precision precision)
     cudaFuncSetAttribute(factor_big_staged<double>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     if (is_fp32_front(precision)) {
-        cudaFuncSetAttribute(factor_mid_fp16_ptx,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
+        // Tensor-core kernels are big-tier only (the mid TC variants were removed — mid is
+        // latency-bound, so TC measured slower there).
         cudaFuncSetAttribute(factor_big_fp16_ptx,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-        cudaFuncSetAttribute(factor_mid_tf32_ptx<8>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-        cudaFuncSetAttribute(factor_mid_tf32_ptx<4>,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
         cudaFuncSetAttribute(factor_big_tf32_ptx,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);

@@ -21,20 +21,20 @@
 //   tier   | block  | front | kernel                  | Phase-3 trailing
 //   -------+--------+-------+-------------------------+-------------------------------------
 //   small  | 8 warp | smem  | factor_small<T, sub_group_size>     | lu_small_warp (fused Phase 1+3)
-//   mid    | 64..256| smem  | factor_mid<T>           | trailing_update_staged<T>
-//          |        |       | factor_mid_fp16_ptx     | trailing_update_mma_fp16_ptx
-//          |        |       | factor_mid_tf32_ptx<K>  | trailing_update_mma_tf32{_k4}_ptx
-//   big    | 1024   | gmem  | factor_big<T>           | trailing_update_scalar<T>
+//   mid    | 64..256| smem  | factor_mid<T>           | trailing_update_staged<T>  (all precisions)
+//   big    | 1024   | gmem  | factor_big<T>/_staged   | trailing_update_scalar / _staged<T>
 //          | 512    | gmem  | factor_big_fp16_ptx     | trailing_update_mma_fp16_ptx
 //          | 512    | gmem  | factor_big_tf32_ptx     | trailing_update_mma_tf32_ptx
 //
+// The mid tier runs the staged-scalar kernel for every precision: mid is latency-bound, so the
+// tensor-core mid variants measured slower and were removed. Tensor cores are kept for the big
+// tier only (large enough trailing GEMM to pay off).
+//
 // Why a separate kernel symbol per variant:
 //   * The <T> templates parameterise over the front element type (double / float).
-//   * The Tensor-Core variants differ in shared-memory layout: the FP16 PTX path stages
-//     __half panels, the TF32 PTX paths stage float panels. None need a Csc fragment-readback
+//   * The big Tensor-Core variants differ in shared-memory layout: the FP16 PTX path stages
+//     __half panels, the TF32 PTX path stages float panels. Neither needs a Csc fragment-readback
 //     scratch — the inline-asm mma.sync writes the accumulator straight to per-lane registers.
-//   * factor_mid_tf32_ptx<K> templates the K=4 / K=8 mma shapes into a single kernel because
-//     only the inline-asm form differs; smem layout and block geometry are identical.
 //   * The big PTX kernels (factor_big_fp16_ptx, factor_big_tf32_ptx) carry
 //     __launch_bounds__(512, 2) and a 512-thread block so two blocks stay resident per SM on
 //     sm_86 — neither can be selected inside a 1024-thread kernel.
@@ -200,121 +200,6 @@ __global__ void factor_mid(int lbegin, int lend, const int* __restrict__ plcols,
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
     const int abase = asm_ptr[p];
     extend_add<T, T>(Fp, pfsz, Fs, fsz, nc, uc, asm_local, abase, t, nt);
-}
-
-// FP16 PTX trailing (Precision::FP16). Stages L / U into __half panels and calls
-// mma.sync.m16n8k8.f16 via inline asm, subtracting the FP32 accumulator straight from Fs from
-// per-lane registers — no Csc scratch. KP aligns nc up to 8 (the mma K-tile). Scalar fallback
-// for nc > 32 / uc > 256.
-// Shared layout:  Lh[ucp_max · kp_max] | Uh[kp_max · ucp_max]  (__half) | Fs[fsz_cap²] (float).
-__global__ void factor_mid_fp16_ptx(int lbegin, int lend, const int* __restrict__ plcols,
-                                    const int* __restrict__ front_off,
-                                    const int* __restrict__ front_ptr,
-                                    const int* __restrict__ ncols,
-                                    const int* __restrict__ panel_parent,
-                                    const int* __restrict__ asm_ptr,
-                                    const int* __restrict__ asm_local, float* frontB,
-                                    long front_total, int* sing, int do_extend, int ucp_max,
-                                    int kp_max, int fsz_cap)
-{
-    const int idx = lbegin + blockIdx.x;
-    if (idx >= lend) return;
-    float* front = frontB + (long)blockIdx.y * front_total;
-    const int p = plcols[idx];
-    const int fsz = front_ptr[p + 1] - front_ptr[p];
-    const int nc = ncols[p];
-    float* F = front + front_off[p];
-    const int t = threadIdx.x, nt = blockDim.x;
-    const int uc = fsz - nc;
-    const int fsz2 = fsz * fsz;
-
-    extern __shared__ char smem_mid_fp16_ptx[];
-    __half* Lh = reinterpret_cast<__half*>(smem_mid_fp16_ptx);
-    __half* Uh = Lh + (long)ucp_max * kp_max;
-    float*  Fs = reinterpret_cast<float*>(Uh + (long)kp_max * ucp_max);
-
-    stage_in_async<float>(Fs, F, fsz2, t, nt);
-    __syncthreads();
-    factorize_front<float>(Fs, fsz, nc, uc, t, nt, sing, [&] {
-        if (nc <= 32 && uc <= 256) {
-            trailing_update_mma_fp16_ptx(Fs, fsz, nc, uc, Lh, Uh, t, nt);
-        } else {
-            trailing_update_scalar<float>(Fs, fsz, nc, uc, t, nt);
-        }
-    });
-    __syncthreads();
-    writeback_factored<float, float>(F, Fs, fsz, nc, uc, t, nt);
-
-    const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
-    __syncthreads();
-    float* Fp = front + front_off[par];
-    const int pfsz = front_ptr[par + 1] - front_ptr[par];
-    const int abase = asm_ptr[p];
-    extend_add<float, float>(Fp, pfsz, Fs, fsz, nc, uc, asm_local, abase, t, nt);
-}
-
-// TF32 PTX trailing (Precision::TF32). Calls mma.sync via inline asm and subtracts from Fs
-// directly from per-lane accumulator registers, so no Csc scratch is required.
-//
-//   K = 8 (factor_mid_tf32_ptx<8>) — mma.m16n8k8. Default branch of the per-level hybrid.
-//   K = 4 (factor_mid_tf32_ptx<4>) — mma.m16n8k4. Picked by dispatch.cuh when a level's
-//                                    max nc satisfies round_up(nc, 4) < round_up(nc, 8)
-//                                    (i.e. nc % 8 ∈ {1..4}), halving K-padding waste.
-//
-// Shared layout:  Ltf[ucp_max · kp_max] | Utf[kp_max · ucp_max] | Fs[fsz_cap²]  (all float).
-template <int K>
-__global__ void factor_mid_tf32_ptx(int lbegin, int lend, const int* __restrict__ plcols,
-                                    const int* __restrict__ front_off,
-                                    const int* __restrict__ front_ptr,
-                                    const int* __restrict__ ncols,
-                                    const int* __restrict__ panel_parent,
-                                    const int* __restrict__ asm_ptr,
-                                    const int* __restrict__ asm_local, float* frontB,
-                                    long front_total, int* sing, int do_extend, int ucp_max,
-                                    int kp_max, int fsz_cap)
-{
-    static_assert(K == 4 || K == 8, "factor_mid_tf32_ptx: K must be 4 or 8");
-
-    const int idx = lbegin + blockIdx.x;
-    if (idx >= lend) return;
-    float* front = frontB + (long)blockIdx.y * front_total;
-    const int p = plcols[idx];
-    const int fsz = front_ptr[p + 1] - front_ptr[p];
-    const int nc = ncols[p];
-    float* F = front + front_off[p];
-    const int t = threadIdx.x, nt = blockDim.x;
-    const int uc = fsz - nc;
-    const int fsz2 = fsz * fsz;
-
-    extern __shared__ char smem_mid_tf32_ptx[];
-    float* Ltf = reinterpret_cast<float*>(smem_mid_tf32_ptx);
-    float* Utf = Ltf + (long)ucp_max * kp_max;
-    float* Fs  = Utf + (long)kp_max * ucp_max;
-
-    stage_in_async<float>(Fs, F, fsz2, t, nt);
-    __syncthreads();
-    factorize_front<float>(Fs, fsz, nc, uc, t, nt, sing, [&] {
-        if (nc <= 32 && uc <= 256) {
-            if constexpr (K == 4) {
-                trailing_update_mma_tf32_k4_ptx(Fs, fsz, nc, uc, Ltf, Utf, t, nt);
-            } else {
-                trailing_update_mma_tf32_ptx(Fs, fsz, nc, uc, Ltf, Utf, t, nt);
-            }
-        } else {
-            trailing_update_scalar<float>(Fs, fsz, nc, uc, t, nt);
-        }
-    });
-    __syncthreads();
-    writeback_factored<float, float>(F, Fs, fsz, nc, uc, t, nt);
-
-    const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
-    __syncthreads();
-    float* Fp = front + front_off[par];
-    const int pfsz = front_ptr[par + 1] - front_ptr[par];
-    const int abase = asm_ptr[p];
-    extend_add<float, float>(Fp, pfsz, Fs, fsz, nc, uc, asm_local, abase, t, nt);
 }
 
 // =======================================================================================

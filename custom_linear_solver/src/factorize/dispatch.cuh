@@ -175,85 +175,33 @@ static bool dispatch_factor_mid(const MultifrontalPlan& plan, State& st, cudaStr
     const int level_size = e - b;
     constexpr int do_extend = 1;
     const int fsz_cap = max_fsz;
-    const int ucp_max = round_up_to_multiple(max_uc, 16);
+    (void)max_uc;
     dim3 grid(level_size, B);
 
-    if (precision == Precision::FP16) {
-        // FP16 PTX mma.m16n8k8: KP = round_up(level_max_nc, 8), capped at 32 (nc ≤ 32 by
-        // the Phase-3 fallback gate). __half staging panels, no Csc (the inline-asm mma
-        // drains to per-lane registers). Block size scales with fsz so small mid fronts
-        // do not pay the full 256-thread launch cost.
-        const int threads_per_block = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
-        const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
-        const size_t shared_bytes = (size_t)fsz_cap * fsz_cap * sizeof(float)        // Fs
-                         + (size_t)2 * ucp_max * kp_max * sizeof(__half);   // Lh + Uh
-        if (shared_bytes <= kMidSharedMemoryBudgetBytes) {
-            factor_mid_fp16_ptx<<<grid, threads_per_block, shared_bytes, stream>>>(
+    // All precisions use the staged-scalar mid kernel (factor_mid<T>); on the fp16 / tf32 fronts
+    // the trailing runs in fp32 scalar. The tensor-core mid variants were removed — mid is
+    // latency-bound (not compute-bound), so the TC path measured slower (case8387 mid +34%);
+    // tensor cores are kept for the big tier only. Shared layout sized by the level cap of
+    // (nc, uc): Fs + the compact sh_L / sh_U strips.
+    const size_t element_bytes = (precision == Precision::FP64) ? sizeof(double) : sizeof(float);
+    const size_t shared_bytes_tiled = (size_t)fsz_cap * fsz_cap * element_bytes              // Fs
+                           + (size_t)2 * level_max_nc * level_max_uc * element_bytes;  // sh_L + sh_U
+    // Underfilled levels (block count ≤ num_SMs, e.g. B=1 deep narrow levels) each run a single
+    // latency-bound block; widen it to the device max so the per-pivot rank-1 update parallelises
+    // over the SM. Once the level fills the GPU with blocks, keep the default 256.
+    const int threads_per_block = ((long)(e - b) * B <= factor_num_sms()) ? factor_max_block() : 256;
+    if (shared_bytes_tiled <= kMidSharedMemoryBudgetBytes) {
+        if (precision == Precision::FP64)
+            factor_mid<double><<<grid, threads_per_block, shared_bytes_tiled, stream>>>(
+                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
+                plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
+        else
+            factor_mid<float><<<grid, threads_per_block, shared_bytes_tiled, stream>>>(
                 b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
-            return true;
-        }
-    } else if (precision == Precision::TF32) {
-        // TF32 PTX hybrid. Picks K=4 vs K=8 per level by the K-padding heuristic
-        //
-        //     use_k4 ↔ round_up(nc, 4) < round_up(nc, 8)
-        //            ↔ level_max_nc % 8 ∈ {1..4}
-        //
-        // K=4 cuts the staging panel and the per-tile FLOP count by ~50% on levels whose
-        // nc lies in the lower half of an 8-step; for the rest the K=8 path avoids the
-        // extra K-loop iterations a K=4 instruction would pay. Both PTX paths omit Csc
-        // (per-lane accumulators write straight to F).
-        const int threads_per_block = max_fsz <= 48 ? 64 : (max_fsz <= 80 ? 128 : 256);
-        const int level_nc_clipped = std::min(level_max_nc, kTensorCorePivotColumnCap);
-        const int kp_k4 = round_up_to_multiple(level_nc_clipped, 4);
-        const int kp_k8 = round_up_to_multiple(level_nc_clipped, 8);
-        const bool use_k4 = (kp_k4 < kp_k8);
-        const int kp_max = use_k4 ? kp_k4 : kp_k8;
-        const size_t shared_bytes = (size_t)fsz_cap * fsz_cap * sizeof(float)        // Fs
-                         + (size_t)2 * ucp_max * kp_max * sizeof(float);    // Ltf + Utf
-        if (shared_bytes <= kMidSharedMemoryBudgetBytes) {
-            if (use_k4) {
-                factor_mid_tf32_ptx<4><<<grid, threads_per_block, shared_bytes, stream>>>(
-                    b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                    plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
-            } else {
-                factor_mid_tf32_ptx<8><<<grid, threads_per_block, shared_bytes, stream>>>(
-                    b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                    plan.front_total, st.d_sing, do_extend, ucp_max, kp_max, fsz_cap);
-            }
-            return true;
-        }
-    } else {
-        // FP32 / FP64 staged-scalar mid kernel. Shared layout sized by the level cap of
-        // (nc, uc) rather than by single-panel round-ups since this kernel reuses sh_L /
-        // sh_U as compact L / U strips (not WMMA-aligned tiles).
-        const size_t element_bytes = (precision == Precision::FP64) ? sizeof(double) : sizeof(float);
-        const size_t shared_bytes_tiled = (size_t)fsz_cap * fsz_cap * element_bytes                  // Fs
-                               + (size_t)2 * level_max_nc * level_max_uc * element_bytes;   // sh_L + sh_U
-        // Underfilled levels (block count ≤ num_SMs, e.g. B=1 deep narrow levels) each run a
-        // single latency-bound block that uses only a fraction of its SM's warp slots (ncu: 8
-        // of 48 warps, 0.3% util). On the otherwise-idle GPU, widening the block to the device
-        // max parallelises the per-pivot rank-1 update over more of that SM with no occupancy
-        // cost. Once the level fills the GPU with blocks the extra width would only cost
-        // occupancy, so keep the default 256. Both the gate (num_SMs) and the wide size
-        // (maxThreadsPerBlock) are device attributes, not tuned constants.
-        const int threads_per_block = ((long)(e - b) * B <= factor_num_sms()) ? factor_max_block() : 256;
-        if (shared_bytes_tiled <= kMidSharedMemoryBudgetBytes) {
-            if (precision == Precision::FP64)
-                factor_mid<double><<<grid, threads_per_block, shared_bytes_tiled, stream>>>(
-                    b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
-                    plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
-            else
-                factor_mid<float><<<grid, threads_per_block, shared_bytes_tiled, stream>>>(
-                    b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                    plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
-            return true;
-        }
+                plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc);
+        return true;
     }
     // The mid shared layout did not fit; tell the caller to fall through to the big tier.
     return false;

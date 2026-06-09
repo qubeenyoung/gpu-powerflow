@@ -233,7 +233,6 @@ __device__ __forceinline__ void u_panel_solve(T* F, int fsz, int nc, int uc, int
 //   trailing_update_staged<T>       | staged-shared scalar         | FP32 (mid)
 //   trailing_update_mma_fp16_ptx    | FP16 PTX mma.m16n8k8         | FP16 (mid+big)
 //   trailing_update_mma_tf32_ptx    | TF32 PTX mma.m16n8k8         | TF32 (mid+big k=8)
-//   trailing_update_mma_tf32_k4_ptx | TF32 PTX mma.m16n8k4         | TF32 (mid k=4, hybrid)
 //
 // Common pattern across all variants:
 //   (a) Stream the L and U panels out of F into a staging buffer (shared scratch for the
@@ -560,80 +559,6 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
                     : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
             }
             const int col0 = tj8 * 8 + laneC;
-            const int col1 = col0 + 1;
-            if (r_top < uc) {
-                if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c0;
-                if (col1 < uc) F[(long)(nc + r_top) * fsz + (nc + col1)] -= c1;
-            }
-            if (r_bot < uc) {
-                if (col0 < uc) F[(long)(nc + r_bot) * fsz + (nc + col0)] -= c2;
-                if (col1 < uc) F[(long)(nc + r_bot) * fsz + (nc + col1)] -= c3;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------
-//  TF32 PTX K=4       (mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32)
-//
-// Same 16×8 output tile as the K=8 instruction but with a K-dimension of 4. Selected by the
-// dispatcher only when KP_k4 = round_up(nc, 4) is strictly less than KP_k8 = round_up(nc, 8),
-// i.e. when nc % 8 ∈ {1..4} — exactly the regime where K=4 halves K-padding waste in the
-// staging buffers and in the per-tile FLOP count. Outside that regime the dispatcher routes
-// to the K=8 path to avoid the extra K-loop iterations a K=4 instruction would cost.
-//
-// Per-lane A-matrix register layout (probed):
-//   a0 = A[laneR + 0, laneC]    (M_top, K = laneC)        2 .b32 / lane
-//   a1 = A[laneR + 8, laneC]    (M_bot, K = laneC)
-//   b0 = B[laneC, laneR]        (K, N)                    1 .b32 / lane
-//   c0..c3 cover the same 16×8 output positions as the K=8 instruction.
-//
-// laneR = lane >> 2 (0..7), laneC = lane & 3 (0..3). Each lane covers one K column and two
-// adjacent N columns.
-__device__ __forceinline__ void trailing_update_mma_tf32_k4_ptx(float* F, int fsz, int nc, int uc,
-                                                                  float* Ltf, float* Utf,
-                                                                  int t, int nt)
-{
-    const int UCP = ((uc + 15) / 16) * 16;
-    const int KP  = ((nc + 3)  / 4)  * 4;       // K=4 alignment
-
-    // (a) Stage L → Ltf and U → Utf (no explicit TF32 conversion — mma `.tf32` truncates).
-    for (int e = t; e < UCP * KP; e += nt) {
-        const int i = e / KP, k = e % KP;
-        Ltf[e] = (i < uc && k < nc) ? F[(long)(nc + i) * fsz + k] : 0.0f;
-    }
-    for (int e = t; e < KP * UCP; e += nt) {
-        const int k = e / UCP, j = e % UCP;
-        Utf[e] = (k < nc && j < uc) ? F[(long)k * fsz + (nc + j)] : 0.0f;
-    }
-    __syncthreads();
-
-    const int ntj16 = UCP / 16;
-    const int ntj8  = UCP / 8;
-    const int nks   = KP / 4;                   // K-loop count (mma K=4)
-    const int warp  = t >> 5;
-    const int nwarp = nt >> 5;
-    const int lane  = t & 31;
-    const int laneR = lane >> 2;
-    const int laneC = lane & 3;                 // single K col per lane (not laneC*2 as in K=8)
-
-    // (b)/(c) One warp per M-strip; iterate N tiles, accumulate over K, drain into F.
-    for (int ti = warp; ti < ntj16; ti += nwarp) {
-        const int r_top = ti * 16 + laneR;
-        const int r_bot = r_top + 8;
-        for (int tj8 = 0; tj8 < ntj8; ++tj8) {
-            float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
-            for (int kc = 0; kc < nks; ++kc) {
-                const unsigned a0 = __float_as_uint(Ltf[(ti * 16 + laneR + 0) * KP + kc * 4 + laneC]);
-                const unsigned a1 = __float_as_uint(Ltf[(ti * 16 + laneR + 8) * KP + kc * 4 + laneC]);
-                const unsigned b0 = __float_as_uint(Utf[(kc * 4 + laneC) * UCP + tj8 * 8 + laneR]);
-                asm volatile(
-                    "mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 "
-                    "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};\n"
-                    : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
-                    : "r"(a0), "r"(a1), "r"(b0));
-            }
-            const int col0 = tj8 * 8 + laneC * 2;
             const int col1 = col0 + 1;
             if (r_top < uc) {
                 if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c0;
