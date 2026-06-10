@@ -654,6 +654,45 @@ __global__ void __launch_bounds__(512, 2)
     const int t = threadIdx.x, nt = blockDim.x;
     const int uc = fsz - nc;
 
+#ifdef CLS_FUSE_TF32_TRAIL_EXTEND
+    // Fused trailing + extend-add: drain the TF32 mma accumulator straight into the parent front
+    // via atomicAdd, eliminating the uncoalesced C write-back (to F) + read-back (by extend_add)
+    // round-trip that docs note 30/53 identified as the real big-front memory bottleneck
+    // (C-drain global STORE 9.98 sector/req, 2.5x uncoalesced). Mirrors the FP16 fused path
+    // (CLS_FUSE_FP16_TRAIL_EXTEND). Only TC-eligible non-root fronts fuse; scalar (nc>32 / uc>256)
+    // and root fronts keep the split write-then-extend path.
+    const int par = panel_parent[p];
+    const bool use_fused_trailing =
+        (par >= 0 && do_extend && extend_add_allowed_for_uc(uc) &&
+         fsz > 48 && nc <= 32 && uc <= 256);
+    float* Fp = use_fused_trailing ? (front + front_off[par]) : nullptr;
+    const int pfsz = use_fused_trailing ? (front_ptr[par + 1] - front_ptr[par]) : 0;
+    const int abase = use_fused_trailing ? asm_ptr[p] : 0;
+    factorize_front<float>(F, fsz, nc, uc, t, nt, sing, [&] {
+        if (nc > 32 || uc > 256) {
+            trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);
+        } else {
+            extern __shared__ char smem_big_tf32_ptx[];
+            float* Ltf = reinterpret_cast<float*>(smem_big_tf32_ptx);
+            float* Utf = Ltf + (long)ucp_max * kp_max;
+            if (use_fused_trailing) {
+                trailing_update_mma_tf32_ptx<true>(F, fsz, nc, uc, Ltf, Utf, t, nt, Fp, pfsz,
+                                                   asm_local, abase);
+            } else {
+                trailing_update_mma_tf32_ptx<false>(F, fsz, nc, uc, Ltf, Utf, t, nt);
+            }
+        }
+    });
+
+    if (use_fused_trailing || par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
+    __syncthreads();
+    {
+        float* Fp2 = front + front_off[par];
+        const int pfsz2 = front_ptr[par + 1] - front_ptr[par];
+        const int abase2 = asm_ptr[p];
+        extend_add<float, float>(Fp2, pfsz2, F, fsz, nc, uc, asm_local, abase2, t, nt);
+    }
+#else
     auto tf32_big_trailing = [&] {
         if (nc > 32 || uc > 256) {
             trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);
@@ -673,6 +712,7 @@ __global__ void __launch_bounds__(512, 2)
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
     const int abase = asm_ptr[p];
     extend_add<float, float>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
+#endif
 }
 
 

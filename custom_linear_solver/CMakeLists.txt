@@ -20,6 +20,8 @@ option(CLS_BUILD_CUDSS_SCRIPT "Build cuDSS command-line comparison script" OFF)
 option(CLS_ENABLE_NVTX "Enable NVTX ranges in command-line profiling scripts" OFF)
 option(CLS_FUSE_FP16_TRAIL_EXTEND
   "Fuse FP16 tensor-core trailing drain with extend-add for big fronts" ON)
+option(CLS_FUSE_TF32_TRAIL_EXTEND
+  "Experimental: fuse TF32 tensor-core trailing drain with extend-add for big fronts (helps B=1, neutral/regresses at batch; see note 55)" OFF)
 option(CLS_MID_TF32_TC
   "Experimental: use TF32 tensor-core trailing GEMM on eligible mid-tier fronts" OFF)
 option(CLS_MID_TF32_TC_THREADS_128
@@ -203,6 +205,9 @@ if(CLS_BUILD_CUDA_OPS)
   endif()
   if(CLS_FUSE_FP16_TRAIL_EXTEND)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_FUSE_FP16_TRAIL_EXTEND)
+  endif()
+  if(CLS_FUSE_TF32_TRAIL_EXTEND)
+    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_FUSE_TF32_TRAIL_EXTEND)
   endif()
   if(CLS_MID_TF32_TC)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_MID_TF32_TC)
