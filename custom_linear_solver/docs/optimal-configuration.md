@@ -49,22 +49,22 @@ build-lowfill/custom_linear_solver_run <case> --precision tf32 --batch 64 \
 
 ## 2. 토글 ↔ 메소드 매핑 (ablation 참조표)
 
-| 토글 (CMake -D / CLI) | 기본 | 메소드 (storyline) |
+| 토글 (CMake -D / CLI) | 기본 | 분류 (storyline) |
 |---|---|---|
-| `--precision {fp64,fp32,fp16,tf32}` | fp64 | substrate(정밀도 regime) / M5 활성 전제 |
-| `--batch N` | 1 | M1 배치 front-major |
-| `SolverConfig.tier_split` | true | M2 3단 커널 라우팅 |
-| 동형 디스패치 정책 (band-order, baked) | gate | M3 동형 디스패치 |
-| `--no-multistream` | (multi=on) | M4 서브트리 멀티스트림 |
-| `CLS_MID_TF32_TC` | OFF | M5 TF32 텐서코어 trailing (mid) |
-| `CLS_BIG_TF32_BLOCKED_TC` | OFF | M5 TF32 텐서코어 trailing (big) |
-| `CLS_MID_LOW_SPLIT` / `CLS_BIG_LOW_SPLIT` | OFF | M5 보조 (dispatch bucketing) |
-| `CLS_BIG_TF32_SHARED_THREADS_512` / `CLS_MID_TF32_TC_THREADS_128` | OFF | M5/M6 launch shape |
-| `CLS_MID_TF32_MIN_FSZ` | 48 | M5 TC 적격 gate |
-| `CLS_RESPECT_PANEL_CAP` | OFF | panel_cap 가시화 (M5 와 함께) |
-| `CLS_TC_CLOSURE_PANEL_AMALGAMATE(_CAP)` | OFF | M6 TC 적합 패널 융합 |
-| `CLS_SMALL_FRONT_MAX_16` | OFF | M6 tier 경계 조정 (`kSmallFrontMax 32→16`) |
-| `CLS_TF32_OZAKI_TC2` / `..._FIRST_ORDER` | OFF | M7 Ozaki 오차보정 |
+| `--precision {fp64,fp32,fp16,tf32}` | fp64 | substrate(정밀도 regime) / B1 TC trailing 활성 전제 |
+| `--batch N` | 1 | **substrate** (배치 — cuDSS 공유) |
+| `SolverConfig.tier_split` | true | **A1 Tier routing** |
+| 동형 디스패치 정책 (band-order, baked) | gate | **A2 Dispatch scheduling** (동형) |
+| `--no-multistream` | (multi=on) | **A2 Dispatch scheduling** (멀티스트림) |
+| `CLS_MID_TF32_TC` | OFF | **B1 TC trailing** (mid) |
+| `CLS_BIG_TF32_BLOCKED_TC` | OFF | **B1 TC trailing** (big) |
+| `CLS_MID_LOW_SPLIT` / `CLS_BIG_LOW_SPLIT` | OFF | substrate(kernel optimization — dispatch bucketing) |
+| `CLS_BIG_TF32_SHARED_THREADS_512` / `CLS_MID_TF32_TC_THREADS_128` | OFF | substrate(kernel optimization — launch shape) |
+| `CLS_MID_TF32_MIN_FSZ` | 48 | B1 TC 적격 gate |
+| `CLS_RESPECT_PANEL_CAP` | OFF | panel_cap 가시화 (B1 과 함께) |
+| `CLS_TC_CLOSURE_PANEL_AMALGAMATE(_CAP)` | OFF | **B2 TC-routable front coarsening** |
+| `CLS_SMALL_FRONT_MAX_16` | OFF | **B2** tier 경계 조정 (`kSmallFrontMax 32→16`) |
+| `CLS_TF32_OZAKI_TC2` / `..._FIRST_ORDER` | OFF | **B1 TC trailing** (Ozaki 정확도 회복) |
 | `CLS_TF32_COLUMN_USOLVE` | OFF | (음성) column-U-solve — 효과 ≈0 |
 | `CLS_INTERNAL_GRAPH` | ON | substrate(CUDA graph) |
 | `CLS_USE_PIVOTING` | OFF | substrate(no-pivot 비교용) |

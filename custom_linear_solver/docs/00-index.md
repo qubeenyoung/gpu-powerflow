@@ -1,8 +1,9 @@
 # `custom_linear_solver` 문서 색인
 
 > **먼저 읽기**:
-> - [`storyline.md`](storyline.md) — base multifrontal 위에 쌓은 최적화 **메소드**(3개 축, 6개)를
->   체계적으로 서술 + 각 메소드의 ablation 토글 매핑.
+> - [`storyline.md`](storyline.md) — tiny-front regime 근원에서 내려오는 논리 + cuDSS 공유 substrate
+>   위의 **연구 기여 4개**(Tier routing / Dispatch scheduling / TC trailing / front coarsening)와
+>   ablation 토글 매핑.
 > - [`optimal-configuration.md`](optimal-configuration.md) — 현재 최적 경로의 빌드/런타임 설정과
 >   토글↔메소드 매핑표.
 
