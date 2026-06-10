@@ -2,7 +2,7 @@
 
 // SOLVE — host-side level dispatch.
 //
-// Internal — included only by numeric_engine.cu (single TU; CUDA_SEPARABLE_COMPILATION OFF).
+// Internal — included into the factor/solve driver TUs (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
 // Two layers of dispatch:
 //
@@ -21,8 +21,8 @@
 
 #include <cuda_runtime.h>
 
-#include "plan/front_range_caps.hpp"
-#include "numeric_engine.hpp"
+#include "internal/plan/front_range_caps.hpp"
+#include "internal/runtime/state.hpp"
 #include "solve/kernels.cuh"
 
 namespace custom_linear_solver {

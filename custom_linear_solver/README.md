@@ -3,12 +3,12 @@
 `custom_linear_solver` is the cuDSS-like wrapper layer for the copied CUDA
 multifrontal solver code.
 
-The copied operation code is flattened directly under `src`: `plan`,
-`factorize`, `solve`, `symbolic`, `reordering`, and `matrix`. It is a small
-subset of `external/lin_solver`: only the GPU multifrontal kernels, symbolic
-analysis, METIS nested-dissection ordering, and the minimal matrix/API state
-are kept here. Benchmark drivers, matching experiments, GPU-ND experiments,
-and third-party solver adapters are not part of this module.
+The copied operation code is organized directly under `src`: `analyze`,
+`factorize`, `solve`, and `internal`. It is a small subset of
+`external/lin_solver`: only the GPU multifrontal kernels, symbolic analysis,
+METIS nested-dissection ordering, and the minimal matrix/API state are kept
+here. Benchmark drivers, matching experiments, GPU-ND experiments, and
+third-party solver adapters are not part of this module.
 
 ## Public API
 
@@ -31,8 +31,8 @@ defaults.
 
 | Field                            | Default      | Description                                                                                              |
 |----------------------------------|--------------|----------------------------------------------------------------------------------------------------------|
-| `precision`                      | `FP64`       | `FP64` / `FP32` / `FP16` (PTX) / `FP16_WMMA` alias / `TF32_WMMA` alias / `TF32` (PTX, recommended)       |
-| `panel_cap`                      | `8`          | Max panel width inside a supernode (1..64). Analyzer auto-bumps to 12 for n≥16k, 20 for n≥80k.           |
+| `precision`                      | `FP64`       | `FP64` / `FP32` / `TF32` (PTX, recommended)                                                              |
+| `max_panel_width`                | `8`          | Max columns amalgamated into one supernode panel (1..64). Analyzer uses width 16 for n>=16k unless `CLS_RESPECT_PANEL_CAP`. |
 | `use_parallel_nested_dissection` | `true`       | METIS-ND uses parallel host threads                                                                       |
 | `use_multistream_subtrees`       | `true`       | Dispatch independent subtrees on separate CUDA streams (capped at 8). Disable for single-stream debugging. |
 | `analyze_emit_info`              | `false`      | After `analyze()`, print front-size and subtree summary to stderr                                          |
@@ -57,18 +57,14 @@ CMake options that change build behavior:
 |-------------|---------------|----------------------------------|------------|----------------------------------|
 | `FP64`      | FP64          | scalar FP64                      | FP64       | ~1e-13                            |
 | `FP32`      | FP32          | staged-scalar FP32               | FP32       | ~1e-4                             |
-| `FP16`      | FP32          | FP16 PTX mma.m16n8k16            | FP32       | ~1e-3 .. 1e-4 (FP16 rounding)     |
-| `FP16_WMMA` | FP32          | Alias for `FP16`                 | FP32       | ~1e-3 .. 1e-4 (FP16 rounding)     |
-| `TF32_WMMA` | FP32          | Alias for `TF32`                 | FP32       | ~1e-4 (TF32 rounding)             |
 | `TF32`      | FP32          | TF32 PTX mma.m16n8k8 / k4 hybrid | FP32       | ~1e-4 (TF32 rounding)             |
 
 `TF32` is the **recommended TF32 path** for power-grid Jacobians: it bakes in
-the V9h stack (`docs/03-optimization-notes/15`) and the EXP-B
-`__launch_bounds__(512, 2)` for the big tier (`docs/03-optimization-notes/17`).
-The legacy `FP16_WMMA` and `TF32_WMMA` names are accepted for compatibility, but
-they dispatch to the PTX paths.
+the V9h stack (`docs/03-optimization-notes/02-tf32-trailing-gemm.md`) and the
+EXP-B `__launch_bounds__(512, 2)` for the big tier
+(`docs/03-optimization-notes/01-kernel-engineering.md`).
 
-`FP16` and the TF32 modes require Ampere (sm_80+).
+`TF32` requires Ampere (sm_80+).
 
 ## Experimental combinations
 
@@ -76,9 +72,9 @@ Anything you can vary at runtime from the CLI runner without rebuilding:
 
 | Axis                     | Values                                                | CLI flag           |
 |--------------------------|-------------------------------------------------------|--------------------|
-| Precision                | `fp64` / `fp32` / `fp16` / `fp16_wmma` / `tf32_wmma` / `tf32` | `--precision`      |
+| Precision                | `fp64` / `fp32` / `tf32`                           | `--precision`      |
 | Batch size B             | 1, 4, 16, 64, 256, …                                  | `--batch`          |
-| Panel cap                | 1..64                                                 | `--panel-cap`      |
+| Max panel width          | 1..64                                                 | `--max-panel-width` |
 | Multi-stream subtrees    | on / off                                              | `--no-multistream` |
 | Repeat (timing)          | 1..N (median reported)                                | `--repeat`         |
 | Single-system input dtype| `fp64` / `fp32`                                       | `--single-precision` |
@@ -91,8 +87,8 @@ The TF32 PTX path is now baked in (V9h + LB(512, 2)); selecting it is just
 are now the default behavior of `Precision::TF32`. Failed variants
 (`CLS_TF32_PTX_VARIANT`, `CLS_TF32_BIG_T_512`, `CLS_TF32_BIG_LB_256_4`,
 always-k4 `CLS_TF32_MID_K4`, `CLS_SMALL_WARPS_16`) have been removed; see
-`docs/03-optimization-notes/15` §0 and `docs/03-optimization-notes/17` §4 for
-the reasoning.
+`docs/03-optimization-notes/02-tf32-trailing-gemm.md` §4 and
+`docs/03-optimization-notes/01-kernel-engineering.md` for the reasoning.
 
 ## Build + run
 
@@ -116,8 +112,10 @@ build/custom_linear_solver/custom_linear_solver_run \
 
 ## Docs
 
-Start from `docs/00-index.md`. The two most relevant optimization notes are
-`docs/03-optimization-notes/15-tf32-ptx-trailing-experiment-2026-06-06.md`
-(V9h stack) and
-`docs/03-optimization-notes/17-big-tier-occupancy-launch-bounds-2026-06-07.md`
-(EXP-B LB(512, 2)), both baked into `Precision::TF32`.
+Start from `docs/README.md`. The two most relevant optimization notes are
+`docs/03-optimization-notes/02-tf32-trailing-gemm.md`
+(V9h TF32 PTX trailing stack) and
+`docs/03-optimization-notes/01-kernel-engineering.md`
+(EXP-B LB(512, 2) and other tier/kernel levers), both baked into `Precision::TF32`.
+The honest TF32 speedup analysis is in
+`docs/03-optimization-notes/03-tensor-core-investigation.md`.

@@ -1,5 +1,8 @@
 # custom_linear_solver API and Build Design
 
+> **상태**: reference   **갱신**: 2026-06-10
+> **한 줄**: cuDSS 식 phase API(`set_data`/`analyze`/`factorize`/`solve`)와 빌드 타깃·복사 인벤토리·device-resident 런타임 경로 설계.
+
 ## Goal
 
 Provide a cuDSS-like sparse direct solver API backed by the copied CUDA

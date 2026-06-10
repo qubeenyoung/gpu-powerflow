@@ -3,8 +3,8 @@
 #include <memory>
 #include <string>
 
-#include "matrix/view.hpp"
-#include "numeric_engine.hpp"   // Precision { FP64, FP32, FP16, TF32 }
+#include "internal/matrix_view.hpp"
+#include "internal/runtime/state.hpp"   // Precision { FP64, FP32, TF32 }
 
 namespace custom_linear_solver {
 
@@ -19,7 +19,7 @@ enum class Status {
 };
 
 // User-configurable knobs. Set on the SolverConfig passed to Solver(). Tunables not listed
-// here (kernel-tier thresholds kSmallFrontMax / kMidFrontMax, the TF32 PTX trailing stack, the
+// here (kernel-tier threshold kSmallFrontMax, the TF32 PTX trailing stack, the
 // cp.async stage-in, the per-front kernel routing) are baked into the build because every
 // measured off-default regressed at least one case.
 struct SolverConfig {
@@ -27,15 +27,15 @@ struct SolverConfig {
     bool use_matching = false;                       // (reserved) row matching pre-permutation
     bool use_parallel_nested_dissection = true;      // multi-threaded METIS-ND ordering
     int  metis_seed = 42;                            // METIS ordering seed (diagnostic / A-B)
-    int  panel_cap = 8;                              // supernode panel width cap (1..64). The
-                                                     // analyzer auto-bumps to 12 for n>=16k and
-                                                     // 20 for n>=80k; this is the floor.
+    int  max_panel_width = 8;                        // max columns amalgamated into one supernode
+                                                     // panel (1..64). The analyzer sets the swept
+                                                     // optimum by size — 16 for n>=16k, else this
+                                                     // value (8) — unless CLS_RESPECT_PANEL_CAP.
     // ---- Numeric factorization ----
     bool enable_shift_retry = true;                  // (reserved) diagonal-shift fallback on
                                                      // singular pivot
     double shift_retry_epsilon = 1.0e-8;             // (reserved) shift magnitude
-    Precision precision = Precision::FP64;           // FP64 / FP32 / FP16 (FP16 PTX mma) /
-                                                     // TF32 (TF32 PTX mma, recommended)
+    Precision precision = Precision::FP64;           // FP64 / FP32 / TF32 (TF32 PTX mma, recommended)
     // ---- Runtime dispatch ----
     bool tier_split = true;                          // occupancy-gated per-front tier split in the
                                                      // factor/solve level dispatch. false = original

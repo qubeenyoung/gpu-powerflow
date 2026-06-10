@@ -1,0 +1,13 @@
+case_name,n_bus,ybus_nnz,B,init_ms,solve_ms,solve_ms_per_system,iterations,max_final_mismatch,source
+case_ACTIVSg25k,25000,85220,1,225.01,7.73693,7.73693,6,2.66789e-11,custom_fp32_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,16,77.6845,20.3397,1.27123,6,2.43115e-11,custom_fp32_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,64,74.4345,56.4388,0.881856,5,9.13129e-09,custom_fp32_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,256,75.1485,215.118,0.840306,5,9.19153e-09,custom_fp32_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,1,226.2,6.05764,6.05764,5,4.95771e-09,custom_tf32_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,16,80.737,17.2204,1.07628,5,6.48969e-09,custom_tf32_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,64,76.6505,56.6322,0.884878,5,7.02263e-09,custom_tf32_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,256,73.4708,221.697,0.866002,5,9.32483e-09,custom_tf32_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,1,227.136,5.78496,5.78496,5,4.02246e-09,custom_fp16_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,16,77.1728,20.6423,1.29015,6,2.66789e-11,custom_fp16_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,64,73.2121,66.5958,1.04056,6,2.73607e-11,custom_fp16_scale0_maxiter10
+case_ACTIVSg25k,25000,85220,256,73.1856,259.565,1.01393,6,3.68744e-11,custom_fp16_scale0_maxiter10

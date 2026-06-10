@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "numeric_engine.hpp"
+#include "internal/runtime/state.hpp"
 #include "io.hpp"
 #include "solver.hpp"
 
@@ -51,14 +51,14 @@ struct Options {
     int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
     bool batch_only = false;  // skip the single-system factor/solve
     bool single_fp32 = false;
-    int panel_cap = 8;  // analyze: max panel width inside a supernode; -1 keeps default
+    int max_panel_width = 8;  // analyze: max panel width inside a supernode; -1 keeps default
     bool use_parallel_nested_dissection = true;  // false: deterministic serial METIS NodeND
     int metis_seed = 42;  // METIS ordering seed for deterministic A/B sweeps
     bool no_multistream = false;     // disable subtree multi-stream dispatch
     bool no_tier_split = false;      // disable occupancy-gated per-front tier split
     bool analyze_info = false;       // print analyze-phase front/subtree summary
-    // Numeric precision. See multifrontal.hpp for what each mode does.
-    //   fp64 / fp32 / fp16 (FP16 PTX mma) / tf32 (V9h PTX, recommended).
+    // Numeric precision. See state.hpp for what each mode does.
+    //   fp64 / fp32 / tf32 (V9h PTX, recommended).
     cls::Precision precision = cls::Precision::FP64;
 };
 
@@ -144,9 +144,8 @@ void usage(const char* argv0)
         << "  --precision MODE      batched factor precision; MODE one of\n"
         << "                          fp64       (reference, ~1e-13)\n"
         << "                          fp32       (~1e-4, ~2x speed of FP64)\n"
-        << "                          fp16       (FP32 + FP16 PTX mma.m16n8k8 trailing)\n"
         << "                          tf32       (FP32 + TF32 PTX trailing — V9h+LB, recommended)\n"
-        << "  --panel-cap N         analyze: max panel width inside a supernode (1..64)\n"
+        << "  --max-panel-width N         analyze: max panel width inside a supernode (1..64)\n"
         << "  --serial-nd          use deterministic serial METIS NodeND for benchmark A/Bs\n"
         << "  --metis-seed N       METIS ordering seed for serial/parallel ND A/Bs\n"
         << "  --no-multistream      disable subtree multi-stream dispatch (single stream)\n"
@@ -192,9 +191,9 @@ Options parse_args(int argc, char** argv)
             if (value == "fp64") options.single_fp32 = false;
             else if (value == "fp32") options.single_fp32 = true;
             else throw std::runtime_error("--single-precision must be fp64 or fp32");
-        } else if (arg == "--panel-cap") {
-            if (++i >= argc) throw std::runtime_error("--panel-cap requires an int");
-            options.panel_cap = std::stoi(argv[i]);
+        } else if (arg == "--max-panel-width") {
+            if (++i >= argc) throw std::runtime_error("--max-panel-width requires an int");
+            options.max_panel_width = std::stoi(argv[i]);
         } else if (arg == "--serial-nd") {
             options.use_parallel_nested_dissection = false;
         } else if (arg == "--metis-seed") {
@@ -211,15 +210,14 @@ Options parse_args(int argc, char** argv)
             options.dump_fronts_path = argv[i];
         } else if (arg == "--precision") {
             if (++i >= argc) throw std::runtime_error(
-                "--precision requires fp64|fp32|fp16|tf32");
+                "--precision requires fp64|fp32|tf32");
             const std::string value = argv[i];
             using cls::Precision;
             if      (value == "fp64")      options.precision = Precision::FP64;
             else if (value == "fp32")      options.precision = Precision::FP32;
-            else if (value == "fp16")      options.precision = Precision::FP16;
             else if (value == "tf32")      options.precision = Precision::TF32;
             else throw std::runtime_error(
-                "--precision must be fp64|fp32|fp16|tf32");
+                "--precision must be fp64|fp32|tf32");
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -341,7 +339,7 @@ int main(int argc, char** argv)
         solver_config.precision = options.precision;
         solver_config.use_parallel_nested_dissection = options.use_parallel_nested_dissection;
         solver_config.metis_seed = options.metis_seed;
-        if (options.panel_cap > 0) solver_config.panel_cap = options.panel_cap;
+        if (options.max_panel_width > 0) solver_config.max_panel_width = options.max_panel_width;
         solver_config.use_multistream_subtrees = !options.no_multistream;
         solver_config.tier_split = !options.no_tier_split;
         solver_config.analyze_emit_info = options.analyze_info;

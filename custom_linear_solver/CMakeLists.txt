@@ -18,70 +18,16 @@ option(CLS_INTERNAL_GRAPH "Capture batched factor/solve into internal CUDA graph
 option(CLS_BUILD_SCRIPTS "Build custom_linear_solver command-line scripts" ON)
 option(CLS_BUILD_CUDSS_SCRIPT "Build cuDSS command-line comparison script" OFF)
 option(CLS_ENABLE_NVTX "Enable NVTX ranges in command-line profiling scripts" OFF)
-option(CLS_FUSE_FP16_TRAIL_EXTEND
-  "Fuse FP16 tensor-core trailing drain with extend-add for big fronts" ON)
 option(CLS_FUSE_TF32_TRAIL_EXTEND
   "Experimental: fuse TF32 tensor-core trailing drain with extend-add for big fronts (helps B=1, neutral/regresses at batch; see note 55)" OFF)
-option(CLS_MID_TF32_TC
-  "Experimental: use TF32 tensor-core trailing GEMM on eligible mid-tier fronts" OFF)
-option(CLS_MID_TF32_TC_THREADS_128
-  "Experimental: launch mid TF32 Tensor Core kernel with 128 threads instead of 256" OFF)
-option(CLS_MID_TF32_DIRECT_SHARED
-  "Experimental: use direct-shared TF32 Tensor Core trailing for mid fronts instead of blocked updates" OFF)
-option(CLS_MID_TF32_LOW_TC
-  "Experimental: allow TF32 Tensor Core direct-shared trailing on 33..48 mid-low fronts for medium cases" OFF)
-option(CLS_MID_TF32_LOW_TC_FORCE_ALL
-  "Diagnostic: allow TF32 Tensor Core direct-shared trailing on 33..48 mid-low fronts for all case sizes" OFF)
-option(CLS_SMALL_FRONT_MAX_16
-  "Experimental: classify only fsz<=16 as small so 17..32 fronts use the mid dispatch path" OFF)
-option(CLS_MID_LOW_SPLIT
-  "Experimental: split 33..48 and 49..64 mid-low fronts into separate dispatch buckets" OFF)
-option(CLS_BIG_TF32_BLOCKED_TC
-  "Experimental: use right-looking blocked TF32 Tensor Core update for eligible big fronts" OFF)
-option(CLS_BIG_TF32_SHARED_THREADS_512
-  "Experimental: launch shared-resident big-low TF32 Tensor Core kernel with 512 threads instead of 256" OFF)
-option(CLS_TF32_COLUMN_USOLVE
-  "Experimental: use column-owned U-panel triangular solve in direct-shared TF32 mid fronts" OFF)
+option(CLS_FUSE_SCALAR_TRAIL_EXTEND
+  "Experimental: fuse staged-scalar (fp32/fp64) trailing drain with extend-add for mid/big fronts — removes the CB global write+read round-trip (atomicAdd straight to parent)" OFF)
 option(CLS_TF32_OZAKI_TC2
   "Experimental: use two-component Ozaki-style TF32 head/tail Tensor Core products" OFF)
 option(CLS_TF32_OZAKI_TC2_FIRST_ORDER
   "Experimental: omit the tail-tail product from CLS_TF32_OZAKI_TC2" OFF)
 option(CLS_RESPECT_PANEL_CAP
   "Experimental: respect the requested panel cap instead of overriding it by matrix size" OFF)
-option(CLS_BIG_LOW_SPLIT
-  "Experimental: split big fronts at fsz<=159 into a separate dispatch bucket" OFF)
-option(CLS_TC_CLOSURE_PANEL_AMALGAMATE
-  "Diagnostic: merge consecutive panels only when closure-valid and Tensor-Core-routable" OFF)
-set(CLS_MID_TF32_MIN_FSZ "48" CACHE STRING
-  "Experimental: minimum fsz_cap routed to the mid TF32 Tensor Core kernel")
-if(NOT CLS_MID_TF32_MIN_FSZ MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CLS_MID_TF32_MIN_FSZ must be an integer")
-endif()
-set(CLS_SIBLING_PANEL_AMALGAMATE_CAP "8" CACHE STRING
-  "Diagnostic: max ncols for sibling-panel amalgamation")
-if(NOT CLS_SIBLING_PANEL_AMALGAMATE_CAP MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CLS_SIBLING_PANEL_AMALGAMATE_CAP must be an integer")
-endif()
-set(CLS_PANEL_CHAIN_AMALGAMATE_CAP "32" CACHE STRING
-  "Diagnostic: max ncols for panel-tree-chain amalgamation")
-if(NOT CLS_PANEL_CHAIN_AMALGAMATE_CAP MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CLS_PANEL_CHAIN_AMALGAMATE_CAP must be an integer")
-endif()
-set(CLS_VALIDATED_RUN_PANEL_AMALGAMATE_CAP "32" CACHE STRING
-  "Diagnostic: max ncols for validated consecutive-run panel amalgamation")
-if(NOT CLS_VALIDATED_RUN_PANEL_AMALGAMATE_CAP MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CLS_VALIDATED_RUN_PANEL_AMALGAMATE_CAP must be an integer")
-endif()
-set(CLS_CLOSURE_PANEL_AMALGAMATE_CAP "32" CACHE STRING
-  "Diagnostic: max ncols for closure-validated panel amalgamation")
-if(NOT CLS_CLOSURE_PANEL_AMALGAMATE_CAP MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CLS_CLOSURE_PANEL_AMALGAMATE_CAP must be an integer")
-endif()
-set(CLS_TC_CLOSURE_PANEL_AMALGAMATE_CAP "32" CACHE STRING
-  "Diagnostic: max ncols for Tensor-Core-routable closure panel amalgamation")
-if(NOT CLS_TC_CLOSURE_PANEL_AMALGAMATE_CAP MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CLS_TC_CLOSURE_PANEL_AMALGAMATE_CAP must be an integer")
-endif()
 set(CLS_PAR_ND_DEPTH "4" CACHE STRING
   "Diagnostic: recursion depth for parallel nested dissection")
 if(NOT CLS_PAR_ND_DEPTH MATCHES "^[0-9]+$")
@@ -148,15 +94,18 @@ if(CLS_BUILD_CUDA_OPS)
 
   set(CLS_OP_SOURCES
     src/solver.cpp
-    src/matrix/pattern_kernels.cu
-    src/plan/multifrontal_plan.cu
-    src/plan/analyze.cu
-    src/plan/build.cpp
-    src/numeric_engine.cu
-    src/symbolic/elimination_tree.cpp
-    src/symbolic/supernode.cpp
-    src/symbolic/multifrontal.cpp
-    src/reordering/metis_nd.cpp
+    src/analyze/pattern/pattern_kernels.cu
+    src/internal/plan/multifrontal_plan.cu
+    src/analyze/plan/lower.cu
+    src/analyze/pipeline.cpp
+    src/internal/runtime/state.cu
+    src/internal/runtime/setup.cu
+    src/factorize/factorize.cu
+    src/solve/solve.cu
+    src/analyze/symbolic/elimination_tree.cpp
+    src/analyze/symbolic/supernode.cpp
+    src/analyze/symbolic/multifrontal.cpp
+    src/analyze/reorder/metis_nd.cpp
   )
 
   # Profile module: compiled in only when CLS_ENABLE_PROFILE=ON. Pulls in NVTX as a link
@@ -203,43 +152,11 @@ if(CLS_BUILD_CUDA_OPS)
   if(CLS_INTERNAL_GRAPH)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_INTERNAL_GRAPH)
   endif()
-  if(CLS_FUSE_FP16_TRAIL_EXTEND)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_FUSE_FP16_TRAIL_EXTEND)
+  if(CLS_FUSE_SCALAR_TRAIL_EXTEND)
+    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_FUSE_SCALAR_TRAIL_EXTEND)
   endif()
   if(CLS_FUSE_TF32_TRAIL_EXTEND)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_FUSE_TF32_TRAIL_EXTEND)
-  endif()
-  if(CLS_MID_TF32_TC)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_MID_TF32_TC)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE
-      CLS_MID_TF32_MIN_FSZ=${CLS_MID_TF32_MIN_FSZ})
-  endif()
-  if(CLS_MID_TF32_TC_THREADS_128)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_MID_TF32_TC_THREADS_128)
-  endif()
-  if(CLS_MID_TF32_DIRECT_SHARED)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_MID_TF32_DIRECT_SHARED)
-  endif()
-  if(CLS_MID_TF32_LOW_TC OR CLS_MID_TF32_LOW_TC_FORCE_ALL)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_MID_TF32_LOW_TC)
-  endif()
-  if(CLS_MID_TF32_LOW_TC_FORCE_ALL)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_MID_TF32_LOW_TC_FORCE_ALL)
-  endif()
-  if(CLS_SMALL_FRONT_MAX_16)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_SMALL_FRONT_MAX_16)
-  endif()
-  if(CLS_MID_LOW_SPLIT)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_MID_LOW_SPLIT)
-  endif()
-  if(CLS_BIG_TF32_BLOCKED_TC)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_BIG_TF32_BLOCKED_TC)
-  endif()
-  if(CLS_BIG_TF32_SHARED_THREADS_512)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_BIG_TF32_SHARED_THREADS_512)
-  endif()
-  if(CLS_TF32_COLUMN_USOLVE)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_TF32_COLUMN_USOLVE)
   endif()
   if(CLS_TF32_OZAKI_TC2)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_TF32_OZAKI_TC2)
@@ -249,14 +166,6 @@ if(CLS_BUILD_CUDA_OPS)
   endif()
   if(CLS_RESPECT_PANEL_CAP)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_RESPECT_PANEL_CAP)
-  endif()
-  if(CLS_BIG_LOW_SPLIT)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_BIG_LOW_SPLIT)
-  endif()
-  if(CLS_TC_CLOSURE_PANEL_AMALGAMATE)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE
-      CLS_TC_CLOSURE_PANEL_AMALGAMATE
-      CLS_TC_CLOSURE_PANEL_AMALGAMATE_CAP=${CLS_TC_CLOSURE_PANEL_AMALGAMATE_CAP})
   endif()
   target_compile_definitions(custom_linear_solver_ops PRIVATE
     CLS_PAR_ND_DEPTH=${CLS_PAR_ND_DEPTH}

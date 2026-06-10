@@ -1,5 +1,8 @@
 # GPU sparse direct solvers for non-SPD matrices — landscape, why the famous solvers are *not* fast on power-grid Jacobians, and where our work contributes
 
+> **상태**: reference   **갱신**: 2026-06-10
+> **한 줄**: non-SPD GPU 직접 솔버 landscape(인용)·power-grid Jacobian에서 유명 솔버가 느린 이유·우리 기여의 솔직한 novelty 평가.
+
 This document answers four things the team asked for:
 1. A surveyed comparison of existing open-source / published GPU sparse **direct** solvers for
    **non-SPD (unsymmetric)** matrices (STRUMPACK, SuperLU_DIST, GLU 3.0, PanGuLu, Basker/Kokkos,

@@ -3,9 +3,11 @@
 #include <utility>
 #include <vector>
 
-#include "matrix/pattern_kernels.hpp"  // IntDeviceBuffer
-#include "numeric_engine.hpp"             // setup, factorize, solve, set_stream, State
-#include "plan/build.hpp"               // build_plan_from_csr
+#include "analyze/pattern/pattern_kernels.hpp"  // IntDeviceBuffer
+#include "internal/runtime/state.hpp"   // State, Precision, setup, set_stream
+#include "factorize/factorize.hpp"      // factorize
+#include "solve/solve.hpp"              // solve
+#include "analyze/analyze.hpp"               // build_plan_from_csr
 #include "profile/profile.hpp"          // cls::profile::init / flush + CLS_PROFILE_* macros
 
 namespace custom_linear_solver {
@@ -116,7 +118,7 @@ Status Solver::analyze()
     plan::PlanBuildOptions opts;
     opts.use_parallel_nested_dissection = impl_->config.use_parallel_nested_dissection;
     opts.metis_seed = impl_->config.metis_seed;
-    opts.panel_cap = impl_->config.panel_cap;
+    opts.max_panel_width = impl_->config.max_panel_width;
     opts.float_front = is_fp32_front(impl_->config.precision);
     opts.dump_fronts_csv_path = impl_->config.analyze_dump_fronts_path;
     opts.emit_analyze_info = impl_->config.analyze_emit_info;

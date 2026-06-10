@@ -1,82 +1,76 @@
 # 최적 구성 (Optimal Configuration)
 
-**작성일**: 2026-06-10
-**목적**: 현재 최적 경로의 빌드/런타임 설정을 한곳에. 메소드 자체의 설명은 [`storyline.md`](storyline.md),
-세부 측정은 `03-optimization-notes/` 참조. 여기서 토글 이름 ↔ 메소드 매핑만 빠르게 본다.
+> **상태**: canonical   **갱신**: 2026-06-10
+> **한 줄**: 현재 최적 경로의 빌드/런타임 설정과 남아있는 토글 매핑을 한곳에.
+
+메소드 자체의 설명은 [`storyline.md`](storyline.md), 세부 측정은
+[`03-optimization-notes/`](03-optimization-notes/) 참조.
+
+> **이전 버전과의 차이**: 예전에는 regime별로 실험 플래그를 골라 켜야 했지만, 검증된 레버는 모두
+> **코드에 baked-in** 되었다 — TF32 텐서코어 trailing(mid blocked / big thin-K), fused trail+extend,
+> 그리고 케이스 크기별 panel width(소형 8 / 대형 16)는 이제 기본 동작이다. 따라서 최적 설정은
+> **`--precision tf32` + Ozaki 보정**으로 단순해졌고, regime별 플래그 번들은 사라졌다.
 
 ---
 
-## 1. 권장 기본 경로
-
-- **정밀도/정확도**: `--precision tf32` (front=FP32, trailing=TF32 텐서코어) **+ Ozaki first-order 보정**.
-  → relres 가 FP32 band(~1e-4..1e-5)이면서 fp32 대비 빠름.
-- **배치**: `--batch 64`(latency) ~ `256`(throughput).
-- **항상 ON(전제/스케줄링)**: no-pivot, CUDA graph, METIS-ND, 3단 라우팅, 멀티스트림, 동형 디스패치.
-
-regime 에 따라 텐서코어 적용 방식만 갈린다.
-
-### A. Large regime (n ≳ 25k: ACTIVSg25k / 70k / SyntheticUSA)
+## 1. 권장 경로
 
 ```bash
-cmake -S custom_linear_solver -B build-large -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release \
-  -DCLS_MID_TF32_TC=ON -DCLS_MID_TF32_DIRECT_SHARED=ON -DCLS_MID_TF32_LOW_TC=ON \
-  -DCLS_MID_LOW_SPLIT=ON -DCLS_BIG_LOW_SPLIT=ON \
-  -DCLS_BIG_TF32_BLOCKED_TC=ON -DCLS_BIG_TF32_SHARED_THREADS_512=ON \
-  -DCLS_RESPECT_PANEL_CAP=ON -DCLS_MID_TF32_MIN_FSZ=48 \
-  -DCLS_TF32_OZAKI_TC2_FIRST_ORDER=ON
-cmake --build build-large -j
+cmake -S custom_linear_solver -B build -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release \
+  -DCLS_TF32_OZAKI_TC2=ON -DCLS_TF32_OZAKI_TC2_FIRST_ORDER=ON
+cmake --build build -j
 
-build-large/custom_linear_solver_run <case> --precision tf32 --batch 64 \
+build/custom_linear_solver_run <case> --precision tf32 --batch 64 \
   --repeat 61 --warmup 8 --single-precision fp64
 ```
 
-### B. Low-fill regime (n ≲ 16k: case8387pegase / case13659pegase)
+- **정밀도/정확도**: `--precision tf32` (front=FP32, trailing=TF32 텐서코어) **+ Ozaki first-order 보정**
+  (`CLS_TF32_OZAKI_TC2[_FIRST_ORDER]`). → relres 가 FP32 band(~1e-4..1e-5)이면서 fp32 대비 빠름.
+  Ozaki 미적용 raw tf32 는 더 빠르지만 relres 가 ~1e-2 로 떨어진다.
+- **배치**: `--batch 64`(latency) ~ `256`(throughput).
+- **panel width**: 자동 — 분석기가 `n≥16k → 16`, 그 외 `--max-panel-width`(기본 8)를 쓴다(결정적 스윕
+  확정값, [`05-reports/05-tf32-reproduction-2026-06-10.md`](05-reports/05-tf32-reproduction-2026-06-10.md) §8).
+  사용자 값을 그대로 강제하려면 `-DCLS_RESPECT_PANEL_CAP=ON`.
+- **항상 baked-in**: no-pivot, CUDA graph, METIS-ND, 3단(small/mid/big) 라우팅, 멀티스트림 서브트리,
+  동형 디스패치, **TF32 TC trailing**, **fused trail+extend**.
 
-A 의 플래그에 **TC 적합 패널 융합(M6)** 추가:
-
-```bash
-  ... (A 의 플래그) \
-  -DCLS_TC_CLOSURE_PANEL_AMALGAMATE=ON -DCLS_TC_CLOSURE_PANEL_AMALGAMATE_CAP=32 \
-  -DCLS_SMALL_FRONT_MAX_16=ON -DCLS_MID_TF32_TC_THREADS_128=ON -DCLS_MID_TF32_LOW_TC_FORCE_ALL=ON
-# 실행은 결정성을 위해 --serial-nd 권장
-build-lowfill/custom_linear_solver_run <case> --precision tf32 --batch 64 \
-  --serial-nd --metis-seed 7 --panel-cap 30 --repeat 61 --warmup 8 --single-precision fp64
-```
-
-> low-fill 정책은 large 에 universal 하지 않다(25K 불안정). 두 정책은 분리 빌드로 유지한다.
+fp64(`--precision fp64`, 참조 정확도 ~1e-13)·fp32(`--precision fp32`)도 동일 빌드에서 선택 가능하다.
 
 ---
 
-## 2. 토글 ↔ 메소드 매핑 (ablation 참조표)
+## 2. 남아있는 토글
 
-| 토글 (CMake -D / CLI) | 기본 | 분류 (storyline) |
+| 토글 (CMake -D / CLI) | 기본 | 역할 |
 |---|---|---|
-| `--precision {fp64,fp32,fp16,tf32}` | fp64 | substrate(정밀도 regime) / B1 TC trailing 활성 전제 |
-| `--batch N` | 1 | **substrate** (배치 — cuDSS 공유) |
-| `SolverConfig.tier_split` | true | **A1 Tier routing** |
-| 동형 디스패치 정책 (band-order, baked) | gate | **A2 Dispatch scheduling** (동형) |
-| `--no-multistream` | (multi=on) | **A2 Dispatch scheduling** (멀티스트림) |
-| `CLS_MID_TF32_TC` | OFF | **B1 TC trailing** (mid) |
-| `CLS_BIG_TF32_BLOCKED_TC` | OFF | **B1 TC trailing** (big) |
-| `CLS_MID_LOW_SPLIT` / `CLS_BIG_LOW_SPLIT` | OFF | substrate(kernel optimization — dispatch bucketing) |
-| `CLS_BIG_TF32_SHARED_THREADS_512` / `CLS_MID_TF32_TC_THREADS_128` | OFF | substrate(kernel optimization — launch shape) |
-| `CLS_MID_TF32_MIN_FSZ` | 48 | B1 TC 적격 gate |
-| `CLS_RESPECT_PANEL_CAP` | OFF | panel_cap 가시화 (B1 과 함께) |
-| `CLS_TC_CLOSURE_PANEL_AMALGAMATE(_CAP)` | OFF | **B2 TC-routable front coarsening** |
-| `CLS_SMALL_FRONT_MAX_16` | OFF | **B2** tier 경계 조정 (`kSmallFrontMax 32→16`) |
-| `CLS_TF32_OZAKI_TC2` / `..._FIRST_ORDER` | OFF | **B1 TC trailing** (Ozaki 정확도 회복) |
-| `CLS_TF32_COLUMN_USOLVE` | OFF | (음성) column-U-solve — 효과 ≈0 |
-| `CLS_INTERNAL_GRAPH` | ON | substrate(CUDA graph) |
-| `CLS_USE_PIVOTING` | OFF | substrate(no-pivot 비교용) |
+| `--precision {fp64,fp32,tf32}` | fp64 | 정밀도 regime (tf32 = TC trailing) |
+| `--batch N` | 1 | 배치 (B 시스템 동시 factor/solve) |
+| `--max-panel-width N` | 8 | supernode 패널 최대 열 수 (분석기가 대형은 16으로 자동 상향) |
+| `--serial-nd` / `--metis-seed S` | (parallel) | ND 순서 결정성 (재현/벤치용) |
+| `--no-multistream` | (multi=on) | 멀티스트림 서브트리 디스패치 비활성 |
+| `SolverConfig.tier_split` | true | occupancy 기반 per-front tier split |
+| `CLS_TF32_OZAKI_TC2` / `..._FIRST_ORDER` | OFF | TF32 Ozaki 정확도 회복(권장 ON). first-order = tail-tail 항 생략 |
+| `CLS_RESPECT_PANEL_CAP` | OFF | 분석기 자동 상향 대신 `--max-panel-width` 를 그대로 사용 |
+| `CLS_PAR_ND_DEPTH` / `_SMALL_BASE_THR` / `_LARGE_BASE_THR` | 4 / 4000 / 20000 | 병렬 ND 튜닝 |
+| `CLS_INTERNAL_GRAPH` | ON | factor/solve 를 내부 CUDA graph 로 캡처(standalone). OFF = 외부 캡처용 |
+
+> baked-in 되어 더 이상 토글이 아닌 것: TF32 TC trailing(mid/big), fused trail+extend, 케이스 크기별
+> panel width. 음성으로 판명되어 제거된 실험(TC closure amalgamation 등)은
+> [`03-optimization-notes/03-tensor-core-investigation.md`](03-optimization-notes/03-tensor-core-investigation.md) 기록 참조.
 
 ---
 
-## 3. 검증된 수치 (sm_86, RTX 3090, 본 세션 재현)
+## 3. 검증된 수치 (sm_86, RTX 3090)
 
-| regime | case | B | fp32 ms/sys | tf32+Ozaki ms/sys | speedup | tf32+Ozaki relres |
-|---|---|---:|---:|---:|---:|---:|
-| low-fill | case8387pegase | 64 | 0.03318 | 0.02787 | **1.19×** | 4.77e-5 (FP32 band) |
-| large | case_ACTIVSg25k | 64 | 0.11351 | 0.09484 | **1.20×** | 2.97e-4 |
+panel width 가 케이스당 확정(소형 8 / 대형 16)되고 TC 가 기본이므로, **기본 빌드가 곧 공정 비교(best-vs-best)
+설정**이다 — 예전처럼 cap 을 한쪽으로 부풀려 얻는 headline 수치는 더 이상 없다.
 
-(Ozaki 미적용 raw tf32 는 8387 B64 **1.24×** 지만 relres 3.97e-2; Ozaki 가 정확도를 FP32 band 로
-회수하며 속도는 ~5%만 양보.)
+| case | n | tf32+Ozaki vs fp32 (B≥16, 공정 cap) | tf32 relres |
+|---|---:|---|---|
+| case8387pegase | 14,908 | ≈ 동률 (low-fill, TC 구조적 무이득) | FP32 band |
+| case_ACTIVSg25k | 47,246 | +5~7% | ~2e-4 |
+| 70k / SyntheticUSA | ≥156k | +10~16% (B=1 피크) | conditioning floor |
+
+> **정직한 천장**: TC 자체 기여는 best-vs-best 중앙값 **~1.1×** 이며, ≤10K low-fill 에서는 per-front TC 가
+> 구조적으로 이득이 없다(K=nc 가 1~2). 자세한 분석·원자료는
+> [`05-reports/05-tf32-reproduction-2026-06-10.md`](05-reports/05-tf32-reproduction-2026-06-10.md) 와
+> [`03-optimization-notes/03-tensor-core-investigation.md`](03-optimization-notes/03-tensor-core-investigation.md).
