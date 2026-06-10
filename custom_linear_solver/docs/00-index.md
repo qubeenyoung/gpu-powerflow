@@ -1,7 +1,10 @@
 # `custom_linear_solver` 문서 색인
 
-> **먼저 읽기**: [`storyline.md`](storyline.md) — base multifrontal 위에 쌓은 최적화
-> 아이디어를 한 줄로 잇는 연구 서사 + 각 기여의 ablation 토글 매핑(최적 경로를 기본값으로).
+> **먼저 읽기**:
+> - [`storyline.md`](storyline.md) — base multifrontal 위에 쌓은 최적화 **메소드**(3개 축, 6개)를
+>   체계적으로 서술 + 각 메소드의 ablation 토글 매핑.
+> - [`optimal-configuration.md`](optimal-configuration.md) — 현재 최적 경로의 빌드/런타임 설정과
+>   토글↔메소드 매핑표.
 
 루트에는 이 색인만 두고, 세부 문서는 주제별 폴더에 읽는 순서대로 번호를 붙였다.
 2026-06-04 초기 정리는 `01`-`04`에 API/설계/최적화/측정을 나눴고, 2026-06-04 오후부터 2026-06-05까지 추가된 실험 로그와 최종 보고서는 기존 흐름에 흡수하거나 `05-reports/`로 분리했다.
