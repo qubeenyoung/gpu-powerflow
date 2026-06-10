@@ -128,3 +128,20 @@ fused 방향은 USA B=1 −11% 로 유망하나 큰 uc front 에서 correctness 
   hi·lo/lo·hi 항을 편향 제거한다.
 - 직교 발견: trailing 의 진짜 메모리 병목은 **uncoalesced C-drain store(2.5×)** (doc 30), thin-K
   mma 가 아님 — `docs/28` ceiling 의 메모리측 보강.
+
+---
+
+## 정정 (2026-06-10, integration)
+
+이 노트의 TF32x3(`CLS_TF32X3`)는 **Codex 의 Ozaki TC2(`docs/51`, `docs/52`)로 대체되어 master 통합 시
+제거되었다.** 재현 검증으로 두 가지가 밝혀졌다:
+
+1. **"보정항을 TC 바깥에서 누적해야 한다(RZ bias)"는 위 학습은 이 워크로드에선 결정적 병목이 아니었다.**
+   Ozaki TC2 는 `mma` 를 **TC 안에서 체인 누적**(`.f32` 누산기)하고도 8387 tf32 relres 를 **3.97e-2 →
+   4.77e-5** 로 FP32 band 까지 회복한다(본 세션 재현 확인). `.f32` 누산기가 충분히 정확.
+2. **TF32x3 가 8387 에서 무효였던 진짜 이유는 커버리지** — 본 구현은 `trailing_update_mma_tf32_ptx`
+   의 big(UCP>64) fall-through 경로에만 적용돼, small/mid 지배인 8387 에선 보정이 실행되지 않았다.
+   Ozaki 는 A-reuse(mid/small)·blocked·small-warp 전 tier 에 적용해 8387 을 교정한다.
+
+따라서 정확도 회복 레버 A 의 정식 구현은 **Ozaki TC2 / first-order**(`CLS_TF32_OZAKI_TC2[_FIRST_ORDER]`)
+이며, 본 노트는 그 선행 연구 기록으로 보존한다. 레버 B(IR/GMRES 외부 정제)는 유효하게 유지된다.

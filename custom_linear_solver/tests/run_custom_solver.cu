@@ -53,6 +53,7 @@ struct Options {
     bool single_fp32 = false;
     int panel_cap = 8;  // analyze: max panel width inside a supernode; -1 keeps default
     bool use_parallel_nested_dissection = true;  // false: deterministic serial METIS NodeND
+    int metis_seed = 42;  // METIS ordering seed for deterministic A/B sweeps
     bool no_multistream = false;     // disable subtree multi-stream dispatch
     bool no_tier_split = false;      // disable occupancy-gated per-front tier split
     bool analyze_info = false;       // print analyze-phase front/subtree summary
@@ -147,10 +148,11 @@ void usage(const char* argv0)
         << "                          tf32       (FP32 + TF32 PTX trailing — V9h+LB, recommended)\n"
         << "  --panel-cap N         analyze: max panel width inside a supernode (1..64)\n"
         << "  --serial-nd          use deterministic serial METIS NodeND for benchmark A/Bs\n"
+        << "  --metis-seed N       METIS ordering seed for serial/parallel ND A/Bs\n"
         << "  --no-multistream      disable subtree multi-stream dispatch (single stream)\n"
         << "  --no-tier-split       disable occupancy-gated per-front tier split (whole-level)\n"
         << "  --analyze-info        print front-size and subtree summary after analyze\n"
-        << "  --dump-fronts <path>  write (q,p,fsz,nc,uc,level) CSV after analyze\n"
+        << "  --dump-fronts <path>  write per-front CSV after analyze\n"
         << "  --solution-out <path> write the recovered x as MatrixMarket\n";
 }
 
@@ -195,6 +197,9 @@ Options parse_args(int argc, char** argv)
             options.panel_cap = std::stoi(argv[i]);
         } else if (arg == "--serial-nd") {
             options.use_parallel_nested_dissection = false;
+        } else if (arg == "--metis-seed") {
+            if (++i >= argc) throw std::runtime_error("--metis-seed requires an int");
+            options.metis_seed = std::stoi(argv[i]);
         } else if (arg == "--no-multistream") {
             options.no_multistream = true;
         } else if (arg == "--no-tier-split") {
@@ -335,6 +340,7 @@ int main(int argc, char** argv)
         cls::SolverConfig solver_config;
         solver_config.precision = options.precision;
         solver_config.use_parallel_nested_dissection = options.use_parallel_nested_dissection;
+        solver_config.metis_seed = options.metis_seed;
         if (options.panel_cap > 0) solver_config.panel_cap = options.panel_cap;
         solver_config.use_multistream_subtrees = !options.no_multistream;
         solver_config.tier_split = !options.no_tier_split;
@@ -524,6 +530,7 @@ int main(int argc, char** argv)
                   << "rhs=" << options.rhs_path << '\n'
                   << "n=" << matrix.rows << " nnz=" << matrix.nnz() << '\n'
                   << "parallel_nd=" << (options.use_parallel_nested_dissection ? 1 : 0) << '\n'
+                  << "metis_seed=" << options.metis_seed << '\n'
                   << "repeat=" << options.repeat << " warmup=" << options.warmup << '\n'
                   << "read_ms=" << ms(t0, t_read) << '\n'
                   << "upload_ms=" << ms(t_read, t_upload) << '\n'

@@ -4,6 +4,9 @@
 #include <climits>
 
 #include <cuda_runtime.h>
+#ifdef CLS_CUBLAS_TF32_TRAILING
+#include <cublas_v2.h>
+#endif
 
 // Uniform-batch multifrontal factorize + solve. All kernels are front-major (gridDim.y = batch,
 // arena = B * front_total) and live in internal headers below; the build uses
@@ -37,6 +40,15 @@ State::~State()
     if (d_y_batch) cudaFree(d_y_batch);
     if (d_y_batch_f) cudaFree(d_y_batch_f);
     if (d_sing) cudaFree(d_sing);
+#ifdef CLS_CUBLAS_TF32_TRAILING
+    if (d_cublas_Aptrs) cudaFree(d_cublas_Aptrs);
+    if (d_cublas_Bptrs) cudaFree(d_cublas_Bptrs);
+    if (d_cublas_Cptrs) cudaFree(d_cublas_Cptrs);
+    if (d_cublas_Aptrs_tier) cudaFree(d_cublas_Aptrs_tier);
+    if (d_cublas_Bptrs_tier) cudaFree(d_cublas_Bptrs_tier);
+    if (d_cublas_Cptrs_tier) cudaFree(d_cublas_Cptrs_tier);
+    if (cublas_handle) cublasDestroy(static_cast<cublasHandle_t>(cublas_handle));
+#endif
     if (fork_event) cudaEventDestroy(static_cast<cudaEvent_t>(fork_event));
     for (int k = 0; k < num_subtree_streams; ++k) {
         if (join_events[k]) cudaEventDestroy(static_cast<cudaEvent_t>(join_events[k]));
@@ -81,6 +93,83 @@ static bool allocate_state(const MultifrontalPlan& plan, int B, Precision precis
     return true;
 }
 
+#ifdef CLS_CUBLAS_TF32_TRAILING
+static void fill_cublas_group_arrays_for_order(const MultifrontalPlan& plan,
+                                               const std::vector<int>& order,
+                                               std::vector<int>& m,
+                                               std::vector<int>& n,
+                                               std::vector<int>& k,
+                                               std::vector<int>& lda)
+{
+    const int P = static_cast<int>(order.size());
+    m.assign(P, 0);
+    n.assign(P, 0);
+    k.assign(P, 0);
+    lda.assign(P, 0);
+    for (int q = 0; q < P; ++q) {
+        const int p = order[q];
+        const int fsz = plan.h_front_ptr[p + 1] - plan.h_front_ptr[p];
+        const int nc = plan.h_ncols[p];
+        const int uc = fsz - nc;
+        // cuBLAS handles only the deferred trailing path. Small-front phaseA keeps its fused
+        // custom trailing, so mark those groups empty.
+        if (fsz > 48) {
+            m[q] = uc;
+            n[q] = uc;
+            k[q] = nc;
+        }
+        lda[q] = fsz;
+    }
+}
+
+static bool setup_cublas_tf32_trailing(const MultifrontalPlan& plan, int B, State& st,
+                                       Precision precision)
+{
+    if (precision != Precision::TF32 || plan.num_panels <= 0 || B <= 0) return true;
+    cublasHandle_t handle = nullptr;
+    if (cublasCreate(&handle) != CUBLAS_STATUS_SUCCESS) return false;
+    cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
+    st.cublas_handle = handle;
+
+    const size_t ptr_count = static_cast<size_t>(plan.num_panels) * static_cast<size_t>(B);
+    if (cudaMalloc(&st.d_cublas_Aptrs, ptr_count * sizeof(float*)) != cudaSuccess) return false;
+    if (cudaMalloc(&st.d_cublas_Bptrs, ptr_count * sizeof(float*)) != cudaSuccess) return false;
+    if (cudaMalloc(&st.d_cublas_Cptrs, ptr_count * sizeof(float*)) != cudaSuccess) return false;
+    if (plan.d_plcols_tier) {
+        if (cudaMalloc(&st.d_cublas_Aptrs_tier, ptr_count * sizeof(float*)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_cublas_Bptrs_tier, ptr_count * sizeof(float*)) != cudaSuccess) return false;
+        if (cudaMalloc(&st.d_cublas_Cptrs_tier, ptr_count * sizeof(float*)) != cudaSuccess) return false;
+    }
+
+    fill_cublas_group_arrays_for_order(plan, plan.h_plcols, st.cublas_m, st.cublas_n,
+                                       st.cublas_k, st.cublas_lda);
+    if (!plan.h_plcols_tier.empty()) {
+        fill_cublas_group_arrays_for_order(plan, plan.h_plcols_tier, st.cublas_m_tier,
+                                           st.cublas_n_tier, st.cublas_k_tier,
+                                           st.cublas_lda_tier);
+    }
+    st.cublas_group_size.assign(plan.num_panels, B);
+    st.cublas_trans.assign(plan.num_panels, static_cast<int>(CUBLAS_OP_N));
+    st.cublas_alpha.assign(plan.num_panels, -1.0f);
+    st.cublas_beta.assign(plan.num_panels, 1.0f);
+
+    constexpr int build_threads = 64;
+    const dim3 build_grid(plan.num_panels, (B + build_threads - 1) / build_threads);
+    build_cublas_trailing_ptrs<<<build_grid, build_threads>>>(
+        0, plan.num_panels, B, plan.front_total, plan.d_plcols, plan.d_front_off,
+        plan.d_front_ptr, plan.d_ncols, st.d_front_batch_f, st.d_cublas_Aptrs,
+        st.d_cublas_Bptrs, st.d_cublas_Cptrs);
+    if (plan.d_plcols_tier && st.d_cublas_Aptrs_tier) {
+        build_cublas_trailing_ptrs<<<build_grid, build_threads>>>(
+            0, plan.num_panels, B, plan.front_total, plan.d_plcols_tier,
+            plan.d_front_off, plan.d_front_ptr, plan.d_ncols, st.d_front_batch_f,
+            st.d_cublas_Aptrs_tier, st.d_cublas_Bptrs_tier, st.d_cublas_Cptrs_tier);
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess) return false;
+    return true;
+}
+#endif
+
 // Opt the shared-resident kernels into the sm_86 dynamic-shared cap (they exceed the 48 KB
 // default). The PTX tensor-core variants only run on the float-front path.
 static void register_kernel_attributes(Precision precision)
@@ -99,15 +188,31 @@ static void register_kernel_attributes(Precision precision)
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_mid<float>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
+    cudaFuncSetAttribute(factor_mid_fp16_ptx,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_mid<double>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
+#ifdef CLS_CUBLAS_TF32_TRAILING
+    cudaFuncSetAttribute(factor_mid_cublas_phaseA,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
+#endif
+#ifdef CLS_MID_TF32_TC
+    cudaFuncSetAttribute(factor_mid_tf32_ptx,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
+#endif
+#ifdef CLS_BIG_TF32_BLOCKED_TC
+    cudaFuncSetAttribute(factor_big_shared_tf32_blocked,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
+#endif
+#ifdef CLS_FP16_BLOCKED_SHARED_TC
+    cudaFuncSetAttribute(factor_big_shared_fp16_blocked,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
+#endif
     cudaFuncSetAttribute(factor_big_staged<float>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_big_staged<double>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     if (is_fp32_front(precision)) {
-        // Tensor-core kernels are big-tier only (the mid TC variants were removed — mid is
-        // latency-bound, so TC measured slower there).
         cudaFuncSetAttribute(factor_big_fp16_ptx,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
         cudaFuncSetAttribute(factor_big_tf32_ptx,
@@ -167,6 +272,9 @@ bool setup(const MultifrontalPlan& plan, int B, Precision precision, State& st,
 {
     if (plan.num_panels == 0 || B <= 0) return false;
     if (!allocate_state(plan, B, precision, st, tier_split)) return false;
+#ifdef CLS_CUBLAS_TF32_TRAILING
+    if (!setup_cublas_tf32_trailing(plan, B, st, precision)) return false;
+#endif
     register_kernel_attributes(precision);
 
 #ifdef CLS_INTERNAL_GRAPH

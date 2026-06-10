@@ -115,6 +115,7 @@ Status Solver::analyze()
     if (!impl_ || !impl_->has_matrix) return Status::kInvalidState;
     plan::PlanBuildOptions opts;
     opts.use_parallel_nested_dissection = impl_->config.use_parallel_nested_dissection;
+    opts.metis_seed = impl_->config.metis_seed;
     opts.panel_cap = impl_->config.panel_cap;
     opts.float_front = is_fp32_front(impl_->config.precision);
     opts.dump_fronts_csv_path = impl_->config.analyze_dump_fronts_path;

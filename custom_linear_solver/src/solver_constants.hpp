@@ -16,12 +16,20 @@ inline constexpr int kWarpSize = 32;
 
 // Front-size tier edges (inclusive upper bounds). A front of `front_size` columns is small when
 // front_size <= kSmallFrontMax, mid when <= kMidFrontMax, big otherwise.
+#ifdef CLS_SMALL_FRONT_MAX_16
+inline constexpr int kSmallFrontMax = 16;
+#else
 inline constexpr int kSmallFrontMax = 32;
+#endif
 inline constexpr int kMidFrontMax = 128;
 
 // Number of tiers (small / mid / big) and how many leading tiers use the warp-packed small kernel.
 inline constexpr int kNumFrontTiers = 3;
+#ifdef CLS_SMALL_BUCKET_SPLIT_16
+inline constexpr int kSmallTierCount = 2;
+#else
 inline constexpr int kSmallTierCount = 1;
+#endif
 
 // Small-tier kernel packs this many warps per block.
 inline constexpr int kSmallTierWarpsPerBlock = 8;
@@ -60,30 +68,76 @@ constexpr int front_tier_index(FrontTier tier) { return static_cast<int>(tier); 
 
 // Mid sub-tier boundary: the mid tier (kSmallFrontMax < fsz <= kMidFrontMax) is split here for
 // dispatch bucketing only — fronts at or below it form the "mid-low" bucket.
+inline constexpr int kSmallSplitFrontMax = 16;
+inline constexpr int kMidLowSplitFrontMax = 48;
 inline constexpr int kMidSplitFrontMax = 64;
+inline constexpr int kMidHighSplitFrontMax = 80;
+inline constexpr int kBigLowSplitFrontMax = 159;
 
 // Front-size buckets for the analyze-time tier ordering and the occupancy-gated dispatch split.
 // Finer than classify_front_tier: the mid tier is split at kMidSplitFrontMax so a heterogeneous mid
 // level dispatches its small-mid majority with a tighter shared front-staging budget (Fs scales as
 // fsz_cap², so a tighter cap raises occupancy and frees the shared headroom that front-per-block
 // packing needs). Kernel SELECTION still uses classify_front_tier (small / mid / big) — both mid
-// buckets run the mid kernel, just with their own fsz_cap. CLS_NO_MID_SPLIT reverts to 3 buckets.
+// buckets run the mid kernel, just with their own fsz_cap. CLS_NO_MID_SPLIT reverts to one
+// mid bucket; CLS_SMALL_BUCKET_SPLIT_16 optionally splits only the small dispatch buckets.
 #ifdef CLS_NO_MID_SPLIT
-inline constexpr int kNumFrontBuckets = kNumFrontTiers;  // 3: small / mid / big
-constexpr int front_bucket(int front_size)
-{
-    return front_tier_index(classify_front_tier(front_size));
-}
+inline constexpr int kMidBucketCount = 1;
+#elif defined(CLS_MID_LOW_SPLIT) && defined(CLS_MID_HIGH_SPLIT)
+inline constexpr int kMidBucketCount = 4;
+#elif defined(CLS_MID_LOW_SPLIT) || defined(CLS_MID_HIGH_SPLIT)
+inline constexpr int kMidBucketCount = 3;
 #else
-inline constexpr int kNumFrontBuckets = 4;  // small / mid-low / mid-high / big
+inline constexpr int kMidBucketCount = 2;
+#endif
+
+#ifdef CLS_BIG_LOW_SPLIT
+inline constexpr int kBigBucketCount = 2;
+#else
+inline constexpr int kBigBucketCount = 1;
+#endif
+
+inline constexpr int kNumFrontBuckets = kSmallTierCount + kMidBucketCount + kBigBucketCount;
+
 constexpr int front_bucket(int front_size)
 {
-    if (front_size <= kSmallFrontMax) return 0;     // small
-    if (front_size <= kMidSplitFrontMax) return 1;  // mid-low
-    if (front_size <= kMidFrontMax) return 2;       // mid-high
-    return 3;                                       // big
-}
+    if (front_size <= kSmallFrontMax) {
+#ifdef CLS_SMALL_BUCKET_SPLIT_16
+        return (front_size <= kSmallSplitFrontMax) ? 0 : 1;
+#else
+        return 0;
 #endif
+    }
+
+    const int mid0 = kSmallTierCount;
+#ifdef CLS_NO_MID_SPLIT
+    if (front_size <= kMidFrontMax) return mid0;
+#elif defined(CLS_MID_LOW_SPLIT) && defined(CLS_MID_HIGH_SPLIT)
+    if (front_size <= kMidLowSplitFrontMax) return mid0;
+    if (front_size <= kMidSplitFrontMax) return mid0 + 1;
+    if (front_size <= kMidHighSplitFrontMax) return mid0 + 2;
+    if (front_size <= kMidFrontMax) return mid0 + 3;
+#elif defined(CLS_MID_LOW_SPLIT)
+    if (front_size <= kMidLowSplitFrontMax) return mid0;
+    if (front_size <= kMidSplitFrontMax) return mid0 + 1;
+    if (front_size <= kMidFrontMax) return mid0 + 2;
+#elif defined(CLS_MID_HIGH_SPLIT)
+    if (front_size <= kMidSplitFrontMax) return mid0;
+    if (front_size <= kMidHighSplitFrontMax) return mid0 + 1;
+    if (front_size <= kMidFrontMax) return mid0 + 2;
+#else
+    if (front_size <= kMidSplitFrontMax) return mid0;
+    if (front_size <= kMidFrontMax) return mid0 + 1;
+#endif
+
+    const int big0 = kSmallTierCount + kMidBucketCount;
+#ifdef CLS_BIG_LOW_SPLIT
+    if (front_size <= kBigLowSplitFrontMax) return big0;
+    return big0 + 1;
+#else
+    return big0;
+#endif
+}
 
 // Round `value` up to the next multiple of `alignment` (alignment > 0).
 constexpr int round_up_to_multiple(int value, int alignment)

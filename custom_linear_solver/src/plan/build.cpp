@@ -65,8 +65,8 @@ void permute_symmetric_pattern(int n, const std::vector<int>& col_ptr,
     });
 }
 
-// Dump per-front (q, p, fsz, nc, uc, level) to a CSV when SolverConfig.analyze_dump_fronts_path
-// is non-empty. Used by the offline front-distribution analysis scripts.
+// Dump per-front structure to a CSV when SolverConfig.analyze_dump_fronts_path is non-empty.
+// Used by offline front-distribution and parent-update analysis scripts.
 void maybe_dump_fronts(const MultifrontalPlan& plan, const std::string& path)
 {
     if (path.empty()) return;
@@ -75,13 +75,18 @@ void maybe_dump_fronts(const MultifrontalPlan& plan, const std::string& path)
         std::fprintf(stderr, "[analyze] dump-fronts: failed to open %s\n", path.c_str());
         return;
     }
-    std::fprintf(f, "q,p,fsz,nc,uc,level\n");
+    std::fprintf(f, "q,p,fsz,nc,uc,level,parent,asm_len,extend_elems\n");
     for (int L = 0; L < plan.num_plevels; ++L) {
         for (int q = plan.panel_level_ptr[L]; q < plan.panel_level_ptr[L + 1]; ++q) {
             const int p = plan.h_plcols[q];
             const int fsz = plan.h_front_ptr[p + 1] - plan.h_front_ptr[p];
             const int nc = plan.h_ncols[p];
-            std::fprintf(f, "%d,%d,%d,%d,%d,%d\n", q, p, fsz, nc, fsz - nc, L);
+            const int uc = fsz - nc;
+            const int parent = plan.h_panel_parent.empty() ? -1 : plan.h_panel_parent[p];
+            const int asm_len = plan.h_asm_ptr.empty() ? 0 : plan.h_asm_ptr[p + 1] - plan.h_asm_ptr[p];
+            const long extend_elems = (parent >= 0) ? (long)uc * uc : 0;
+            std::fprintf(f, "%d,%d,%d,%d,%d,%d,%d,%d,%ld\n",
+                         q, p, fsz, nc, uc, L, parent, asm_len, extend_elems);
         }
     }
     std::fclose(f);
@@ -117,7 +122,8 @@ bool build_plan_from_csr(const CsrMatrixView& matrix,
             std::vector<int> nd_xadj = metis_sym_col_ptr;     // consumed (moved-from) by ND call
             std::vector<int> nd_adjncy = metis_sym_row_idx;
             if (!reordering::metis_nd_from_graph(n, nd_xadj, nd_adjncy, out.perm,
-                                                 options.use_parallel_nested_dissection))
+                                                 options.use_parallel_nested_dissection,
+                                                 options.metis_seed))
                 return false;
         }
         out.iperm.assign(static_cast<std::size_t>(n), 0);

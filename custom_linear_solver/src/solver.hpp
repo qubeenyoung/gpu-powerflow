@@ -26,6 +26,7 @@ struct SolverConfig {
     // ---- Symbolic analysis ----
     bool use_matching = false;                       // (reserved) row matching pre-permutation
     bool use_parallel_nested_dissection = true;      // multi-threaded METIS-ND ordering
+    int  metis_seed = 42;                            // METIS ordering seed (diagnostic / A-B)
     int  panel_cap = 8;                              // supernode panel width cap (1..64). The
                                                      // analyzer auto-bumps to 12 for n>=16k and
                                                      // 20 for n>=80k; this is the floor.

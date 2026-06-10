@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "plan/multifrontal_plan.hpp"
 
 // Uniform-batch multifrontal factorize + solve. B linear systems share a single sparsity
@@ -20,9 +22,8 @@ namespace custom_linear_solver {
 //   FP64       – everything double. Reference accuracy (~1e-13), slowest factor.
 //   FP32       – the whole front is float. ~1e-4 accurate, ~2x faster than FP64 on RTX 3090.
 //   FP16       – FP32 front + FP16 PTX mma.m16n8k8 trailing GEMM with FP32 accumulate
-//                (per-lane register drain, no Csc readback; big fronts use
-//                __launch_bounds__(512, 2)). Accuracy tracks FP32 except for the FP16 rounding
-//                of trailing contributions.
+//                (per-lane register drain, no Csc readback). Big fronts use TC broadly; mid
+//                fronts use a guarded TC path when their shape and case size amortize staging.
 //   TF32       – FP32 front + TF32 PTX mma.m16n8k8 trailing GEMM + per-level k4/k8 hybrid for
 //                mid fronts + __launch_bounds__(512, 2) for big fronts. Recommended path on
 //                power-grid Jacobians.
@@ -59,6 +60,27 @@ struct State {
     bool  owns_stream = false;     // true only when this State created `stream`
     void* factor_graph_exec = nullptr;
     void* solve_graph_exec  = nullptr;
+    // Optional cuBLAS TF32 grouped-batched trailing path. Pointer arrays are device arrays
+    // indexed by the active panel order position q, then batch b: slot = q * B + b.
+    void* cublas_handle = nullptr;
+    float** d_cublas_Aptrs = nullptr;
+    float** d_cublas_Bptrs = nullptr;
+    float** d_cublas_Cptrs = nullptr;
+    float** d_cublas_Aptrs_tier = nullptr;
+    float** d_cublas_Bptrs_tier = nullptr;
+    float** d_cublas_Cptrs_tier = nullptr;
+    std::vector<int> cublas_m;
+    std::vector<int> cublas_n;
+    std::vector<int> cublas_k;
+    std::vector<int> cublas_lda;
+    std::vector<int> cublas_m_tier;
+    std::vector<int> cublas_n_tier;
+    std::vector<int> cublas_k_tier;
+    std::vector<int> cublas_lda_tier;
+    std::vector<int> cublas_group_size;
+    std::vector<int> cublas_trans;
+    std::vector<float> cublas_alpha;
+    std::vector<float> cublas_beta;
     // Multi-stream subtree dispatch: each independent subtree gets its own stream, joined before
     // the spine levels which run on the main stream.
     int num_subtree_streams = 0;

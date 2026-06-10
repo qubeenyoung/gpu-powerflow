@@ -21,14 +21,15 @@
 //   tier   | block  | front | kernel                  | Phase-3 trailing
 //   -------+--------+-------+-------------------------+-------------------------------------
 //   small  | 8 warp | smem  | factor_small<T, sub_group_size>     | lu_small_warp (fused Phase 1+3)
-//   mid    | 64..256| smem  | factor_mid<T>           | trailing_update_staged<T>  (all precisions)
+//   mid    | 64..256| smem  | factor_mid<T>           | trailing_update_staged<T>
+//          | 64..256| smem  | factor_mid_fp16_ptx     | trailing_update_mma_fp16_ptx
 //   big    | 1024   | gmem  | factor_big<T>/_staged   | trailing_update_scalar / _staged<T>
 //          | 512    | gmem  | factor_big_fp16_ptx     | trailing_update_mma_fp16_ptx
 //          | 512    | gmem  | factor_big_tf32_ptx     | trailing_update_mma_tf32_ptx
 //
-// The mid tier runs the staged-scalar kernel for every precision: mid is latency-bound, so the
-// tensor-core mid variants measured slower and were removed. Tensor cores are kept for the big
-// tier only (large enough trailing GEMM to pay off).
+// The mid tier defaults to staged-scalar except for eligible FP16 fronts. The FP16 mid Tensor-Core
+// kernel keeps scalar fallback for small/skinny fronts, so the TC overhead is paid only where the
+// trailing block has enough work to amortise staging.
 //
 // Why a separate kernel symbol per variant:
 //   * The <T> templates parameterise over the front element type (double / float).
@@ -124,7 +125,7 @@ __global__ void factor_small(int lbegin, int level_size, int B, int front_area,
 
     // 4. CB extend-add into parent front (skip for roots / when disabled).
     const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
     FrontType* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
     const int abase = asm_ptr[p];
@@ -134,6 +135,70 @@ __global__ void factor_small(int lbegin, int level_size, int B, int front_area,
                   Fs[(long)(nc + a) * fsz + (nc + b)]);
     }
 }
+
+#ifdef CLS_SMALL_TF32_TC
+__global__ void factor_small_tf32_tc(int lbegin, int level_size, int B, int front_area,
+                                     const int* __restrict__ plcols,
+                                     const int* __restrict__ front_off,
+                                     const int* __restrict__ front_ptr,
+                                     const int* __restrict__ ncols,
+                                     const int* __restrict__ panel_parent,
+                                     const int* __restrict__ asm_ptr,
+                                     const int* __restrict__ asm_local,
+                                     float* frontB, long front_total, int* sing, int do_extend)
+{
+    extern __shared__ unsigned char smem_small_tf32_raw[];
+    float* smem = reinterpret_cast<float*>(smem_small_tf32_raw);
+
+    const int warp_in_blk = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int warps_per_blk = blockDim.x >> 5;
+    const int slot = blockIdx.x * warps_per_blk + warp_in_blk;
+    if (slot >= level_size * B) return;
+
+    const int fl = slot % level_size;
+    const int bb = slot / level_size;
+    float* front = frontB + (long)bb * front_total;
+    const int p = plcols[lbegin + fl];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    const int uc = fsz - nc;
+    const int fsz2 = fsz * fsz;
+    float* F = front + front_off[p];
+    float* Fs = smem + (long)warp_in_blk * front_area;
+    constexpr unsigned mask = 0xffffffffu;
+
+    for (int e = lane; e < fsz2; e += kWarpSize) Fs[e] = F[e];
+    __syncwarp(mask);
+
+    const bool use_tc = (fsz > 16 && uc >= 16 && nc >= 4 && nc <= 32);
+    if (use_tc) {
+        lu_panel_factor_warp(Fs, fsz, nc, lane, mask, sing);
+#ifdef CLS_TF32_COLUMN_USOLVE
+        u_panel_solve_warp_column_owned(Fs, fsz, nc, uc, lane, mask);
+#else
+        u_panel_solve_warp(Fs, fsz, nc, uc, lane, mask);
+#endif
+        trailing_update_mma_tf32_warp_shared(Fs, fsz, nc, uc, lane);
+    } else {
+        lu_small_warp<float, 32>(Fs, fsz, nc, lane, mask, sing);
+    }
+    __syncwarp(mask);
+
+    writeback_factored<float, float>(F, Fs, fsz, nc, uc, lane, kWarpSize);
+
+    const int par = panel_parent[p];
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
+    float* Fp = front + front_off[par];
+    const int pfsz = front_ptr[par + 1] - front_ptr[par];
+    const int abase = asm_ptr[p];
+    for (int e = lane; e < uc * uc; e += kWarpSize) {
+        const int a = e / uc, b = e % uc;
+        atomicAdd(&Fp[(long)asm_local[abase + a] * pfsz + asm_local[abase + b]],
+                  Fs[(long)(nc + a) * fsz + (nc + b)]);
+    }
+}
+#endif
 
 // =======================================================================================
 //  MID tier  —  one block per (front, batch); whole front staged into shared
@@ -194,13 +259,315 @@ __global__ void factor_mid(int lbegin, int lend, const int* __restrict__ plcols,
     writeback_factored<T, T>(F, Fs, fsz, nc, uc, t, nt);
 
     const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
     __syncthreads();
     T* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
     const int abase = asm_ptr[p];
     extend_add<T, T>(Fp, pfsz, Fs, fsz, nc, uc, asm_local, abase, t, nt);
 }
+
+// FP16 PTX mid trailing on a shared-resident front. The front stays as FP32 in shared memory;
+// only the L/U panels are converted to __half before mma.sync. Non-root TC fronts drain the
+// accumulator directly into the parent front, because the mid-tier C block is only consumed by
+// extend-add and is not written back. Fronts that are too small or too skinny for Tensor Cores
+// keep the scalar staged path inside the same kernel.
+__global__ void factor_mid_fp16_ptx(int lbegin, int lend, const int* __restrict__ plcols,
+                                    const int* __restrict__ front_off,
+                                    const int* __restrict__ front_ptr,
+                                    const int* __restrict__ ncols,
+                                    const int* __restrict__ panel_parent,
+                                    const int* __restrict__ asm_ptr,
+                                    const int* __restrict__ asm_local, float* frontB,
+                                    long front_total, int* sing, int do_extend, int fsz_cap,
+                                    int level_max_nc, int level_max_uc, int ucp_max,
+                                    int kp_max)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+
+    float* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    float* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    const int fsz2 = fsz * fsz;
+    const int par = panel_parent[p];
+#ifdef CLS_FP16_BLOCKED_SHARED_TC
+    const bool use_tc = (fsz > 48 && uc >= 32 && nc >= 8 && nc <= 32 && uc <= 256);
+#else
+    const bool use_tc = (fsz > 48 && uc >= 32 && nc >= 10 && nc <= 32 && uc <= 256);
+#endif
+    const bool use_fused_trailing =
+        (use_tc && par >= 0 && do_extend && extend_add_allowed_for_uc(uc));
+    float* Fp = use_fused_trailing ? (front + front_off[par]) : nullptr;
+    const int pfsz = use_fused_trailing ? (front_ptr[par + 1] - front_ptr[par]) : 0;
+    const int abase = use_fused_trailing ? asm_ptr[p] : 0;
+
+    extern __shared__ char smem_mid_fp16_ptx[];
+    float* Fs   = reinterpret_cast<float*>(smem_mid_fp16_ptx);
+#ifndef CLS_FP16_BLOCKED_SHARED_TC
+    __half* Lh  = reinterpret_cast<__half*>(Fs + (long)fsz_cap * fsz_cap);
+    __half* Uh  = Lh + (long)ucp_max * kp_max;
+#else
+    (void)level_max_nc;
+    (void)level_max_uc;
+    (void)ucp_max;
+    (void)kp_max;
+    (void)Fp;
+    (void)pfsz;
+    (void)abase;
+#endif
+
+    stage_in_async<float>(Fs, F, fsz2, t, nt);
+    __syncthreads();
+
+#ifdef CLS_FP16_BLOCKED_SHARED_TC
+    if (use_tc) {
+        factorize_front_blocked_fp16(Fs, fsz, nc, t, nt, sing);
+    } else {
+        factorize_front<float>(Fs, fsz, nc, uc, t, nt, sing,
+            [&] { trailing_update_scalar<float>(Fs, fsz, nc, uc, t, nt); });
+    }
+#else
+    factorize_front<float>(Fs, fsz, nc, uc, t, nt, sing, [&] {
+        if (use_fused_trailing) {
+            trailing_update_mma_fp16_ptx<true>(Fs, fsz, nc, uc, Lh, Uh, t, nt, Fp, pfsz,
+                                               asm_local, abase);
+        } else if (use_tc) {
+            trailing_update_mma_fp16_ptx<false>(Fs, fsz, nc, uc, Lh, Uh, t, nt);
+        } else {
+            trailing_update_scalar<float>(Fs, fsz, nc, uc, t, nt);
+        }
+    });
+#endif
+
+    writeback_factored<float, float>(F, Fs, fsz, nc, uc, t, nt);
+
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
+    __syncthreads();
+    float* parent_front = front + front_off[par];
+    const int parent_fsz = front_ptr[par + 1] - front_ptr[par];
+    const int asm_base = asm_ptr[p];
+    extend_add<float, float>(parent_front, parent_fsz, Fs, fsz, nc, uc, asm_local, asm_base,
+                             t, nt);
+}
+
+#ifdef CLS_MID_TF32_TC
+// TF32 PTX mid trailing on a shared-resident FP32 front. This mirrors the FP16 mid TC path
+// but keeps L/U staging in float and lets mma.sync's .tf32 ABI truncate multiplicands.
+__global__ void factor_mid_tf32_ptx(int lbegin, int lend, const int* __restrict__ plcols,
+                                    const int* __restrict__ front_off,
+                                    const int* __restrict__ front_ptr,
+                                    const int* __restrict__ ncols,
+                                    const int* __restrict__ panel_parent,
+                                    const int* __restrict__ asm_ptr,
+                                    const int* __restrict__ asm_local, float* frontB,
+                                    long front_total, int* sing, int do_extend, int fsz_cap,
+                                    int ucp_max, int kp_max, int direct_shared_mode)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+
+    float* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    float* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    const int fsz2 = fsz * fsz;
+    const int par = panel_parent[p];
+    const bool use_tc =
+#if defined(CLS_MID_TF32_LOW_TC) && defined(CLS_MID_TF32_FORCE_BLOCKED)
+        ((fsz > 48 && uc >= 32) ||
+         (fsz > 16 && uc >= 16)) &&
+        nc >= 4 && nc <= 32 && uc <= 256;
+#elif defined(CLS_MID_TF32_LOW_TC)
+        ((fsz > 48 && uc >= 32) ||
+         (direct_shared_mode && fsz > 16 && uc >= 16)) &&
+        nc >= 4 && nc <= 32 && uc <= 256;
+#else
+        (fsz > 48 && uc >= 32 && nc >= 8 && nc <= 32 && uc <= 256);
+#endif
+
+	extern __shared__ char smem_mid_tf32_ptx[];
+	float* Fs  = reinterpret_cast<float*>(smem_mid_tf32_ptx);
+#if !(defined(CLS_TF32_OZAKI_TC2) && defined(CLS_TF32_OZAKI_STAGE_DIRECT))
+	(void)ucp_max;
+	(void)kp_max;
+#endif
+
+	stage_in_async<float>(Fs, F, fsz2, t, nt);
+	__syncthreads();
+
+    const bool direct_shared_tc =
+#ifdef CLS_MID_TF32_DIRECT_SHARED
+        true;
+#else
+        (direct_shared_mode != 0);
+	#endif
+	    bool extend_fused = false;
+#if defined(CLS_TF32_OZAKI_TC2) && defined(CLS_TF32_OZAKI_STAGE_DIRECT)
+	    const bool use_ozaki_stage = direct_shared_tc && fsz_cap <= kMidSplitFrontMax;
+	    unsigned* ozaki_Lh = reinterpret_cast<unsigned*>(Fs + (long)fsz_cap * fsz_cap);
+	    unsigned* ozaki_Lt = ozaki_Lh + (long)ucp_max * kp_max;
+	    unsigned* ozaki_Uh = ozaki_Lt + (long)ucp_max * kp_max;
+	    unsigned* ozaki_Ut = ozaki_Uh + (long)kp_max * ucp_max;
+#endif
+	#ifdef CLS_MID_TF32_DIRECT_FUSE_EXTEND
+	    float* parent_front_fuse = nullptr;
+	    int parent_fsz_fuse = 0;
+    int asm_base_fuse = 0;
+    const bool can_fuse_extend =
+        use_tc && direct_shared_tc && par >= 0 && do_extend && extend_add_allowed_for_uc(uc);
+    if (can_fuse_extend) {
+        parent_front_fuse = front + front_off[par];
+        parent_fsz_fuse = front_ptr[par + 1] - front_ptr[par];
+        asm_base_fuse = asm_ptr[p];
+    }
+    auto direct_tf32_trailing = [&] {
+        if (can_fuse_extend) {
+            trailing_update_mma_tf32_direct_shared<true>(
+	                Fs, fsz, nc, uc, t, nt, parent_front_fuse, parent_fsz_fuse,
+	                asm_local, asm_base_fuse);
+	            extend_fused = true;
+	        } else {
+#if defined(CLS_TF32_OZAKI_TC2) && defined(CLS_TF32_OZAKI_STAGE_DIRECT)
+	            if (use_ozaki_stage) {
+	                trailing_update_mma_tf32_direct_shared_staged_ozaki(
+	                    Fs, fsz, nc, uc, t, nt, ozaki_Lh, ozaki_Lt, ozaki_Uh, ozaki_Ut);
+	            } else
+#endif
+	            trailing_update_mma_tf32_direct_shared(Fs, fsz, nc, uc, t, nt);
+	        }
+	    };
+	#else
+#if !(defined(CLS_TF32_OZAKI_TC2) && defined(CLS_TF32_OZAKI_STAGE_DIRECT))
+	    (void)direct_shared_tc;
+#endif
+	    auto direct_tf32_trailing = [&] {
+#if defined(CLS_TF32_OZAKI_TC2) && defined(CLS_TF32_OZAKI_STAGE_DIRECT)
+	        if (use_ozaki_stage) {
+	            trailing_update_mma_tf32_direct_shared_staged_ozaki(
+	                Fs, fsz, nc, uc, t, nt, ozaki_Lh, ozaki_Lt, ozaki_Uh, ozaki_Ut);
+	        } else
+#endif
+	        trailing_update_mma_tf32_direct_shared(Fs, fsz, nc, uc, t, nt);
+	    };
+	#endif
+    auto direct_tf32_factorize = [&] {
+        lu_panel_factor<float>(Fs, fsz, nc, t, nt, sing);
+#ifdef CLS_TF32_COLUMN_USOLVE
+        u_panel_solve_column_owned<float>(Fs, fsz, nc, uc, t, nt);
+#else
+        u_panel_solve<float>(Fs, fsz, nc, uc, t, nt);
+#endif
+        direct_tf32_trailing();
+    };
+
+    if (use_tc) {
+#ifdef CLS_MID_TF32_DIRECT_SHARED
+        direct_tf32_factorize();
+#else
+        if (direct_shared_mode) {
+            direct_tf32_factorize();
+        } else {
+            factorize_front_blocked_tf32(Fs, fsz, nc, t, nt, sing);
+        }
+#endif
+    } else {
+        factorize_front<float>(Fs, fsz, nc, uc, t, nt, sing,
+            [&] { trailing_update_scalar<float>(Fs, fsz, nc, uc, t, nt); });
+    }
+
+    writeback_factored<float, float>(F, Fs, fsz, nc, uc, t, nt);
+
+    if (par < 0 || !do_extend || extend_fused || !extend_add_allowed_for_uc(uc)) return;
+    __syncthreads();
+    float* parent_front = front + front_off[par];
+    const int parent_fsz = front_ptr[par + 1] - front_ptr[par];
+    const int asm_base = asm_ptr[p];
+    extend_add<float, float>(parent_front, parent_fsz, Fs, fsz, nc, uc, asm_local, asm_base,
+                             t, nt);
+}
+#endif
+
+#ifdef CLS_CUBLAS_TF32_TRAILING
+// MID phase A for the cuBLAS TF32 trailing path. The shared front runs Phase 1 (panel LU)
+// and Phase 2 (U-solve), then writes only the factorized panel rows and L strip back to global.
+// The C block remains as the post-child-extend input; cuBLAS later applies C -= L * U in global,
+// and factor_big_extend scatters that updated C block into the parent.
+__global__ void factor_mid_cublas_phaseA(int lbegin, int lend,
+                                         const int* __restrict__ plcols,
+                                         const int* __restrict__ front_off,
+                                         const int* __restrict__ front_ptr,
+                                         const int* __restrict__ ncols,
+                                         float* frontB, long front_total, int* sing,
+                                         int fsz_cap)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    float* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    float* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    const int fsz2 = fsz * fsz;
+
+    extern __shared__ char smem_mid_cublas_phaseA[];
+    float* Fs = reinterpret_cast<float*>(smem_mid_cublas_phaseA);
+
+    stage_in_async<float>(Fs, F, fsz2, t, nt);
+    __syncthreads();
+
+    if (fsz <= 48) {
+        // Guard only. The dispatcher gates the cuBLAS path to larger mid ranges.
+        lu_small_front<float>(Fs, fsz, nc, t, nt, sing);
+        __syncthreads();
+        for (long e = t; e < (long)fsz * fsz; e += nt) F[e] = Fs[e];
+    } else {
+        lu_panel_factor<float>(Fs, fsz, nc, t, nt, sing);
+#ifdef CLS_TF32_COLUMN_USOLVE
+        u_panel_solve_column_owned<float>(Fs, fsz, nc, uc, t, nt);
+#else
+        u_panel_solve<float>(Fs, fsz, nc, uc, t, nt);
+#endif
+        __syncthreads();
+        writeback_factored<float, float>(F, Fs, fsz, nc, uc, t, nt);
+    }
+    (void)fsz_cap;
+}
+
+// Build the per-range device pointer arrays consumed by cublasSgemmGroupedBatched. The host
+// grouped metadata is ordered by the same q positions as plcols, so the cublas call can pass
+// d_cublas_*ptrs + lbegin * B with group_count = lend - lbegin.
+__global__ void build_cublas_trailing_ptrs(int lbegin, int lend, int B, long front_total,
+                                           const int* __restrict__ plcols,
+                                           const int* __restrict__ front_off,
+                                           const int* __restrict__ front_ptr,
+                                           const int* __restrict__ ncols,
+                                           float* frontB,
+                                           float** Aptrs, float** Bptrs, float** Cptrs)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const int b = blockIdx.y * blockDim.x + threadIdx.x;
+    if (b >= B) return;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    float* F = frontB + (long)b * front_total + front_off[p];
+    const long slot = (long)idx * B + b;
+    Aptrs[slot] = F + nc;                         // U: row 0, col nc
+    Bptrs[slot] = F + (long)nc * fsz;             // L: row nc, col 0
+    Cptrs[slot] = F + (long)nc * fsz + nc;        // C: row nc, col nc
+}
+#endif
 
 // =======================================================================================
 //  BIG tier  —  one block per (front, batch); front stays in global memory
@@ -244,7 +611,7 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
         [&] { trailing_update_scalar<T>(F, fsz, nc, uc, t, nt); });
 
     const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
     __syncthreads();
     T* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
@@ -283,11 +650,24 @@ __global__ void factor_big_staged(int lbegin, int lend, const int* __restrict__ 
     T* sh_L = reinterpret_cast<T*>(smem_big_staged);
     T* sh_U = sh_L + (long)level_max_uc * level_max_nc;
 
+    const int par = panel_parent[p];
+#ifdef CLS_FUSE_FP32_TRAIL_EXTEND
+    const bool use_fused_trailing =
+        (par >= 0 && do_extend && extend_add_allowed_for_uc(uc) &&
+         fsz > 48 && nc <= 32 && uc <= 256);
+    if (use_fused_trailing) {
+        T* Fpf = front + front_off[par];
+        const int pfszf = front_ptr[par + 1] - front_ptr[par];
+        const int abasef = asm_ptr[p];
+        factorize_front<T>(F, fsz, nc, uc, t, nt, sing,
+            [&] { trailing_update_staged<T, true>(F, fsz, nc, uc, t, nt, sh_L, sh_U, Fpf, pfszf, asm_local, abasef); });
+        return;
+    }
+#endif
     factorize_front<T>(F, fsz, nc, uc, t, nt, sing,
         [&] { trailing_update_staged<T>(F, fsz, nc, uc, t, nt, sh_L, sh_U); });
 
-    const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
     __syncthreads();
     T* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
@@ -378,11 +758,11 @@ __global__ void factor_big_extend(int lbegin, int lend, const int* __restrict__ 
     if (idx >= lend) return;
     const int p = plcols[idx];
     const int par = panel_parent[p];
-    if (par < 0) return;
-    T* front = frontB + (long)blockIdx.y * front_total;
     const int fsz = front_ptr[p + 1] - front_ptr[p];
     const int nc = ncols[p];
     const int uc = fsz - nc;
+    if (par < 0 || !extend_add_allowed_for_uc(uc)) return;
+    T* front = frontB + (long)blockIdx.y * front_total;
     T* F = front + front_off[p];
     T* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
@@ -418,7 +798,9 @@ __global__ void __launch_bounds__(512, 2)
 
 #ifdef CLS_FUSE_FP16_TRAIL_EXTEND
     const int par = panel_parent[p];
-    const bool use_fused_trailing = (par >= 0 && do_extend && fsz > 48 && nc <= 32 && uc <= 256);
+    const bool use_fused_trailing =
+        (par >= 0 && do_extend && extend_add_allowed_for_uc(uc) &&
+         fsz > 48 && nc <= 32 && uc <= 256);
     float* Fp = use_fused_trailing ? (front + front_off[par]) : nullptr;
     const int pfsz = use_fused_trailing ? (front_ptr[par + 1] - front_ptr[par]) : 0;
     const int abase = use_fused_trailing ? asm_ptr[p] : 0;
@@ -438,7 +820,7 @@ __global__ void __launch_bounds__(512, 2)
         }
     });
 
-    if (use_fused_trailing || par < 0 || !do_extend) return;
+    if (use_fused_trailing || par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
     __syncthreads();
     {
         float* parent_front = front + front_off[par];
@@ -460,7 +842,7 @@ __global__ void __launch_bounds__(512, 2)
     });
 
     const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
     __syncthreads();
     float* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
@@ -473,11 +855,7 @@ __global__ void __launch_bounds__(512, 2)
 // __launch_bounds__(512, 2) caps register usage so two blocks resident per SM is reachable
 // on sm_86; the inline-asm mma.sync writes directly to per-lane accumulators so no Csc
 // scratch is needed.
-#ifdef CLS_TF32X3
-__global__ void __launch_bounds__(512, 1)
-#else
 __global__ void __launch_bounds__(512, 2)
-#endif
                                 factor_big_tf32_ptx(int lbegin, int lend, const int* __restrict__ plcols,
                                 const int* __restrict__ front_off,
                                 const int* __restrict__ front_ptr,
@@ -498,7 +876,48 @@ __global__ void __launch_bounds__(512, 2)
     const int t = threadIdx.x, nt = blockDim.x;
     const int uc = fsz - nc;
 
-    factorize_front<float>(F, fsz, nc, uc, t, nt, sing, [&] {
+#ifdef CLS_FUSE_TF32_TRAIL_EXTEND
+    const int par = panel_parent[p];
+    const bool use_fused_trailing =
+        (par >= 0 && do_extend && extend_add_allowed_for_uc(uc) &&
+         fsz > 48 && nc <= 32 && uc <= 256);
+    float* Fp = use_fused_trailing ? (front + front_off[par]) : nullptr;
+    const int pfsz = use_fused_trailing ? (front_ptr[par + 1] - front_ptr[par]) : 0;
+    const int abase = use_fused_trailing ? asm_ptr[p] : 0;
+    auto tf32_big_trailing = [&] {
+        if (nc > 32 || uc > 256) {
+            trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);
+        } else {
+            extern __shared__ char smem_big_tf32_ptx[];
+            float* Ltf = reinterpret_cast<float*>(smem_big_tf32_ptx);
+            float* Utf = Ltf + (long)ucp_max * kp_max;
+            if (use_fused_trailing) {
+                trailing_update_mma_tf32_ptx<true>(F, fsz, nc, uc, Ltf, Utf, t, nt, Fp, pfsz,
+                                                   asm_local, abase);
+            } else {
+                trailing_update_mma_tf32_ptx<false>(F, fsz, nc, uc, Ltf, Utf, t, nt);
+            }
+        }
+    };
+#ifdef CLS_TF32_GLOBAL_COLUMN_USOLVE
+    lu_panel_factor<float>(F, fsz, nc, t, nt, sing);
+    u_panel_solve_column_owned<float>(F, fsz, nc, uc, t, nt);
+    tf32_big_trailing();
+#else
+    factorize_front<float>(F, fsz, nc, uc, t, nt, sing, [&] { tf32_big_trailing(); });
+#endif
+
+    if (use_fused_trailing || par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
+    __syncthreads();
+    {
+        float* parent_front = front + front_off[par];
+        const int parent_fsz = front_ptr[par + 1] - front_ptr[par];
+        const int asm_base = asm_ptr[p];
+        extend_add<float, float>(parent_front, parent_fsz, F, fsz, nc, uc, asm_local, asm_base,
+                                 t, nt);
+    }
+#else
+    auto tf32_big_trailing = [&] {
         if (nc > 32 || uc > 256) {
             trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);
         } else {
@@ -507,16 +926,166 @@ __global__ void __launch_bounds__(512, 2)
             float* Utf = Ltf + (long)ucp_max * kp_max;
             trailing_update_mma_tf32_ptx(F, fsz, nc, uc, Ltf, Utf, t, nt);
         }
-    });
+    };
+#ifdef CLS_TF32_GLOBAL_COLUMN_USOLVE
+    lu_panel_factor<float>(F, fsz, nc, t, nt, sing);
+    u_panel_solve_column_owned<float>(F, fsz, nc, uc, t, nt);
+    tf32_big_trailing();
+#else
+    factorize_front<float>(F, fsz, nc, uc, t, nt, sing, [&] { tf32_big_trailing(); });
+#endif
 
     const int par = panel_parent[p];
-    if (par < 0 || !do_extend) return;
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
+    __syncthreads();
+    float* Fp = front + front_off[par];
+    const int pfsz = front_ptr[par + 1] - front_ptr[par];
+    const int abase = asm_ptr[p];
+    extend_add<float, float>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
+#endif
+}
+
+#ifdef CLS_FP16_BLOCKED_SHARED_TC
+// Big-low shared-resident blocked FP16 path. The front remains FP32 in shared memory; the
+// right-looking block updates feed FP16 multiplicands to Tensor Cores with FP32 accumulation.
+__global__ void factor_big_shared_fp16_blocked(int lbegin, int lend,
+                                               const int* __restrict__ plcols,
+                                               const int* __restrict__ front_off,
+                                               const int* __restrict__ front_ptr,
+                                               const int* __restrict__ ncols,
+                                               const int* __restrict__ panel_parent,
+                                               const int* __restrict__ asm_ptr,
+                                               const int* __restrict__ asm_local,
+                                               float* frontB, long front_total, int* sing,
+                                               int do_extend, int fsz_cap)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    float* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    float* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    const int fsz2 = fsz * fsz;
+    const bool use_tc = (fsz > 48 && uc >= 32 && nc >= 8 && nc <= 32 && uc <= 256);
+
+    extern __shared__ char smem_big_shared_fp16[];
+    float* Fs = reinterpret_cast<float*>(smem_big_shared_fp16);
+    stage_in_async<float>(Fs, F, fsz2, t, nt);
+    __syncthreads();
+
+    if (use_tc) {
+        factorize_front_blocked_fp16(Fs, fsz, nc, t, nt, sing);
+    } else {
+        factorize_front<float>(Fs, fsz, nc, uc, t, nt, sing,
+            [&] { trailing_update_scalar<float>(Fs, fsz, nc, uc, t, nt); });
+    }
+
+    writeback_factored<float, float>(F, Fs, fsz, nc, uc, t, nt);
+
+    const int par = panel_parent[p];
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
+    __syncthreads();
+    float* Fp = front + front_off[par];
+    const int pfsz = front_ptr[par + 1] - front_ptr[par];
+    const int abase = asm_ptr[p];
+    extend_add<float, float>(Fp, pfsz, Fs, fsz, nc, uc, asm_local, abase, t, nt);
+    (void)fsz_cap;
+}
+#endif
+
+#ifdef CLS_BIG_TF32_BLOCKED_TC
+// Big-low shared-resident blocked TF32 path. It targets fsz<=159 ranges isolated by
+// CLS_BIG_LOW_SPLIT, where the full dense front fits in the 99 KiB opt-in shared budget.
+__global__ void factor_big_shared_tf32_blocked(int lbegin, int lend,
+                                               const int* __restrict__ plcols,
+                                               const int* __restrict__ front_off,
+                                               const int* __restrict__ front_ptr,
+                                               const int* __restrict__ ncols,
+                                               const int* __restrict__ panel_parent,
+                                               const int* __restrict__ asm_ptr,
+                                               const int* __restrict__ asm_local,
+                                               float* frontB, long front_total, int* sing,
+                                               int do_extend, int fsz_cap)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    float* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    float* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    const int fsz2 = fsz * fsz;
+    const bool use_tc = (fsz > 48 && uc >= 32 && nc >= 8 && nc <= 32 && uc <= 256);
+
+    extern __shared__ char smem_big_shared_tf32[];
+    float* Fs = reinterpret_cast<float*>(smem_big_shared_tf32);
+    stage_in_async<float>(Fs, F, fsz2, t, nt);
+    __syncthreads();
+
+    if (use_tc) {
+        factorize_front_blocked_tf32(Fs, fsz, nc, t, nt, sing);
+    } else {
+        factorize_front<float>(Fs, fsz, nc, uc, t, nt, sing,
+            [&] { trailing_update_scalar<float>(Fs, fsz, nc, uc, t, nt); });
+    }
+
+    writeback_factored<float, float>(F, Fs, fsz, nc, uc, t, nt);
+
+    const int par = panel_parent[p];
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
+    __syncthreads();
+    float* Fp = front + front_off[par];
+    const int pfsz = front_ptr[par + 1] - front_ptr[par];
+    const int abase = asm_ptr[p];
+    extend_add<float, float>(Fp, pfsz, Fs, fsz, nc, uc, asm_local, abase, t, nt);
+    (void)fsz_cap;
+}
+
+// Big-front right-looking blocked TF32 path. Unlike factor_big_tf32_ptx, this uses Tensor Cores
+// for the block update after each pivot block, so TC covers remaining panel columns as well as C.
+__global__ void __launch_bounds__(512, 2)
+                                factor_big_tf32_blocked_ptx(int lbegin, int lend,
+                                const int* __restrict__ plcols,
+                                const int* __restrict__ front_off,
+                                const int* __restrict__ front_ptr,
+                                const int* __restrict__ ncols,
+                                const int* __restrict__ panel_parent,
+                                const int* __restrict__ asm_ptr,
+                                const int* __restrict__ asm_local, float* frontB,
+                                long front_total, int* sing, int do_extend)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    float* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    float* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    const bool use_tc = (fsz > 48 && uc >= 32 && nc >= 8 && nc <= 32 && uc <= 256);
+
+    if (use_tc) {
+        factorize_front_blocked_tf32(F, fsz, nc, t, nt, sing);
+    } else {
+        factorize_front<float>(F, fsz, nc, uc, t, nt, sing,
+            [&] { trailing_update_scalar<float>(F, fsz, nc, uc, t, nt); });
+    }
+
+    const int par = panel_parent[p];
+    if (par < 0 || !do_extend || !extend_add_allowed_for_uc(uc)) return;
     __syncthreads();
     float* Fp = front + front_off[par];
     const int pfsz = front_ptr[par + 1] - front_ptr[par];
     const int abase = asm_ptr[p];
     extend_add<float, float>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
 }
+#endif
 
 }  // namespace
 }  // namespace custom_linear_solver
