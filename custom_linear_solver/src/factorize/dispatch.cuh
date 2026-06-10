@@ -27,9 +27,6 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#ifdef CLS_CUBLAS_TF32_TRAILING
-#include <cublas_v2.h>
-#endif
 
 #include "plan/front_range_caps.hpp"
 #include "numeric_engine.hpp"
@@ -41,11 +38,7 @@ using custom_linear_solver::plan::MultifrontalPlan;
 
 namespace {
 
-#ifdef CLS_DISABLE_EXTEND_ADD
-inline constexpr int kFactorDoExtend = 0;
-#else
 inline constexpr int kFactorDoExtend = 1;
-#endif
 
 static int factor_num_sms()
 {
@@ -142,80 +135,6 @@ static inline void launch_factor_big_mb(int b, int e, int level_size, int B, int
             plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, frontB, plan.front_total);
 }
 
-#ifdef CLS_CUBLAS_TF32_TRAILING
-static inline bool cublas_uses_tier_order(const MultifrontalPlan& plan, const int* h_plc)
-{
-    return !plan.h_plcols_tier.empty() && h_plc == plan.h_plcols_tier.data();
-}
-
-static inline bool cublas_tf32_trailing_ready(const State& st)
-{
-    return st.batch_count >= 64 && st.precision == Precision::TF32 && st.cublas_handle &&
-           st.d_cublas_Aptrs && st.d_cublas_Bptrs && st.d_cublas_Cptrs;
-}
-
-static bool cublas_range_has_only_deferred_trailing(const MultifrontalPlan& plan,
-                                                    const int* h_plc, int b, int e)
-{
-    for (int q = b; q < e; ++q) {
-        const int p = h_plc[q];
-        const int fsz = plan.h_front_ptr[p + 1] - plan.h_front_ptr[p];
-        if (fsz <= 48) return false;
-    }
-    return true;
-}
-
-static bool launch_cublas_tf32_trailing(const MultifrontalPlan& plan, State& st,
-                                        cudaStream_t stream, int b, int e,
-                                        const int* d_plc, const int* h_plc)
-{
-    const int B = st.batch_count;
-    const int level_size = e - b;
-    if (level_size <= 0 || !cublas_tf32_trailing_ready(st)) {
-        return false;
-    }
-    (void)d_plc;
-
-    const bool tier_order = cublas_uses_tier_order(plan, h_plc);
-    const std::vector<int>& hm = tier_order ? st.cublas_m_tier : st.cublas_m;
-    const std::vector<int>& hn = tier_order ? st.cublas_n_tier : st.cublas_n;
-    const std::vector<int>& hk = tier_order ? st.cublas_k_tier : st.cublas_k;
-    const std::vector<int>& hlda = tier_order ? st.cublas_lda_tier : st.cublas_lda;
-    if (hm.empty() || hn.empty() || hk.empty() || hlda.empty()) return false;
-    float** Aptrs = tier_order ? st.d_cublas_Aptrs_tier : st.d_cublas_Aptrs;
-    float** Bptrs = tier_order ? st.d_cublas_Bptrs_tier : st.d_cublas_Bptrs;
-    float** Cptrs = tier_order ? st.d_cublas_Cptrs_tier : st.d_cublas_Cptrs;
-    if (!Aptrs || !Bptrs || !Cptrs) return false;
-
-    cublasHandle_t handle = static_cast<cublasHandle_t>(st.cublas_handle);
-    cublasSetStream(handle, stream);
-    const cublasStatus_t status = cublasSgemmGroupedBatched(
-        handle,
-        reinterpret_cast<const cublasOperation_t*>(st.cublas_trans.data()) + b,
-        reinterpret_cast<const cublasOperation_t*>(st.cublas_trans.data()) + b,
-        hm.data() + b, hn.data() + b, hk.data() + b,
-        st.cublas_alpha.data() + b,
-        reinterpret_cast<const float* const*>(Aptrs + (long)b * B),
-        hlda.data() + b,
-        reinterpret_cast<const float* const*>(Bptrs + (long)b * B),
-        hlda.data() + b,
-        st.cublas_beta.data() + b,
-        Cptrs + (long)b * B,
-        hlda.data() + b,
-        level_size,
-        st.cublas_group_size.data() + b);
-    // If cuBLAS reports an error here, falling back would be incorrect because phaseA has
-    // already modified the front. Let the later sync/residual path expose the failure.
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        const char* dbg = std::getenv("CLS_CUBLAS_STATUS_DEBUG");
-        if (dbg && dbg[0] && dbg[0] != '0') {
-            std::fprintf(stderr, "[CLS] cublasSgemmGroupedBatched status=%d range=[%d,%d) B=%d\n",
-                         static_cast<int>(status), b, e, B);
-        }
-    }
-    return true;
-}
-#endif
 
 // ---------------------------------------------------------------------------------------
 // Per-tier dispatch helpers (small / mid / big), each launching the kernel variant for the
@@ -230,10 +149,6 @@ static bool launch_cublas_tf32_trailing(const MultifrontalPlan& plan, State& st,
 static void dispatch_factor_small(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
                                   int b, int e, const int* d_plc, const FrontRangeCaps& m)
 {
-#ifdef CLS_DISABLE_SMALL_FACTOR
-    (void)plan; (void)st; (void)stream; (void)b; (void)e; (void)d_plc; (void)m;
-    return;
-#else
     const Precision precision = st.precision;
     const int B = st.batch_count;
     const int level_size = e - b;
@@ -245,26 +160,12 @@ static void dispatch_factor_small(const MultifrontalPlan& plan, State& st, cudaS
     const int front_area = m.max_fsz * m.max_fsz;
     const size_t element_bytes = (precision == Precision::FP64) ? sizeof(double) : sizeof(float);
     const size_t shared_bytes = (size_t)kSmallTierWarpsPerBlock * fronts_per_warp * front_area * element_bytes;
-#ifdef CLS_SMALL_TF32_TC
-    if (precision == Precision::TF32 && B >= 128 && m.max_fsz > 16) {
-        const int tc_num_blocks = (int)((warps_unpacked + kSmallTierWarpsPerBlock - 1) /
-                                        kSmallTierWarpsPerBlock);
-        const size_t tc_shared_bytes =
-            (size_t)kSmallTierWarpsPerBlock * front_area * sizeof(float);
-        factor_small_tf32_tc<<<tc_num_blocks, threads_per_block, tc_shared_bytes, stream>>>(
-            b, level_size, B, front_area, d_plc, plan.d_front_off, plan.d_front_ptr,
-            plan.d_ncols, plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local,
-            st.d_front_batch_f, plan.front_total, st.d_sing, do_extend);
-        return;
-    }
-#endif
     if (precision == Precision::FP64)
         launch_factor_small_t<double>(sub_group_size, num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area,
                                       plan, d_plc, st.d_front_batch, st.d_sing, do_extend);
     else
         launch_factor_small_t<float>(sub_group_size, num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area,
                                      plan, d_plc, st.d_front_batch_f, st.d_sing, do_extend);
-#endif
 }
 
 // MID tier: shared-resident kernel, one block per (front, batch). Returns false when the chosen
@@ -290,27 +191,6 @@ static bool dispatch_factor_mid(const MultifrontalPlan& plan, State& st, cudaStr
     // latency-bound block; widen it to the device max so the per-pivot rank-1 update parallelises
     // over the SM. Once the level fills the GPU with blocks, keep the default 256.
     const int threads_per_block = ((long)(e - b) * B <= factor_num_sms()) ? factor_max_block() : 256;
-#if defined(CLS_CUBLAS_TF32_TRAILING) && defined(CLS_CUBLAS_TF32_MID)
-    if (precision == Precision::TF32 && fsz_cap >= 64 && cublas_tf32_trailing_ready(st) &&
-        cublas_range_has_only_deferred_trailing(plan, h_plc, b, e)) {
-        constexpr int phaseA_threads = 256;
-        const size_t shared_bytes_phaseA = (size_t)fsz_cap * fsz_cap * sizeof(float);
-        if (shared_bytes_phaseA <= kMidSharedMemoryBudgetBytes) {
-            factor_mid_cublas_phaseA<<<grid, phaseA_threads, shared_bytes_phaseA, stream>>>(
-                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                st.d_front_batch_f, plan.front_total, st.d_sing, fsz_cap);
-            if (launch_cublas_tf32_trailing(plan, st, stream, b, e, d_plc, h_plc)) {
-#ifndef CLS_DISABLE_EXTEND_ADD
-                factor_big_extend<float><<<grid, phaseA_threads, 0, stream>>>(
-                    b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                    plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local,
-                    st.d_front_batch_f, plan.front_total);
-#endif
-                return true;
-            }
-        }
-    }
-#endif
 #ifdef CLS_MID_TF32_TC
 #ifndef CLS_MID_TF32_MIN_FSZ
 #define CLS_MID_TF32_MIN_FSZ 48
@@ -328,29 +208,18 @@ static bool dispatch_factor_mid(const MultifrontalPlan& plan, State& st, cudaStr
 	        const int ucp_max = round_up_to_multiple(max_uc, 16);
 	        const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
 	        const int mid_tf32_direct_shared =
-#if defined(CLS_MID_TF32_FORCE_BLOCKED)
-	            0;
-#elif defined(CLS_MID_TF32_DIRECT_SHARED)
+#if   defined(CLS_MID_TF32_DIRECT_SHARED)
 	            1;
-#elif defined(CLS_MID_TF32_DIRECT_HIGH)
-	            (fsz_cap > kMidSplitFrontMax) ? 1 : 0;
 #else
 	            0;
 #endif
 	        constexpr int mid_tf32_tc_threads =
 	#ifdef CLS_MID_TF32_TC_THREADS_128
 	            128;
-	#elif defined(CLS_MID_TF32_TC_THREADS_512)
-	            512;
 	#else
 	            256;
 	#endif
 	        size_t ozaki_stage_bytes = 0;
-#if defined(CLS_TF32_OZAKI_TC2) && defined(CLS_TF32_OZAKI_STAGE_DIRECT)
-	        if (mid_tf32_direct_shared && fsz_cap <= kMidSplitFrontMax) {
-	            ozaki_stage_bytes = (size_t)4 * ucp_max * kp_max * sizeof(unsigned);
-	        }
-#endif
 	        const size_t shared_bytes_tf32_tc =
 	            (size_t)fsz_cap * fsz_cap * sizeof(float) + ozaki_stage_bytes;
 	        if (shared_bytes_tf32_tc <= kMidSharedMemoryBudgetBytes) {
@@ -359,42 +228,6 @@ static bool dispatch_factor_mid(const MultifrontalPlan& plan, State& st, cudaStr
 	                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
                 plan.front_total, st.d_sing, do_extend, fsz_cap, ucp_max, kp_max,
                 mid_tf32_direct_shared);
-            return true;
-        }
-    }
-#endif
-#ifdef CLS_MID_FP16_TC
-    // Mid FP16 TC is useful on the 13K/25K-sized mid-front workloads but was unsafe on the
-    // smaller nc=8-dominant 8387 case and on USA's ill-conditioned parallel-ND ordering.
-    // Keep the default policy narrow; CLS_MID_FP16_TC=OFF restores the scalar mid path.
-    const bool mid_fp16_tc_size_enabled =
-#ifdef CLS_MID_FP16_TC_FORCE_ALL
-        true;
-#else
-        (plan.num_rows >= 20000 && plan.num_rows < 80000);
-#endif
-    if (precision == Precision::FP16 && mid_fp16_tc_size_enabled) {
-        const int ucp_max = round_up_to_multiple(max_uc, 16);
-        const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
-        constexpr int mid_fp16_tc_threads =
-#ifdef CLS_MID_FP16_TC_THREADS_256
-            256;
-#else
-            512;
-#endif
-        const size_t shared_bytes_fp16_tc =
-#ifdef CLS_FP16_BLOCKED_SHARED_TC
-            (size_t)fsz_cap * fsz_cap * sizeof(float);
-#else
-            (size_t)fsz_cap * fsz_cap * sizeof(float) +
-            (size_t)2 * ucp_max * kp_max * sizeof(__half);
-#endif
-        if (shared_bytes_fp16_tc <= kMidSharedMemoryBudgetBytes) {
-            factor_mid_fp16_ptx<<<grid, mid_fp16_tc_threads, shared_bytes_fp16_tc, stream>>>(
-                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                plan.front_total, st.d_sing, do_extend, fsz_cap, level_max_nc, level_max_uc,
-                ucp_max, kp_max);
             return true;
         }
     }
@@ -484,26 +317,11 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
         return;
     }
     if (precision == Precision::FP16) {
-#ifdef CLS_FP16_BLOCKED_SHARED_TC
-        const size_t shared_front_bytes = (size_t)max_fsz * max_fsz * sizeof(float);
-        if (shared_front_bytes <= kDynamicSharedMemoryOptInBytes) {
-            constexpr int bigT_fp16_shared = 256;
-            factor_big_shared_fp16_blocked<<<grid, bigT_fp16_shared, shared_front_bytes, stream>>>(
-                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                plan.front_total, st.d_sing, do_extend, max_fsz);
-            return;
-        }
-#endif
         // 512-thread block + __launch_bounds__(512, 2) on factor_big_fp16_ptx so two blocks
         // fit per SM on sm_86. Shared scratch is only the __half staging panels (Lh, Uh) —
         // the front stays in global memory and the inline-asm mma needs no Csc readback.
         constexpr int bigT_fp16 =
-#ifdef CLS_BIG_FP16_TC_THREADS_256
-            256;
-#else
             512;
-#endif
         const int ucp_max = round_up_to_multiple(max_uc, 16);
         const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
         const size_t shbytes = (size_t)2 * ucp_max * kp_max * sizeof(__half);
@@ -513,32 +331,12 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
             plan.front_total, st.d_sing, do_extend, ucp_max, kp_max);
         return;
     }
-#ifdef CLS_CUBLAS_TF32_TRAILING
-    if (precision == Precision::TF32 && cublas_tf32_trailing_ready(st) &&
-        cublas_range_has_only_deferred_trailing(plan, h_plc, b, e)) {
-        constexpr int bigT_cublas = 1024;
-        factor_big_panel<float><<<grid, bigT_cublas, 0, stream>>>(
-            b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-            st.d_front_batch_f, plan.front_total, st.d_sing);
-        if (launch_cublas_tf32_trailing(plan, st, stream, b, e, d_plc, h_plc)) {
-#ifndef CLS_DISABLE_EXTEND_ADD
-            factor_big_extend<float><<<grid, bigT_cublas, 0, stream>>>(
-                b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-                plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-                plan.front_total);
-#endif
-            return;
-        }
-    }
-#endif
     if (precision == Precision::TF32) {
 #ifdef CLS_BIG_TF32_BLOCKED_TC
         const size_t shared_front_bytes = (size_t)max_fsz * max_fsz * sizeof(float);
         if (shared_front_bytes <= kDynamicSharedMemoryOptInBytes) {
             constexpr int bigT_tf32_shared =
-#ifdef CLS_BIG_TF32_SHARED_THREADS_128
-                128;
-#elif defined(CLS_BIG_TF32_SHARED_THREADS_512)
+#if   defined(CLS_BIG_TF32_SHARED_THREADS_512)
                 512;
 #else
                 256;
@@ -555,13 +353,7 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
         // 1024-thread block would be capped at one resident block by the thread-per-SM limit).
         // PTX path needs no Csc scratch.
         constexpr int bigT_tf32 =
-#ifdef CLS_BIG_TF32_THREADS_256
-            256;
-#elif defined(CLS_BIG_TF32_THREADS_384)
-            384;
-#else
             512;
-#endif
         const int ucp_max = round_up_to_multiple(max_uc, 16);
         const int kp_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
         const size_t shbytes = (size_t)(2 * ucp_max * kp_max + 4 * kp_max) * sizeof(float);  // +4*kp_max: Utf LDB pad
@@ -668,15 +460,6 @@ static void issue_factor_tiered(const MultifrontalPlan& plan, State& st, cudaStr
     const long small_cnt = tb[NS] - tb[0];
     const bool mixed = (tb[NT] - tb[0]) > small_cnt;  // a larger-tier front is present
     if (st.tier_split && small_cnt > 0 && mixed && small_cnt * (long)st.batch_count >= factor_warp_fill()) {
-#if defined(CLS_SMALL_BUCKET_SPLIT_16)
-        if (NS > 1 && st.batch_count < 128) {
-            issue_factor_level_range(plan, st, stream, tb[0], tb[NS], d_plc, h_plc);
-            for (int t = NS; t < NT; ++t)
-                if (tb[t + 1] > tb[t])
-                    issue_factor_level_range(plan, st, stream, tb[t], tb[t + 1], d_plc, h_plc);
-            return;
-        }
-#endif
         for (int t = 0; t < NT; ++t)
             if (tb[t + 1] > tb[t])
                 issue_factor_level_range(plan, st, stream, tb[t], tb[t + 1], d_plc, h_plc);

@@ -25,11 +25,7 @@ inline constexpr int kMidFrontMax = 128;
 
 // Number of tiers (small / mid / big) and how many leading tiers use the warp-packed small kernel.
 inline constexpr int kNumFrontTiers = 3;
-#ifdef CLS_SMALL_BUCKET_SPLIT_16
-inline constexpr int kSmallTierCount = 2;
-#else
 inline constexpr int kSmallTierCount = 1;
-#endif
 
 // Small-tier kernel packs this many warps per block.
 inline constexpr int kSmallTierWarpsPerBlock = 8;
@@ -80,12 +76,10 @@ inline constexpr int kBigLowSplitFrontMax = 159;
 // fsz_cap², so a tighter cap raises occupancy and frees the shared headroom that front-per-block
 // packing needs). Kernel SELECTION still uses classify_front_tier (small / mid / big) — both mid
 // buckets run the mid kernel, just with their own fsz_cap. CLS_NO_MID_SPLIT reverts to one
-// mid bucket; CLS_SMALL_BUCKET_SPLIT_16 optionally splits only the small dispatch buckets.
+// mid bucket.
 #ifdef CLS_NO_MID_SPLIT
 inline constexpr int kMidBucketCount = 1;
-#elif defined(CLS_MID_LOW_SPLIT) && defined(CLS_MID_HIGH_SPLIT)
-inline constexpr int kMidBucketCount = 4;
-#elif defined(CLS_MID_LOW_SPLIT) || defined(CLS_MID_HIGH_SPLIT)
+#elif defined(CLS_MID_LOW_SPLIT)
 inline constexpr int kMidBucketCount = 3;
 #else
 inline constexpr int kMidBucketCount = 2;
@@ -102,28 +96,15 @@ inline constexpr int kNumFrontBuckets = kSmallTierCount + kMidBucketCount + kBig
 constexpr int front_bucket(int front_size)
 {
     if (front_size <= kSmallFrontMax) {
-#ifdef CLS_SMALL_BUCKET_SPLIT_16
-        return (front_size <= kSmallSplitFrontMax) ? 0 : 1;
-#else
         return 0;
-#endif
     }
 
     const int mid0 = kSmallTierCount;
 #ifdef CLS_NO_MID_SPLIT
     if (front_size <= kMidFrontMax) return mid0;
-#elif defined(CLS_MID_LOW_SPLIT) && defined(CLS_MID_HIGH_SPLIT)
-    if (front_size <= kMidLowSplitFrontMax) return mid0;
-    if (front_size <= kMidSplitFrontMax) return mid0 + 1;
-    if (front_size <= kMidHighSplitFrontMax) return mid0 + 2;
-    if (front_size <= kMidFrontMax) return mid0 + 3;
 #elif defined(CLS_MID_LOW_SPLIT)
     if (front_size <= kMidLowSplitFrontMax) return mid0;
     if (front_size <= kMidSplitFrontMax) return mid0 + 1;
-    if (front_size <= kMidFrontMax) return mid0 + 2;
-#elif defined(CLS_MID_HIGH_SPLIT)
-    if (front_size <= kMidSplitFrontMax) return mid0;
-    if (front_size <= kMidHighSplitFrontMax) return mid0 + 1;
     if (front_size <= kMidFrontMax) return mid0 + 2;
 #else
     if (front_size <= kMidSplitFrontMax) return mid0;

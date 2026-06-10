@@ -728,11 +728,7 @@ __device__ __forceinline__ void trailing_update_mma_tf32_direct_shared(float* F,
     };
 
     constexpr int NTJ8_MAX =
-#ifdef CLS_TF32_DIRECT_NTJ8_16
-        16;
-#else
         8;
-#endif
     if (ntj8 <= NTJ8_MAX) {
         for (int ti = warp; ti < ntj16; ti += nwarp) {
             const int r_top = ti * 16 + laneR;
@@ -822,92 +818,6 @@ __device__ __forceinline__ void trailing_update_mma_tf32_direct_shared(float* F,
     }
 }
 
-#if defined(CLS_TF32_OZAKI_TC2) && defined(CLS_TF32_OZAKI_STAGE_DIRECT)
-__device__ __forceinline__ void trailing_update_mma_tf32_direct_shared_staged_ozaki(
-    float* F, int fsz, int nc, int uc, int t, int nt,
-    unsigned* Lh, unsigned* Lt, unsigned* Uh, unsigned* Ut)
-{
-    const int UCP = ((uc + 15) / 16) * 16;
-    const int KP  = ((nc + 7)  / 8)  * 8;
-
-    auto load_l = [&](int r, int k) {
-        return (r < uc && k < nc) ? F[(long)(nc + r) * fsz + k] : 0.0f;
-    };
-    auto load_u = [&](int k, int col) {
-        return (k < nc && col < uc) ? F[(long)k * fsz + (nc + col)] : 0.0f;
-    };
-    for (int e = t; e < UCP * KP; e += nt) {
-        const int r = e / KP;
-        const int k = e % KP;
-        const Tf32Pair v = tf32_ozaki_pair(load_l(r, k));
-        Lh[e] = v.h;
-        Lt[e] = v.t;
-    }
-    for (int e = t; e < KP * UCP; e += nt) {
-        const int k = e / UCP;
-        const int col = e % UCP;
-        const Tf32Pair v = tf32_ozaki_pair(load_u(k, col));
-        Uh[e] = v.h;
-        Ut[e] = v.t;
-    }
-    __syncthreads();
-
-    const int ntj16 = UCP / 16;
-    const int ntj8  = UCP / 8;
-    const int nks   = KP / 8;
-    const int warp  = t >> 5;
-    const int nwarp = nt >> 5;
-    const int lane  = t & 31;
-    const int laneR = lane >> 2;
-    const int laneC = (lane & 3) * 2;
-
-    auto drain = [&](int r, int col, float c) {
-        if (r < uc && col < uc) F[(long)(nc + r) * fsz + (nc + col)] -= c;
-    };
-
-    constexpr int NTJ8_MAX = 8;
-    for (int ti = warp; ti < ntj16; ti += nwarp) {
-        const int r_top = ti * 16 + laneR;
-        const int r_bot = r_top + 8;
-        float c[NTJ8_MAX][4];
-        #pragma unroll
-        for (int j = 0; j < NTJ8_MAX; ++j) { c[j][0]=c[j][1]=c[j][2]=c[j][3]=0.f; }
-        for (int kc = 0; kc < nks; ++kc) {
-            const int k0 = kc * 8 + laneC;
-            const int k1 = k0 + 1;
-            const long a_top0 = (long)r_top * KP + k0;
-            const long a_bot0 = (long)r_bot * KP + k0;
-            const long a_top1 = a_top0 + 1;
-            const long a_bot1 = a_bot0 + 1;
-            const Tf32Pair a0{Lh[a_top0], Lt[a_top0]};
-            const Tf32Pair a1{Lh[a_bot0], Lt[a_bot0]};
-            const Tf32Pair a2{Lh[a_top1], Lt[a_top1]};
-            const Tf32Pair a3{Lh[a_bot1], Lt[a_bot1]};
-            #pragma unroll
-            for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
-                if (tj8 >= ntj8) break;
-                const int col = tj8 * 8 + laneR;
-                const long b0i = (long)k0 * UCP + col;
-                const long b1i = (long)k1 * UCP + col;
-                const Tf32Pair b0{Uh[b0i], Ut[b0i]};
-                const Tf32Pair b1{Uh[b1i], Ut[b1i]};
-                CLS_MMA_TF32_OZAKI2(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
-                                    a0, a1, a2, a3, b0, b1);
-            }
-        }
-        #pragma unroll
-        for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
-            if (tj8 >= ntj8) break;
-            const int col0 = tj8 * 8 + laneC;
-            const int col1 = col0 + 1;
-            drain(r_top, col0, c[tj8][0]);
-            drain(r_top, col1, c[tj8][1]);
-            drain(r_bot, col0, c[tj8][2]);
-            drain(r_bot, col1, c[tj8][3]);
-        }
-    }
-}
-#endif
 
 __device__ __forceinline__ void block_update_mma_tf32_direct_shared(float* F, int fsz,
                                                                     int row0, int col0,
@@ -1122,11 +1032,7 @@ __device__ __forceinline__ void block_update_mma_fp16_direct_shared(float* F, in
 __device__ __forceinline__ void factorize_front_blocked_tf32(float* F, int fsz, int nc,
                                                              int t, int nt, int* sing)
 {
-#ifdef CLS_TF32_BLOCKED_BK4
-    constexpr int BK = 4;
-#else
     constexpr int BK = 8;
-#endif
     for (int k0 = 0; k0 < nc; k0 += BK) {
         const int kb = (k0 + BK <= nc) ? BK : (nc - k0);
         const int next = k0 + kb;
@@ -1359,12 +1265,6 @@ __device__ __forceinline__ void trailing_update_mma_tf32_warp_shared(float* F, i
 // into the same parent entries concurrently.
 __device__ __forceinline__ bool extend_add_allowed_for_uc(int uc)
 {
-#ifdef CLS_EXTEND_SKIP_UC_LE
-    if (uc <= CLS_EXTEND_SKIP_UC_LE) return false;
-#endif
-#ifdef CLS_EXTEND_SKIP_UC_GT
-    if (uc > CLS_EXTEND_SKIP_UC_GT) return false;
-#endif
     return true;
 }
 
