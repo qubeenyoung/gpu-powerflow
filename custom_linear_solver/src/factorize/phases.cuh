@@ -44,6 +44,52 @@
 namespace custom_linear_solver {
 namespace {
 
+#ifdef CLS_TF32_OZAKI_TC2
+struct Tf32Pair {
+    unsigned h;
+    unsigned t;
+};
+
+__device__ __forceinline__ unsigned tf32_rna_bits(float x)
+{
+    unsigned y;
+    asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(y) : "f"(x));
+    return y;
+}
+
+__device__ __forceinline__ Tf32Pair tf32_ozaki_pair(float x)
+{
+    const unsigned h = tf32_rna_bits(x);
+    const unsigned t = tf32_rna_bits(x - __uint_as_float(h));
+    return {h, t};
+}
+#endif
+
+#define CLS_MMA_TF32_M16N8K8(C0, C1, C2, C3, A0, A1, A2, A3, B0, B1) \
+    asm volatile( \
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 " \
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n" \
+        : "+f"(C0), "+f"(C1), "+f"(C2), "+f"(C3) \
+        : "r"(A0), "r"(A1), "r"(A2), "r"(A3), "r"(B0), "r"(B1))
+
+#ifdef CLS_TF32_OZAKI_TC2
+#define CLS_MMA_TF32_OZAKI2(C0, C1, C2, C3, A0, A1, A2, A3, B0, B1) \
+    do { \
+        CLS_MMA_TF32_M16N8K8(C0, C1, C2, C3, (A0).h, (A1).h, (A2).h, (A3).h, (B0).h, (B1).h); \
+        CLS_MMA_TF32_M16N8K8(C0, C1, C2, C3, (A0).t, (A1).t, (A2).t, (A3).t, (B0).h, (B1).h); \
+        CLS_MMA_TF32_M16N8K8(C0, C1, C2, C3, (A0).h, (A1).h, (A2).h, (A3).h, (B0).t, (B1).t); \
+        \
+        /* The tail-tail term is a second-order correction. Omitting it saves one MMA pass. */ \
+        IF_NOT_FIRST_ORDER_TAIL_TAIL(C0, C1, C2, C3, A0, A1, A2, A3, B0, B1); \
+    } while (0)
+#ifdef CLS_TF32_OZAKI_TC2_FIRST_ORDER
+#define IF_NOT_FIRST_ORDER_TAIL_TAIL(C0, C1, C2, C3, A0, A1, A2, A3, B0, B1) do { } while (0)
+#else
+#define IF_NOT_FIRST_ORDER_TAIL_TAIL(C0, C1, C2, C3, A0, A1, A2, A3, B0, B1) \
+        CLS_MMA_TF32_M16N8K8(C0, C1, C2, C3, (A0).t, (A1).t, (A2).t, (A3).t, (B0).t, (B1).t)
+#endif
+#endif
+
 // =======================================================================================
 //  STAGE-IN  —  global → shared
 // =======================================================================================
@@ -221,6 +267,25 @@ __device__ __forceinline__ void u_panel_solve(T* F, int fsz, int nc, int uc, int
     }
 }
 
+template <typename T>
+__device__ __forceinline__ void u_panel_solve_column_owned(T* F, int fsz, int nc, int uc,
+                                                           int t, int nt)
+{
+    // Each U column is independent once the panel LU is complete. Keep one column on the same
+    // thread for the whole triangular solve so the per-row block-wide barriers disappear.
+    for (int e = t; e < uc; e += nt) {
+        const int jj = nc + e;
+        for (int k = 1; k < nc; ++k) {
+            T v = F[(long)k * fsz + jj];
+            for (int i = 0; i < k; ++i) {
+                v -= F[(long)k * fsz + i] * F[(long)i * fsz + jj];
+            }
+            F[(long)k * fsz + jj] = v;
+        }
+    }
+    __syncthreads();
+}
+
 // =======================================================================================
 //  PHASE 3  —  TRAILING UPDATE       (C(uc × uc) -= L(uc × nc) · U(nc × uc))
 // =======================================================================================
@@ -266,9 +331,11 @@ __device__ __forceinline__ void trailing_update_scalar(T* F, int fsz, int nc, in
     }
 }
 
-template <typename T>
+template <typename T, bool FuseExtend = false>
 __device__ __forceinline__ void trailing_update_staged(T* F, int fsz, int nc, int uc, int t,
-                                                        int nt, T* sh_L, T* sh_U)
+                                                        int nt, T* sh_L, T* sh_U,
+                                                        T* Fp = nullptr, int pfsz = 0,
+                                                        const int* asm_local = nullptr, int abase = 0)
 {
     // (a) Copy the L (uc × nc) and U (nc × uc) panels of F into compact shared layouts. The
     //     staged layout has unit-strided inner dimensions so the inner dot-product loop hits
@@ -287,7 +354,12 @@ __device__ __forceinline__ void trailing_update_staged(T* F, int fsz, int nc, in
         const int i = e / uc, j = e % uc;
         T acc = T(0);
         for (int k = 0; k < nc; ++k) acc += sh_L[i * nc + k] * sh_U[k * uc + j];
-        F[(long)(nc + i) * fsz + (nc + j)] -= acc;
+        const long off = (long)(nc + i) * fsz + (nc + j);
+        if constexpr (FuseExtend) {
+            atomicAdd(&Fp[(long)asm_local[abase + i] * pfsz + asm_local[abase + j]], F[off] - acc);
+        } else {
+            F[off] -= acc;
+        }
     }
 }
 
@@ -310,9 +382,14 @@ __device__ __forceinline__ void trailing_update_staged(T* F, int fsz, int nc, in
 //     memory, so packed explicitly) →
 //       b0 = pack(B[laneC, laneR], B[laneC + 1, laneR])           (K pair, N = laneR)
 //   C accumulator: identical to every m16n8 shape — see the section header.
+template <bool FuseExtend = false>
 __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, int nc, int uc,
                                                              __half* Lh, __half* Uh,
-                                                             int t, int nt)
+                                                             int t, int nt,
+                                                             float* Fp = nullptr,
+                                                             int pfsz = 0,
+                                                             const int* asm_local = nullptr,
+                                                             int abase = 0)
 {
     const int UCP = ((uc + 15) / 16) * 16;
     const int KP  = ((nc + 7)  / 8)  * 8;
@@ -336,6 +413,17 @@ __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, 
     const int lane  = t & 31;
     const int laneR = lane >> 2;           // 0..7
     const int laneC = (lane & 3) * 2;      // 0,2,4,6
+
+    auto drain = [&](int r, int col, float c) {
+        if (r >= uc || col >= uc) return;
+        const long off = (long)(nc + r) * fsz + (nc + col);
+        if constexpr (FuseExtend) {
+            atomicAdd(&Fp[(long)asm_local[abase + r] * pfsz + asm_local[abase + col]],
+                      F[off] - c);
+        } else {
+            F[off] -= c;
+        }
+    };
 
     // A-reuse hoisted path. Capped at NTJ8_MAX = 8 N-tiles (UCP ≤ 64); the unrolled tj8 loop
     // keeps the per-tile accumulators in named registers for the inline-asm "+f" binding.
@@ -376,14 +464,10 @@ __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, 
             for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
                 if (tj8 >= ntj8) break;
                 const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
-                if (r_top < uc) {
-                    if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c[tj8][0];
-                    if (col1 < uc) F[(long)(nc + r_top) * fsz + (nc + col1)] -= c[tj8][1];
-                }
-                if (r_bot < uc) {
-                    if (col0 < uc) F[(long)(nc + r_bot) * fsz + (nc + col0)] -= c[tj8][2];
-                    if (col1 < uc) F[(long)(nc + r_bot) * fsz + (nc + col1)] -= c[tj8][3];
-                }
+                drain(r_top, col0, c[tj8][0]);
+                drain(r_top, col1, c[tj8][1]);
+                drain(r_bot, col0, c[tj8][2]);
+                drain(r_bot, col1, c[tj8][3]);
             }
         }
         return;
@@ -412,14 +496,10 @@ __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, 
                     : "r"(a0), "r"(a1), "r"(b0));
             }
             const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
-            if (r_top < uc) {
-                if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c0;
-                if (col1 < uc) F[(long)(nc + r_top) * fsz + (nc + col1)] -= c1;
-            }
-            if (r_bot < uc) {
-                if (col0 < uc) F[(long)(nc + r_bot) * fsz + (nc + col0)] -= c2;
-                if (col1 < uc) F[(long)(nc + r_bot) * fsz + (nc + col1)] -= c3;
-            }
+            drain(r_top, col0, c0);
+            drain(r_top, col1, c1);
+            drain(r_bot, col0, c2);
+            drain(r_bot, col1, c3);
         }
     }
 }
@@ -451,9 +531,14 @@ __device__ __forceinline__ void trailing_update_mma_fp16_ptx(float* F, int fsz, 
 // the low 13 bits of the FP32 input automatically, so the explicit round-to-nearest only
 // changes the sign of the rounding error within TF32 precision (within the accuracy budget
 // for the power-grid solve targets).
+template <bool FuseExtend = false>
 __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, int nc, int uc,
                                                               float* Ltf, float* Utf,
-                                                              int t, int nt)
+                                                              int t, int nt,
+                                                              float* Fp = nullptr,
+                                                              int pfsz = 0,
+                                                              const int* asm_local = nullptr,
+                                                              int abase = 0)
 {
     const int UCP = ((uc + 15) / 16) * 16;
     const int KP  = ((nc + 7)  / 8)  * 8;
@@ -482,6 +567,17 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
     const int laneR = lane >> 2;           // 0..7
     const int laneC = (lane & 3) * 2;      // 0,2,4,6
 
+    auto drain = [&](int r, int col, float c) {
+        if (r >= uc || col >= uc) return;
+        const long off = (long)(nc + r) * fsz + (nc + col);
+        if constexpr (FuseExtend) {
+            atomicAdd(&Fp[(long)asm_local[abase + r] * pfsz + asm_local[abase + col]],
+                      F[off] - c);
+        } else {
+            F[off] -= c;
+        }
+    };
+
     // A-reuse hoisted path. Capped at NTJ8_MAX = 8 N-tiles (UCP ≤ 64). The tj8 loop is
     // fully unrolled with an early `break` so the inline-asm operand `c[<const>][.]` binds
     // to dedicated registers; otherwise nvcc would spill the accumulator to local memory
@@ -498,23 +594,36 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
             for (int kc = 0; kc < nks; ++kc) {
                 const float* A_top = &Ltf[(ti * 16 + laneR + 0) * KP + kc * 8 + laneC];
                 const float* A_bot = &Ltf[(ti * 16 + laneR + 8) * KP + kc * 8 + laneC];
+#ifdef CLS_TF32_OZAKI_TC2
+                const Tf32Pair a0 = tf32_ozaki_pair(A_top[0]);
+                const Tf32Pair a1 = tf32_ozaki_pair(A_bot[0]);
+                const Tf32Pair a2 = tf32_ozaki_pair(A_top[1]);
+                const Tf32Pair a3 = tf32_ozaki_pair(A_bot[1]);
+#else
                 const unsigned a0 = __float_as_uint(A_top[0]);
                 const unsigned a1 = __float_as_uint(A_bot[0]);
                 const unsigned a2 = __float_as_uint(A_top[1]);
                 const unsigned a3 = __float_as_uint(A_bot[1]);
+#endif
                 #pragma unroll
                 for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
                     if (tj8 >= ntj8) break;
                     // B-fragment per (kc, tj8): b0 = B[K_even, N=laneR], b1 = B[K_odd, N=laneR].
+#ifdef CLS_TF32_OZAKI_TC2
+                    const Tf32Pair b0 = tf32_ozaki_pair(
+                        Utf[(kc * 8 + laneC + 0) * LDB + tj8 * 8 + laneR]);
+                    const Tf32Pair b1 = tf32_ozaki_pair(
+                        Utf[(kc * 8 + laneC + 1) * LDB + tj8 * 8 + laneR]);
+                    CLS_MMA_TF32_OZAKI2(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
+                                        a0, a1, a2, a3, b0, b1);
+#else
                     const unsigned b0 = __float_as_uint(
                         Utf[(kc * 8 + laneC + 0) * LDB + tj8 * 8 + laneR]);
                     const unsigned b1 = __float_as_uint(
                         Utf[(kc * 8 + laneC + 1) * LDB + tj8 * 8 + laneR]);
-                    asm volatile(
-                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
-                        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
-                        : "+f"(c[tj8][0]), "+f"(c[tj8][1]), "+f"(c[tj8][2]), "+f"(c[tj8][3])
-                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+                    CLS_MMA_TF32_M16N8K8(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
+                                         a0, a1, a2, a3, b0, b1);
+#endif
                 }
             }
             // (c) Drain accumulators straight into F with uc bounds checks.
@@ -525,14 +634,10 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
             for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
                 if (tj8 >= ntj8) break;
                 const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
-                if (r_top < uc) {
-                    if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c[tj8][0];
-                    if (col1 < uc) F[(long)(nc + r_top) * fsz + (nc + col1)] -= c[tj8][1];
-                }
-                if (r_bot < uc) {
-                    if (col0 < uc) F[(long)(nc + r_bot) * fsz + (nc + col0)] -= c[tj8][2];
-                    if (col1 < uc) F[(long)(nc + r_bot) * fsz + (nc + col1)] -= c[tj8][3];
-                }
+                drain(r_top, col0, c[tj8][0]);
+                drain(r_top, col1, c[tj8][1]);
+                drain(r_bot, col0, c[tj8][2]);
+                drain(r_bot, col1, c[tj8][3]);
             }
         }
         return;
@@ -549,6 +654,17 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
             for (int kc = 0; kc < nks; ++kc) {
                 const float* A_top = &Ltf[(ti * 16 + laneR + 0) * KP + kc * 8 + laneC];
                 const float* A_bot = &Ltf[(ti * 16 + laneR + 8) * KP + kc * 8 + laneC];
+#ifdef CLS_TF32_OZAKI_TC2
+                const Tf32Pair a0 = tf32_ozaki_pair(A_top[0]);
+                const Tf32Pair a1 = tf32_ozaki_pair(A_bot[0]);
+                const Tf32Pair a2 = tf32_ozaki_pair(A_top[1]);
+                const Tf32Pair a3 = tf32_ozaki_pair(A_bot[1]);
+                const Tf32Pair b0 = tf32_ozaki_pair(
+                    Utf[(kc * 8 + laneC + 0) * LDB + tj8 * 8 + laneR]);
+                const Tf32Pair b1 = tf32_ozaki_pair(
+                    Utf[(kc * 8 + laneC + 1) * LDB + tj8 * 8 + laneR]);
+                CLS_MMA_TF32_OZAKI2(c0, c1, c2, c3, a0, a1, a2, a3, b0, b1);
+#else
                 const unsigned a0 = __float_as_uint(A_top[0]);
                 const unsigned a1 = __float_as_uint(A_bot[0]);
                 const unsigned a2 = __float_as_uint(A_top[1]);
@@ -557,22 +673,678 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
                     Utf[(kc * 8 + laneC + 0) * LDB + tj8 * 8 + laneR]);
                 const unsigned b1 = __float_as_uint(
                     Utf[(kc * 8 + laneC + 1) * LDB + tj8 * 8 + laneR]);
-                asm volatile(
-                    "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
-                    "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
-                    : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
-                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+                CLS_MMA_TF32_M16N8K8(c0, c1, c2, c3, a0, a1, a2, a3, b0, b1);
+#endif
             }
             const int col0 = tj8 * 8 + laneC;
             const int col1 = col0 + 1;
-            if (r_top < uc) {
-                if (col0 < uc) F[(long)(nc + r_top) * fsz + (nc + col0)] -= c0;
-                if (col1 < uc) F[(long)(nc + r_top) * fsz + (nc + col1)] -= c1;
+            drain(r_top, col0, c0);
+            drain(r_top, col1, c1);
+            drain(r_bot, col0, c2);
+            drain(r_bot, col1, c3);
+        }
+    }
+}
+
+// TF32 PTX trailing that reads L/U directly from a shared-resident front Fs. This is intended
+// for the mid tier: the full front is already in shared memory, so re-staging L/U into padded
+// scratch can cost more than it saves. Out-of-bounds K/M/N lanes are zeroed in registers.
+template <bool FuseExtend = false>
+__device__ __forceinline__ void trailing_update_mma_tf32_direct_shared(float* F, int fsz,
+                                                                        int nc, int uc,
+                                                                        int t, int nt,
+                                                                        float* Fp = nullptr,
+                                                                        int pfsz = 0,
+                                                                        const int* asm_local = nullptr,
+                                                                        int abase = 0)
+{
+    const int UCP = ((uc + 15) / 16) * 16;
+    const int KP  = ((nc + 7)  / 8)  * 8;
+
+    const int ntj16 = UCP / 16;
+    const int ntj8  = UCP / 8;
+    const int nks   = KP  / 8;
+    const int warp  = t >> 5;
+    const int nwarp = nt >> 5;
+    const int lane  = t & 31;
+    const int laneR = lane >> 2;
+    const int laneC = (lane & 3) * 2;
+
+    auto load_l = [&](int r, int k) {
+        return (r < uc && k < nc) ? F[(long)(nc + r) * fsz + k] : 0.0f;
+    };
+    auto load_u = [&](int k, int col) {
+        return (k < nc && col < uc) ? F[(long)k * fsz + (nc + col)] : 0.0f;
+    };
+    auto drain = [&](int r, int col, float c) {
+        if (r >= uc || col >= uc) return;
+        const long off = (long)(nc + r) * fsz + (nc + col);
+        if constexpr (FuseExtend) {
+            atomicAdd(&Fp[(long)asm_local[abase + r] * pfsz + asm_local[abase + col]],
+                      F[off] - c);
+        } else {
+            F[off] -= c;
+        }
+    };
+
+    constexpr int NTJ8_MAX =
+#ifdef CLS_TF32_DIRECT_NTJ8_16
+        16;
+#else
+        8;
+#endif
+    if (ntj8 <= NTJ8_MAX) {
+        for (int ti = warp; ti < ntj16; ti += nwarp) {
+            const int r_top = ti * 16 + laneR;
+            const int r_bot = r_top + 8;
+            float c[NTJ8_MAX][4];
+            #pragma unroll
+            for (int j = 0; j < NTJ8_MAX; ++j) { c[j][0]=c[j][1]=c[j][2]=c[j][3]=0.f; }
+            for (int kc = 0; kc < nks; ++kc) {
+                const int k0 = kc * 8 + laneC;
+                const int k1 = k0 + 1;
+#ifdef CLS_TF32_OZAKI_TC2
+                const Tf32Pair a0 = tf32_ozaki_pair(load_l(r_top, k0));
+                const Tf32Pair a1 = tf32_ozaki_pair(load_l(r_bot, k0));
+                const Tf32Pair a2 = tf32_ozaki_pair(load_l(r_top, k1));
+                const Tf32Pair a3 = tf32_ozaki_pair(load_l(r_bot, k1));
+#else
+                const unsigned a0 = __float_as_uint(load_l(r_top, k0));
+                const unsigned a1 = __float_as_uint(load_l(r_bot, k0));
+                const unsigned a2 = __float_as_uint(load_l(r_top, k1));
+                const unsigned a3 = __float_as_uint(load_l(r_bot, k1));
+#endif
+                #pragma unroll
+                for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                    if (tj8 >= ntj8) break;
+                    const int col = tj8 * 8 + laneR;
+#ifdef CLS_TF32_OZAKI_TC2
+                    const Tf32Pair b0 = tf32_ozaki_pair(load_u(k0, col));
+                    const Tf32Pair b1 = tf32_ozaki_pair(load_u(k1, col));
+                    CLS_MMA_TF32_OZAKI2(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
+                                        a0, a1, a2, a3, b0, b1);
+#else
+                    const unsigned b0 = __float_as_uint(load_u(k0, col));
+                    const unsigned b1 = __float_as_uint(load_u(k1, col));
+                    CLS_MMA_TF32_M16N8K8(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
+                                         a0, a1, a2, a3, b0, b1);
+#endif
+                }
             }
-            if (r_bot < uc) {
-                if (col0 < uc) F[(long)(nc + r_bot) * fsz + (nc + col0)] -= c2;
-                if (col1 < uc) F[(long)(nc + r_bot) * fsz + (nc + col1)] -= c3;
+            #pragma unroll
+            for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                if (tj8 >= ntj8) break;
+                const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
+                drain(r_top, col0, c[tj8][0]);
+                drain(r_top, col1, c[tj8][1]);
+                drain(r_bot, col0, c[tj8][2]);
+                drain(r_bot, col1, c[tj8][3]);
             }
+        }
+        return;
+    }
+
+    for (int ti = warp; ti < ntj16; ti += nwarp) {
+        const int r_top = ti * 16 + laneR;
+        const int r_bot = r_top + 8;
+        for (int tj8 = 0; tj8 < ntj8; ++tj8) {
+            float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
+            for (int kc = 0; kc < nks; ++kc) {
+                const int k0 = kc * 8 + laneC;
+                const int k1 = k0 + 1;
+#ifdef CLS_TF32_OZAKI_TC2
+                const Tf32Pair a0 = tf32_ozaki_pair(load_l(r_top, k0));
+                const Tf32Pair a1 = tf32_ozaki_pair(load_l(r_bot, k0));
+                const Tf32Pair a2 = tf32_ozaki_pair(load_l(r_top, k1));
+                const Tf32Pair a3 = tf32_ozaki_pair(load_l(r_bot, k1));
+                const int col = tj8 * 8 + laneR;
+                const Tf32Pair b0 = tf32_ozaki_pair(load_u(k0, col));
+                const Tf32Pair b1 = tf32_ozaki_pair(load_u(k1, col));
+                CLS_MMA_TF32_OZAKI2(c0, c1, c2, c3, a0, a1, a2, a3, b0, b1);
+#else
+                const unsigned a0 = __float_as_uint(load_l(r_top, k0));
+                const unsigned a1 = __float_as_uint(load_l(r_bot, k0));
+                const unsigned a2 = __float_as_uint(load_l(r_top, k1));
+                const unsigned a3 = __float_as_uint(load_l(r_bot, k1));
+                const int col = tj8 * 8 + laneR;
+                const unsigned b0 = __float_as_uint(load_u(k0, col));
+                const unsigned b1 = __float_as_uint(load_u(k1, col));
+                CLS_MMA_TF32_M16N8K8(c0, c1, c2, c3, a0, a1, a2, a3, b0, b1);
+#endif
+            }
+            const int col0 = tj8 * 8 + laneC;
+            const int col1 = col0 + 1;
+            drain(r_top, col0, c0);
+            drain(r_top, col1, c1);
+            drain(r_bot, col0, c2);
+            drain(r_bot, col1, c3);
+        }
+    }
+}
+
+#if defined(CLS_TF32_OZAKI_TC2) && defined(CLS_TF32_OZAKI_STAGE_DIRECT)
+__device__ __forceinline__ void trailing_update_mma_tf32_direct_shared_staged_ozaki(
+    float* F, int fsz, int nc, int uc, int t, int nt,
+    unsigned* Lh, unsigned* Lt, unsigned* Uh, unsigned* Ut)
+{
+    const int UCP = ((uc + 15) / 16) * 16;
+    const int KP  = ((nc + 7)  / 8)  * 8;
+
+    auto load_l = [&](int r, int k) {
+        return (r < uc && k < nc) ? F[(long)(nc + r) * fsz + k] : 0.0f;
+    };
+    auto load_u = [&](int k, int col) {
+        return (k < nc && col < uc) ? F[(long)k * fsz + (nc + col)] : 0.0f;
+    };
+    for (int e = t; e < UCP * KP; e += nt) {
+        const int r = e / KP;
+        const int k = e % KP;
+        const Tf32Pair v = tf32_ozaki_pair(load_l(r, k));
+        Lh[e] = v.h;
+        Lt[e] = v.t;
+    }
+    for (int e = t; e < KP * UCP; e += nt) {
+        const int k = e / UCP;
+        const int col = e % UCP;
+        const Tf32Pair v = tf32_ozaki_pair(load_u(k, col));
+        Uh[e] = v.h;
+        Ut[e] = v.t;
+    }
+    __syncthreads();
+
+    const int ntj16 = UCP / 16;
+    const int ntj8  = UCP / 8;
+    const int nks   = KP / 8;
+    const int warp  = t >> 5;
+    const int nwarp = nt >> 5;
+    const int lane  = t & 31;
+    const int laneR = lane >> 2;
+    const int laneC = (lane & 3) * 2;
+
+    auto drain = [&](int r, int col, float c) {
+        if (r < uc && col < uc) F[(long)(nc + r) * fsz + (nc + col)] -= c;
+    };
+
+    constexpr int NTJ8_MAX = 8;
+    for (int ti = warp; ti < ntj16; ti += nwarp) {
+        const int r_top = ti * 16 + laneR;
+        const int r_bot = r_top + 8;
+        float c[NTJ8_MAX][4];
+        #pragma unroll
+        for (int j = 0; j < NTJ8_MAX; ++j) { c[j][0]=c[j][1]=c[j][2]=c[j][3]=0.f; }
+        for (int kc = 0; kc < nks; ++kc) {
+            const int k0 = kc * 8 + laneC;
+            const int k1 = k0 + 1;
+            const long a_top0 = (long)r_top * KP + k0;
+            const long a_bot0 = (long)r_bot * KP + k0;
+            const long a_top1 = a_top0 + 1;
+            const long a_bot1 = a_bot0 + 1;
+            const Tf32Pair a0{Lh[a_top0], Lt[a_top0]};
+            const Tf32Pair a1{Lh[a_bot0], Lt[a_bot0]};
+            const Tf32Pair a2{Lh[a_top1], Lt[a_top1]};
+            const Tf32Pair a3{Lh[a_bot1], Lt[a_bot1]};
+            #pragma unroll
+            for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                if (tj8 >= ntj8) break;
+                const int col = tj8 * 8 + laneR;
+                const long b0i = (long)k0 * UCP + col;
+                const long b1i = (long)k1 * UCP + col;
+                const Tf32Pair b0{Uh[b0i], Ut[b0i]};
+                const Tf32Pair b1{Uh[b1i], Ut[b1i]};
+                CLS_MMA_TF32_OZAKI2(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
+                                    a0, a1, a2, a3, b0, b1);
+            }
+        }
+        #pragma unroll
+        for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+            if (tj8 >= ntj8) break;
+            const int col0 = tj8 * 8 + laneC;
+            const int col1 = col0 + 1;
+            drain(r_top, col0, c[tj8][0]);
+            drain(r_top, col1, c[tj8][1]);
+            drain(r_bot, col0, c[tj8][2]);
+            drain(r_bot, col1, c[tj8][3]);
+        }
+    }
+}
+#endif
+
+__device__ __forceinline__ void block_update_mma_tf32_direct_shared(float* F, int fsz,
+                                                                    int row0, int col0,
+                                                                    int dim, int k0, int kb,
+                                                                    int t, int nt)
+{
+    if (dim <= 0 || kb <= 0) return;
+    const int DP = ((dim + 15) / 16) * 16;
+    const int KP = ((kb + 7) / 8) * 8;
+    const int ntj16 = DP / 16;
+    const int ntj8  = DP / 8;
+    const int nks   = KP / 8;
+    const int warp  = t >> 5;
+    const int nwarp = nt >> 5;
+    const int lane  = t & 31;
+    const int laneR = lane >> 2;
+    const int laneC = (lane & 3) * 2;
+
+    auto load_l = [&](int r, int k) {
+        return (r < dim && k < kb) ? F[(long)(row0 + r) * fsz + (k0 + k)] : 0.0f;
+    };
+    auto load_u = [&](int k, int col) {
+        return (k < kb && col < dim) ? F[(long)(k0 + k) * fsz + (col0 + col)] : 0.0f;
+    };
+    auto drain = [&](int r, int col, float c) {
+        if (r < dim && col < dim) F[(long)(row0 + r) * fsz + (col0 + col)] -= c;
+    };
+
+    constexpr int NTJ8_MAX = 16;
+    if (ntj8 <= NTJ8_MAX) {
+        for (int ti = warp; ti < ntj16; ti += nwarp) {
+            const int r_top = ti * 16 + laneR;
+            const int r_bot = r_top + 8;
+            float c[NTJ8_MAX][4];
+            #pragma unroll
+            for (int j = 0; j < NTJ8_MAX; ++j) { c[j][0]=c[j][1]=c[j][2]=c[j][3]=0.f; }
+            for (int kc = 0; kc < nks; ++kc) {
+                const int k = kc * 8 + laneC;
+#ifdef CLS_TF32_OZAKI_TC2
+                const Tf32Pair a0 = tf32_ozaki_pair(load_l(r_top, k + 0));
+                const Tf32Pair a1 = tf32_ozaki_pair(load_l(r_bot, k + 0));
+                const Tf32Pair a2 = tf32_ozaki_pair(load_l(r_top, k + 1));
+                const Tf32Pair a3 = tf32_ozaki_pair(load_l(r_bot, k + 1));
+#else
+                const unsigned a0 = __float_as_uint(load_l(r_top, k + 0));
+                const unsigned a1 = __float_as_uint(load_l(r_bot, k + 0));
+                const unsigned a2 = __float_as_uint(load_l(r_top, k + 1));
+                const unsigned a3 = __float_as_uint(load_l(r_bot, k + 1));
+#endif
+                #pragma unroll
+                for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                    if (tj8 >= ntj8) break;
+                    const int col = tj8 * 8 + laneR;
+#ifdef CLS_TF32_OZAKI_TC2
+                    const Tf32Pair b0 = tf32_ozaki_pair(load_u(k + 0, col));
+                    const Tf32Pair b1 = tf32_ozaki_pair(load_u(k + 1, col));
+                    CLS_MMA_TF32_OZAKI2(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
+                                        a0, a1, a2, a3, b0, b1);
+#else
+                    const unsigned b0 = __float_as_uint(load_u(k + 0, col));
+                    const unsigned b1 = __float_as_uint(load_u(k + 1, col));
+                    CLS_MMA_TF32_M16N8K8(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
+                                         a0, a1, a2, a3, b0, b1);
+#endif
+                }
+            }
+            #pragma unroll
+            for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                if (tj8 >= ntj8) break;
+                const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
+                drain(r_top, col0, c[tj8][0]);
+                drain(r_top, col1, c[tj8][1]);
+                drain(r_bot, col0, c[tj8][2]);
+                drain(r_bot, col1, c[tj8][3]);
+            }
+        }
+        return;
+    }
+
+    for (int ti = warp; ti < ntj16; ti += nwarp) {
+        const int r_top = ti * 16 + laneR;
+        const int r_bot = r_top + 8;
+        for (int tj8 = 0; tj8 < ntj8; ++tj8) {
+            float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
+            for (int kc = 0; kc < nks; ++kc) {
+                const int k = kc * 8 + laneC;
+#ifdef CLS_TF32_OZAKI_TC2
+                const Tf32Pair a0 = tf32_ozaki_pair(load_l(r_top, k + 0));
+                const Tf32Pair a1 = tf32_ozaki_pair(load_l(r_bot, k + 0));
+                const Tf32Pair a2 = tf32_ozaki_pair(load_l(r_top, k + 1));
+                const Tf32Pair a3 = tf32_ozaki_pair(load_l(r_bot, k + 1));
+                const int col = tj8 * 8 + laneR;
+                const Tf32Pair b0 = tf32_ozaki_pair(load_u(k + 0, col));
+                const Tf32Pair b1 = tf32_ozaki_pair(load_u(k + 1, col));
+                CLS_MMA_TF32_OZAKI2(c0, c1, c2, c3, a0, a1, a2, a3, b0, b1);
+#else
+                const unsigned a0 = __float_as_uint(load_l(r_top, k + 0));
+                const unsigned a1 = __float_as_uint(load_l(r_bot, k + 0));
+                const unsigned a2 = __float_as_uint(load_l(r_top, k + 1));
+                const unsigned a3 = __float_as_uint(load_l(r_bot, k + 1));
+                const int col = tj8 * 8 + laneR;
+                const unsigned b0 = __float_as_uint(load_u(k + 0, col));
+                const unsigned b1 = __float_as_uint(load_u(k + 1, col));
+                CLS_MMA_TF32_M16N8K8(c0, c1, c2, c3, a0, a1, a2, a3, b0, b1);
+#endif
+            }
+            const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
+            drain(r_top, col0, c0);
+            drain(r_top, col1, c1);
+            drain(r_bot, col0, c2);
+            drain(r_bot, col1, c3);
+        }
+    }
+}
+
+__device__ __forceinline__ unsigned pack_f16x2(float lo, float hi)
+{
+    const __half2 h = __halves2half2(__float2half(lo), __float2half(hi));
+    return *reinterpret_cast<const unsigned*>(&h);
+}
+
+__device__ __forceinline__ void block_update_mma_fp16_direct_shared(float* F, int fsz,
+                                                                    int row0, int col0,
+                                                                    int dim, int k0, int kb,
+                                                                    int t, int nt)
+{
+    if (dim <= 0 || kb <= 0) return;
+    const int DP = ((dim + 15) / 16) * 16;
+    const int KP = ((kb + 7) / 8) * 8;
+    const int ntj16 = DP / 16;
+    const int ntj8  = DP / 8;
+    const int nks   = KP / 8;
+    const int warp  = t >> 5;
+    const int nwarp = nt >> 5;
+    const int lane  = t & 31;
+    const int laneR = lane >> 2;
+    const int laneC = (lane & 3) * 2;
+
+    auto load_l = [&](int r, int k) {
+        return (r < dim && k < kb) ? F[(long)(row0 + r) * fsz + (k0 + k)] : 0.0f;
+    };
+    auto load_u = [&](int k, int col) {
+        return (k < kb && col < dim) ? F[(long)(k0 + k) * fsz + (col0 + col)] : 0.0f;
+    };
+    auto drain = [&](int r, int col, float c) {
+        if (r < dim && col < dim) F[(long)(row0 + r) * fsz + (col0 + col)] -= c;
+    };
+
+    constexpr int NTJ8_MAX = 16;
+    if (ntj8 <= NTJ8_MAX) {
+        for (int ti = warp; ti < ntj16; ti += nwarp) {
+            const int r_top = ti * 16 + laneR;
+            const int r_bot = r_top + 8;
+            float c[NTJ8_MAX][4];
+            #pragma unroll
+            for (int j = 0; j < NTJ8_MAX; ++j) { c[j][0]=c[j][1]=c[j][2]=c[j][3]=0.f; }
+            for (int kc = 0; kc < nks; ++kc) {
+                const int k = kc * 8 + laneC;
+                const unsigned a0 = pack_f16x2(load_l(r_top, k + 0), load_l(r_top, k + 1));
+                const unsigned a1 = pack_f16x2(load_l(r_bot, k + 0), load_l(r_bot, k + 1));
+                #pragma unroll
+                for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                    if (tj8 >= ntj8) break;
+                    const int col = tj8 * 8 + laneR;
+                    const unsigned b0 = pack_f16x2(load_u(k + 0, col), load_u(k + 1, col));
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+                        "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};\n"
+                        : "+f"(c[tj8][0]), "+f"(c[tj8][1]), "+f"(c[tj8][2]), "+f"(c[tj8][3])
+                        : "r"(a0), "r"(a1), "r"(b0));
+                }
+            }
+            #pragma unroll
+            for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                if (tj8 >= ntj8) break;
+                const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
+                drain(r_top, col0, c[tj8][0]);
+                drain(r_top, col1, c[tj8][1]);
+                drain(r_bot, col0, c[tj8][2]);
+                drain(r_bot, col1, c[tj8][3]);
+            }
+        }
+        return;
+    }
+
+    for (int ti = warp; ti < ntj16; ti += nwarp) {
+        const int r_top = ti * 16 + laneR;
+        const int r_bot = r_top + 8;
+        for (int tj8 = 0; tj8 < ntj8; ++tj8) {
+            float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
+            for (int kc = 0; kc < nks; ++kc) {
+                const int k = kc * 8 + laneC;
+                const unsigned a0 = pack_f16x2(load_l(r_top, k + 0), load_l(r_top, k + 1));
+                const unsigned a1 = pack_f16x2(load_l(r_bot, k + 0), load_l(r_bot, k + 1));
+                const int col = tj8 * 8 + laneR;
+                const unsigned b0 = pack_f16x2(load_u(k + 0, col), load_u(k + 1, col));
+                asm volatile(
+                    "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+                    "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};\n"
+                    : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
+                    : "r"(a0), "r"(a1), "r"(b0));
+            }
+            const int col0 = tj8 * 8 + laneC, col1 = col0 + 1;
+            drain(r_top, col0, c0);
+            drain(r_top, col1, c1);
+            drain(r_bot, col0, c2);
+            drain(r_bot, col1, c3);
+        }
+    }
+}
+
+__device__ __forceinline__ void factorize_front_blocked_tf32(float* F, int fsz, int nc,
+                                                             int t, int nt, int* sing)
+{
+#ifdef CLS_TF32_BLOCKED_BK4
+    constexpr int BK = 4;
+#else
+    constexpr int BK = 8;
+#endif
+    for (int k0 = 0; k0 < nc; k0 += BK) {
+        const int kb = (k0 + BK <= nc) ? BK : (nc - k0);
+        const int next = k0 + kb;
+
+        // Factor the current diagonal block and L panel below it. Only the current block's
+        // panel columns are updated here; the right-looking TC update below handles the rest.
+        for (int kk = 0; kk < kb; ++kk) {
+            const int k = k0 + kk;
+            float piv = F[(long)k * fsz + k];
+            if (piv == 0.0f) { if (t == 0) *sing = 1; piv = 1.0f; }
+            const float inv_piv = 1.0f / piv;
+            for (int i = k + 1 + t; i < fsz; i += nt) {
+                const float lik = F[(long)i * fsz + k] * inv_piv;
+                F[(long)i * fsz + k] = lik;
+                for (int jj = k + 1; jj < next; ++jj) {
+                    F[(long)i * fsz + jj] -= lik * F[(long)k * fsz + jj];
+                }
+            }
+            __syncthreads();
+        }
+
+#ifdef CLS_TF32_COLUMN_USOLVE
+        // Solve the block row U column-by-column. For a fixed column, the rows in this pivot
+        // block are a tiny triangular solve and can stay on one thread; this removes the
+        // per-row block barrier in the classic form below.
+        for (int j = next + t; j < fsz; j += nt) {
+            for (int kk = 0; kk < kb; ++kk) {
+                const int row = k0 + kk;
+                float v = F[(long)row * fsz + j];
+                for (int i = k0; i < row; ++i) {
+                    v -= F[(long)row * fsz + i] * F[(long)i * fsz + j];
+                }
+                F[(long)row * fsz + j] = v;
+            }
+        }
+        __syncthreads();
+#else
+        // Solve the block row U over all remaining columns, including both the rest of the
+        // panel and the contribution block.
+        for (int kk = 0; kk < kb; ++kk) {
+            const int row = k0 + kk;
+            for (int j = next + t; j < fsz; j += nt) {
+                float v = F[(long)row * fsz + j];
+                for (int i = k0; i < row; ++i) v -= F[(long)row * fsz + i] * F[(long)i * fsz + j];
+                F[(long)row * fsz + j] = v;
+            }
+            __syncthreads();
+        }
+#endif
+
+        const int dim = fsz - next;
+        if (dim > 0) {
+            block_update_mma_tf32_direct_shared(F, fsz, next, next, dim, k0, kb, t, nt);
+            __syncthreads();
+        }
+    }
+}
+
+__device__ __forceinline__ void factorize_front_blocked_fp16(float* F, int fsz, int nc,
+                                                             int t, int nt, int* sing)
+{
+    constexpr int BK = 8;
+    for (int k0 = 0; k0 < nc; k0 += BK) {
+        const int kb = (k0 + BK <= nc) ? BK : (nc - k0);
+        const int next = k0 + kb;
+
+        for (int kk = 0; kk < kb; ++kk) {
+            const int k = k0 + kk;
+            float piv = F[(long)k * fsz + k];
+            if (piv == 0.0f) { if (t == 0) *sing = 1; piv = 1.0f; }
+            const float inv_piv = 1.0f / piv;
+            for (int i = k + 1 + t; i < fsz; i += nt) {
+                const float lik = F[(long)i * fsz + k] * inv_piv;
+                F[(long)i * fsz + k] = lik;
+                for (int jj = k + 1; jj < next; ++jj) {
+                    F[(long)i * fsz + jj] -= lik * F[(long)k * fsz + jj];
+                }
+            }
+            __syncthreads();
+        }
+
+        for (int kk = 0; kk < kb; ++kk) {
+            const int row = k0 + kk;
+            for (int j = next + t; j < fsz; j += nt) {
+                float v = F[(long)row * fsz + j];
+                for (int i = k0; i < row; ++i) v -= F[(long)row * fsz + i] * F[(long)i * fsz + j];
+                F[(long)row * fsz + j] = v;
+            }
+            __syncthreads();
+        }
+
+        const int dim = fsz - next;
+        if (dim > 0) {
+            block_update_mma_fp16_direct_shared(F, fsz, next, next, dim, k0, kb, t, nt);
+            __syncthreads();
+        }
+    }
+}
+
+__device__ __forceinline__ void lu_panel_factor_warp(float* F, int fsz, int nc, int sl,
+                                                     unsigned mask, int* sing)
+{
+    for (int k = 0; k < nc; ++k) {
+        float piv = F[(long)k * fsz + k];
+        if (piv == 0.0f) { if (sl == 0) *sing = 1; piv = 1.0f; }
+        const float inv_piv = 1.0f / piv;
+        for (int i = k + 1 + sl; i < fsz; i += kWarpSize) {
+            F[(long)i * fsz + k] *= inv_piv;
+        }
+        __syncwarp(mask);
+        const int pc = nc - 1 - k;
+        for (int e = sl; e < (fsz - k - 1) * pc; e += kWarpSize) {
+            const int ii = k + 1 + e / pc;
+            const int jj = k + 1 + e % pc;
+            F[(long)ii * fsz + jj] -= F[(long)ii * fsz + k] * F[(long)k * fsz + jj];
+        }
+        if (pc > 0) __syncwarp(mask);
+    }
+}
+
+__device__ __forceinline__ void u_panel_solve_warp(float* F, int fsz, int nc, int uc, int sl,
+                                                   unsigned mask)
+{
+    for (int k = 1; k < nc; ++k) {
+        for (int e = sl; e < uc; e += kWarpSize) {
+            const int jj = nc + e;
+            float v = F[(long)k * fsz + jj];
+            for (int i = 0; i < k; ++i) v -= F[(long)k * fsz + i] * F[(long)i * fsz + jj];
+            F[(long)k * fsz + jj] = v;
+        }
+        __syncwarp(mask);
+    }
+}
+
+__device__ __forceinline__ void u_panel_solve_warp_column_owned(float* F, int fsz, int nc,
+                                                                int uc, int sl, unsigned mask)
+{
+    for (int e = sl; e < uc; e += kWarpSize) {
+        const int jj = nc + e;
+        for (int k = 1; k < nc; ++k) {
+            float v = F[(long)k * fsz + jj];
+            for (int i = 0; i < k; ++i) {
+                v -= F[(long)k * fsz + i] * F[(long)i * fsz + jj];
+            }
+            F[(long)k * fsz + jj] = v;
+        }
+    }
+    __syncwarp(mask);
+}
+
+__device__ __forceinline__ void trailing_update_mma_tf32_warp_shared(float* F, int fsz, int nc,
+                                                                     int uc, int lane)
+{
+    const int UCP = ((uc + 15) / 16) * 16;
+    const int KP = ((nc + 7) / 8) * 8;
+    const int ntj16 = UCP / 16;
+    const int ntj8 = UCP / 8;
+    const int nks = KP / 8;
+    const int laneR = lane >> 2;
+    const int laneC = (lane & 3) * 2;
+
+    auto load_l = [&](int r, int k) {
+        return (r < uc && k < nc) ? F[(long)(nc + r) * fsz + k] : 0.0f;
+    };
+    auto load_u = [&](int k, int col) {
+        return (k < nc && col < uc) ? F[(long)k * fsz + (nc + col)] : 0.0f;
+    };
+    auto drain = [&](int r, int col, float c) {
+        if (r < uc && col < uc) F[(long)(nc + r) * fsz + (nc + col)] -= c;
+    };
+
+    constexpr int NTJ8_MAX = 4;
+    for (int ti = 0; ti < ntj16; ++ti) {
+        const int r_top = ti * 16 + laneR;
+        const int r_bot = r_top + 8;
+        float c[NTJ8_MAX][4];
+        #pragma unroll
+        for (int j = 0; j < NTJ8_MAX; ++j) { c[j][0]=c[j][1]=c[j][2]=c[j][3]=0.f; }
+        for (int kc = 0; kc < nks; ++kc) {
+            const int k0 = kc * 8 + laneC;
+            const int k1 = k0 + 1;
+#ifdef CLS_TF32_OZAKI_TC2
+            const Tf32Pair a0 = tf32_ozaki_pair(load_l(r_top, k0));
+            const Tf32Pair a1 = tf32_ozaki_pair(load_l(r_bot, k0));
+            const Tf32Pair a2 = tf32_ozaki_pair(load_l(r_top, k1));
+            const Tf32Pair a3 = tf32_ozaki_pair(load_l(r_bot, k1));
+#else
+            const unsigned a0 = __float_as_uint(load_l(r_top, k0));
+            const unsigned a1 = __float_as_uint(load_l(r_bot, k0));
+            const unsigned a2 = __float_as_uint(load_l(r_top, k1));
+            const unsigned a3 = __float_as_uint(load_l(r_bot, k1));
+#endif
+            #pragma unroll
+            for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+                if (tj8 >= ntj8) break;
+                const int col = tj8 * 8 + laneR;
+#ifdef CLS_TF32_OZAKI_TC2
+                const Tf32Pair b0 = tf32_ozaki_pair(load_u(k0, col));
+                const Tf32Pair b1 = tf32_ozaki_pair(load_u(k1, col));
+                CLS_MMA_TF32_OZAKI2(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
+                                    a0, a1, a2, a3, b0, b1);
+#else
+                const unsigned b0 = __float_as_uint(load_u(k0, col));
+                const unsigned b1 = __float_as_uint(load_u(k1, col));
+                CLS_MMA_TF32_M16N8K8(c[tj8][0], c[tj8][1], c[tj8][2], c[tj8][3],
+                                     a0, a1, a2, a3, b0, b1);
+#endif
+            }
+        }
+        #pragma unroll
+        for (int tj8 = 0; tj8 < NTJ8_MAX; ++tj8) {
+            if (tj8 >= ntj8) break;
+            const int col0 = tj8 * 8 + laneC;
+            const int col1 = col0 + 1;
+            drain(r_top, col0, c[tj8][0]);
+            drain(r_top, col1, c[tj8][1]);
+            drain(r_bot, col0, c[tj8][2]);
+            drain(r_bot, col1, c[tj8][3]);
         }
     }
 }
@@ -585,10 +1357,22 @@ __device__ __forceinline__ void trailing_update_mma_tf32_ptx(float* F, int fsz, 
 // `asm_local[abase + 0..uc)` maps each of the uc CB rows / cols to its row / col index in the
 // parent front (computed by analyze). atomicAdd is required because sibling fronts can scatter
 // into the same parent entries concurrently.
+__device__ __forceinline__ bool extend_add_allowed_for_uc(int uc)
+{
+#ifdef CLS_EXTEND_SKIP_UC_LE
+    if (uc <= CLS_EXTEND_SKIP_UC_LE) return false;
+#endif
+#ifdef CLS_EXTEND_SKIP_UC_GT
+    if (uc > CLS_EXTEND_SKIP_UC_GT) return false;
+#endif
+    return true;
+}
+
 template <typename DstT, typename SrcT>
 __device__ __forceinline__ void extend_add(DstT* Fp, int pfsz, const SrcT* Fsrc, int fsz, int nc,
                                            int uc, const int* asm_local, int abase, int t, int nt)
 {
+    if (!extend_add_allowed_for_uc(uc)) return;
     for (int e = t; e < uc * uc; e += nt) {
         const int a = e / uc, b = e % uc;
         atomicAdd(&Fp[(long)asm_local[abase + a] * pfsz + asm_local[abase + b]],

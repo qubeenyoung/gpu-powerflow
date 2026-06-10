@@ -26,11 +26,13 @@ namespace custom_linear_solver::plan {
 // Pipeline inputs (subset of SolverConfig — keeps plan/ independent of solver.hpp).
 struct PlanBuildOptions {
     bool use_parallel_nested_dissection = true;
+    int metis_seed = 42;
     int panel_cap = 8;
     bool float_front = false;  // true if the factor/solve front is float (FP32 / FP16 / TF32);
                                // controls whether float scratch arenas get allocated.
     // Debug dumps (off by default; surfaced through SolverConfig).
-    std::string dump_fronts_csv_path;  // non-empty → write (q,p,fsz,nc,uc,level) CSV here
+    // non-empty -> write q,p,fsz,nc,uc,level plus parent/extend metadata CSV here
+    std::string dump_fronts_csv_path;
     bool emit_analyze_info = false;    // print front-size and subtree summary to stderr
 };
 

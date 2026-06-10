@@ -57,10 +57,9 @@ __global__ void build_a_pos_device(int n, const int* __restrict__ Ap,
     }
 }
 
-// Determine whether every numerical scatter destination in `a_pos` is unique. When true,
-// `scatter_values_unique` can use plain stores instead of atomicAdd. Optionally emits
-// front fill / coverage statistics. Returns false on cudaMemcpy failure so dispatch falls
-// back to the safe atomicAdd path.
+// Determine whether every numerical scatter destination in `a_pos` is unique. This is kept as
+// analyze-time metadata/diagnostics; the active scatter path still uses atomicAdd. Optionally emits
+// front fill / coverage statistics. Returns false on cudaMemcpy failure.
 static bool determine_a_pos_unique(const int* d_a_pos, int nnz_a, long front_total,
                                    bool emit_info)
 {
@@ -110,12 +109,472 @@ static bool determine_a_pos_unique(const int* d_a_pos, int nnz_a, long front_tot
     return unique;
 }
 
+#if defined(CLS_SIBLING_PANEL_AMALGAMATE) || defined(CLS_PANEL_CHAIN_AMALGAMATE) || \
+    defined(CLS_VALIDATED_RUN_PANEL_AMALGAMATE) || defined(CLS_CLOSURE_PANEL_AMALGAMATE) || \
+    defined(CLS_TC_CLOSURE_PANEL_AMALGAMATE)
+static bool valid_multifrontal_symbolic(const symbolic::MultifrontalSymbolic& mf)
+{
+    for (int p = 0; p < mf.num_panels; ++p) {
+        const int par = mf.panel_parent[p];
+        if (par >= 0 && par <= p) {
+            return false;
+        }
+    }
+    for (int idx : mf.asm_idx) {
+        if (idx < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+#if defined(CLS_CLOSURE_PANEL_AMALGAMATE) || defined(CLS_TC_CLOSURE_PANEL_AMALGAMATE)
+static std::vector<int> merged_panel_front_rows(const std::vector<int>& Lp,
+                                                const std::vector<int>& Li, int first_col,
+                                                int ncols)
+{
+    std::vector<int> rows;
+    for (int j = first_col; j < first_col + ncols; ++j) {
+        for (int q = Lp[j]; q < Lp[j + 1]; ++q) {
+            rows.push_back(Li[q]);
+        }
+    }
+    std::sort(rows.begin(), rows.end());
+    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    return rows;
+}
+
+static bool parent_front_contains_row(const symbolic::PanelPartition& base,
+                                      const symbolic::MultifrontalSymbolic& base_mf,
+                                      int parent_panel, int row)
+{
+    const int pfirst = base.first[parent_panel];
+    const int plast = pfirst + base.ncols[parent_panel];
+    if (row >= pfirst && row < plast) {
+        return true;
+    }
+    const auto begin = base_mf.front_rows.begin() + base_mf.front_ptr[parent_panel];
+    const auto end = base_mf.front_rows.begin() + base_mf.front_ptr[parent_panel + 1];
+    return std::binary_search(begin, end, row);
+}
+
+static bool closure_group_valid(const symbolic::PanelPartition& base,
+                                const symbolic::MultifrontalSymbolic& base_mf,
+                                const std::vector<int>& Lp, const std::vector<int>& Li,
+                                int start_panel, int end_panel)
+{
+    const int first_col = base.first[start_panel];
+    const int ncols = base.first[end_panel] + base.ncols[end_panel] - first_col;
+    const std::vector<int> rows = merged_panel_front_rows(Lp, Li, first_col, ncols);
+    if (static_cast<int>(rows.size()) <= ncols) {
+        return true;
+    }
+
+    const int parent_col = rows[ncols];
+    const int parent_panel = base.panel_of[parent_col];
+    if (parent_panel <= end_panel) {
+        return false;
+    }
+
+    for (int k = ncols; k < static_cast<int>(rows.size()); ++k) {
+        if (!parent_front_contains_row(base, base_mf, parent_panel, rows[k])) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+#ifdef CLS_SIBLING_PANEL_AMALGAMATE
+#ifndef CLS_SIBLING_PANEL_AMALGAMATE_CAP
+#define CLS_SIBLING_PANEL_AMALGAMATE_CAP 8
+#endif
+
+static symbolic::PanelPartition sibling_amalgamate_panels(
+    int n, const std::vector<int>& Lp, const std::vector<int>& Li,
+    const symbolic::PanelPartition& base, int effective_panel_cap, bool emit_info)
+{
+    const int P = base.num_panels;
+    if (P <= 1) {
+        return base;
+    }
+    const symbolic::MultifrontalSymbolic base_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, base);
+    if (!valid_multifrontal_symbolic(base_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr, "[analyze] sibling-amalgamate: base symbolic invalid, skip\n");
+        }
+        return base;
+    }
+
+    int cap = CLS_SIBLING_PANEL_AMALGAMATE_CAP;
+    if (cap < 1) cap = 1;
+    if (effective_panel_cap > 0 && cap > effective_panel_cap) cap = effective_panel_cap;
+
+    symbolic::PanelPartition out;
+    out.panel_of.assign(n < 0 ? 0 : n, -1);
+    for (int p = 0; p < P;) {
+        const int start_panel = p;
+        const int common_parent = base_mf.panel_parent[p];
+        int ncols = base.ncols[p];
+        int width = base.width[p];
+        ++p;
+        while (p < P && common_parent >= 0 && base_mf.panel_parent[p] == common_parent &&
+               common_parent > p && ncols + base.ncols[p] <= cap) {
+            ncols += base.ncols[p];
+            width = std::max(width, base.width[p]);
+            ++p;
+        }
+
+        const int id = out.num_panels++;
+        const int first = base.first[start_panel];
+        out.first.push_back(first);
+        out.ncols.push_back(ncols);
+        out.width.push_back(width);
+        out.padded_fill += static_cast<long>(ncols) * width;
+        for (int c = first; c < first + ncols; ++c) {
+            out.panel_of[c] = id;
+        }
+    }
+
+    const symbolic::MultifrontalSymbolic out_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, out);
+    if (!valid_multifrontal_symbolic(out_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr,
+                         "[analyze] sibling-amalgamate: candidate invalid, fallback base\n");
+        }
+        return base;
+    }
+    if (emit_info) {
+        std::fprintf(stderr,
+                     "[analyze] sibling-amalgamate: panels %d -> %d, padded_fill %.3fx\n",
+                     P, out.num_panels,
+                     base.padded_fill > 0
+                         ? static_cast<double>(out.padded_fill) / base.padded_fill
+                         : 1.0);
+    }
+    return out;
+}
+#endif  // CLS_SIBLING_PANEL_AMALGAMATE
+
+#ifdef CLS_PANEL_CHAIN_AMALGAMATE
+static symbolic::PanelPartition panel_chain_amalgamate_panels(
+    int n, const std::vector<int>& Lp, const std::vector<int>& Li,
+    const symbolic::PanelPartition& base, int effective_panel_cap, bool emit_info)
+{
+    const int P = base.num_panels;
+    if (P <= 1) {
+        return base;
+    }
+    const symbolic::MultifrontalSymbolic base_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, base);
+    if (!valid_multifrontal_symbolic(base_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr, "[analyze] panel-chain-amalgamate: base symbolic invalid, skip\n");
+        }
+        return base;
+    }
+
+    int cap = CLS_PANEL_CHAIN_AMALGAMATE_CAP;
+    if (cap < 1) cap = 1;
+    if (effective_panel_cap > 0 && cap > effective_panel_cap) cap = effective_panel_cap;
+
+    symbolic::PanelPartition out;
+    out.panel_of.assign(n < 0 ? 0 : n, -1);
+    for (int p = 0; p < P;) {
+        const int start_panel = p;
+        int ncols = base.ncols[p];
+        int width = base.width[p];
+        ++p;
+        while (p < P && base_mf.panel_parent[p - 1] == p &&
+               ncols + base.ncols[p] <= cap) {
+            ncols += base.ncols[p];
+            width = std::max(width, base.width[p]);
+            ++p;
+        }
+
+        const int id = out.num_panels++;
+        const int first = base.first[start_panel];
+        out.first.push_back(first);
+        out.ncols.push_back(ncols);
+        out.width.push_back(width);
+        out.padded_fill += static_cast<long>(ncols) * width;
+        for (int c = first; c < first + ncols; ++c) {
+            out.panel_of[c] = id;
+        }
+    }
+
+    const symbolic::MultifrontalSymbolic out_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, out);
+    if (!valid_multifrontal_symbolic(out_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr,
+                         "[analyze] panel-chain-amalgamate: candidate invalid, fallback base\n");
+        }
+        return base;
+    }
+    if (emit_info) {
+        std::fprintf(stderr,
+                     "[analyze] panel-chain-amalgamate: panels %d -> %d, padded_fill %.3fx\n",
+                     P, out.num_panels,
+                     base.padded_fill > 0
+                         ? static_cast<double>(out.padded_fill) / base.padded_fill
+                         : 1.0);
+    }
+    return out;
+}
+#endif  // CLS_PANEL_CHAIN_AMALGAMATE
+
+#ifdef CLS_VALIDATED_RUN_PANEL_AMALGAMATE
+static symbolic::PanelPartition validated_run_amalgamate_panels(
+    int n, const std::vector<int>& Lp, const std::vector<int>& Li,
+    const symbolic::PanelPartition& base, int effective_panel_cap, bool emit_info)
+{
+    const int P = base.num_panels;
+    if (P <= 1) {
+        return base;
+    }
+    const symbolic::MultifrontalSymbolic base_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, base);
+    if (!valid_multifrontal_symbolic(base_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr, "[analyze] validated-run-amalgamate: base symbolic invalid, skip\n");
+        }
+        return base;
+    }
+
+    int cap = CLS_VALIDATED_RUN_PANEL_AMALGAMATE_CAP;
+    if (cap < 1) cap = 1;
+    if (effective_panel_cap > 0 && cap > effective_panel_cap) cap = effective_panel_cap;
+
+    symbolic::PanelPartition out;
+    out.panel_of.assign(n < 0 ? 0 : n, -1);
+    for (int p = 0; p < P;) {
+        const int start_panel = p;
+        int ncols = base.ncols[p];
+        int width = base.width[p];
+        ++p;
+        while (p < P && ncols + base.ncols[p] <= cap) {
+            ncols += base.ncols[p];
+            width = std::max(width, base.width[p]);
+            ++p;
+        }
+
+        const int id = out.num_panels++;
+        const int first = base.first[start_panel];
+        out.first.push_back(first);
+        out.ncols.push_back(ncols);
+        out.width.push_back(width);
+        out.padded_fill += static_cast<long>(ncols) * width;
+        for (int c = first; c < first + ncols; ++c) {
+            out.panel_of[c] = id;
+        }
+    }
+
+    const symbolic::MultifrontalSymbolic out_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, out);
+    if (!valid_multifrontal_symbolic(out_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr,
+                         "[analyze] validated-run-amalgamate: candidate invalid, fallback base\n");
+        }
+        return base;
+    }
+    if (emit_info) {
+        std::fprintf(stderr,
+                     "[analyze] validated-run-amalgamate: panels %d -> %d, padded_fill %.3fx\n",
+                     P, out.num_panels,
+                     base.padded_fill > 0
+                         ? static_cast<double>(out.padded_fill) / base.padded_fill
+                         : 1.0);
+    }
+    return out;
+}
+#endif  // CLS_VALIDATED_RUN_PANEL_AMALGAMATE
+
+#ifdef CLS_CLOSURE_PANEL_AMALGAMATE
+static symbolic::PanelPartition closure_amalgamate_panels(
+    int n, const std::vector<int>& Lp, const std::vector<int>& Li,
+    const symbolic::PanelPartition& base, int effective_panel_cap, bool emit_info)
+{
+    const int P = base.num_panels;
+    if (P <= 1) {
+        return base;
+    }
+    const symbolic::MultifrontalSymbolic base_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, base);
+    if (!valid_multifrontal_symbolic(base_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr, "[analyze] closure-amalgamate: base symbolic invalid, skip\n");
+        }
+        return base;
+    }
+
+    int cap = CLS_CLOSURE_PANEL_AMALGAMATE_CAP;
+    if (cap < 1) cap = 1;
+    if (effective_panel_cap > 0 && cap > effective_panel_cap) cap = effective_panel_cap;
+
+    int accepted_merges = 0;
+    int rejected_merges = 0;
+    symbolic::PanelPartition out;
+    out.panel_of.assign(n < 0 ? 0 : n, -1);
+    for (int p = 0; p < P;) {
+        const int start_panel = p;
+        int end_panel = p;
+        int ncols = base.ncols[p];
+        int width = base.width[p];
+        while (end_panel + 1 < P &&
+               ncols + base.ncols[end_panel + 1] <= cap) {
+            const int candidate_end = end_panel + 1;
+            if (!closure_group_valid(base, base_mf, Lp, Li, start_panel, candidate_end)) {
+                ++rejected_merges;
+                break;
+            }
+            end_panel = candidate_end;
+            ncols += base.ncols[end_panel];
+            width = std::max(width, base.width[end_panel]);
+            ++accepted_merges;
+        }
+
+        const int id = out.num_panels++;
+        const int first = base.first[start_panel];
+        out.first.push_back(first);
+        out.ncols.push_back(ncols);
+        out.width.push_back(width);
+        out.padded_fill += static_cast<long>(ncols) * width;
+        for (int c = first; c < first + ncols; ++c) {
+            out.panel_of[c] = id;
+        }
+        p = end_panel + 1;
+    }
+
+    const symbolic::MultifrontalSymbolic out_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, out);
+    if (!valid_multifrontal_symbolic(out_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr,
+                         "[analyze] closure-amalgamate: candidate invalid, fallback base\n");
+        }
+        return base;
+    }
+    if (emit_info) {
+        std::fprintf(stderr,
+                     "[analyze] closure-amalgamate: panels %d -> %d, accepted=%d rejected=%d, padded_fill %.3fx\n",
+                     P, out.num_panels, accepted_merges, rejected_merges,
+                     base.padded_fill > 0
+                         ? static_cast<double>(out.padded_fill) / base.padded_fill
+                         : 1.0);
+    }
+    return out;
+}
+#endif  // CLS_CLOSURE_PANEL_AMALGAMATE
+
+#ifdef CLS_TC_CLOSURE_PANEL_AMALGAMATE
+static symbolic::PanelPartition tc_closure_amalgamate_panels(
+    int n, const std::vector<int>& Lp, const std::vector<int>& Li,
+    const symbolic::PanelPartition& base, int effective_panel_cap, bool emit_info)
+{
+    const int P = base.num_panels;
+    if (P <= 1) {
+        return base;
+    }
+    const symbolic::MultifrontalSymbolic base_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, base);
+    if (!valid_multifrontal_symbolic(base_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr, "[analyze] tc-closure-amalgamate: base symbolic invalid, skip\n");
+        }
+        return base;
+    }
+
+    int cap = CLS_TC_CLOSURE_PANEL_AMALGAMATE_CAP;
+    if (cap < 1) cap = 1;
+    if (effective_panel_cap > 0 && cap > effective_panel_cap) cap = effective_panel_cap;
+
+    int accepted_groups = 0;
+    int accepted_extra_panels = 0;
+    int closure_valid_candidates = 0;
+    int tc_routable_candidates = 0;
+    symbolic::PanelPartition out;
+    out.panel_of.assign(n < 0 ? 0 : n, -1);
+    for (int p = 0; p < P;) {
+        int best_end = p;
+        int best_ncols = base.ncols[p];
+        int best_width = base.width[p];
+        int candidate_ncols = base.ncols[p];
+        int candidate_width = base.width[p];
+        for (int end_panel = p + 1; end_panel < P; ++end_panel) {
+            candidate_ncols += base.ncols[end_panel];
+            if (candidate_ncols > cap) {
+                break;
+            }
+            candidate_width = std::max(candidate_width, base.width[end_panel]);
+            if (!closure_group_valid(base, base_mf, Lp, Li, p, end_panel)) {
+                continue;
+            }
+            ++closure_valid_candidates;
+            const int first_col = base.first[p];
+            const int fsz = static_cast<int>(
+                merged_panel_front_rows(Lp, Li, first_col, candidate_ncols).size());
+            const int uc = fsz - candidate_ncols;
+            if (fsz > 32 && uc >= 16 && candidate_ncols >= 4 && candidate_ncols <= 32) {
+                ++tc_routable_candidates;
+                best_end = end_panel;
+                best_ncols = candidate_ncols;
+                best_width = candidate_width;
+            }
+        }
+
+        if (best_end > p) {
+            ++accepted_groups;
+            accepted_extra_panels += best_end - p;
+        }
+        const int id = out.num_panels++;
+        const int first = base.first[p];
+        out.first.push_back(first);
+        out.ncols.push_back(best_ncols);
+        out.width.push_back(best_width);
+        out.padded_fill += static_cast<long>(best_ncols) * best_width;
+        for (int c = first; c < first + best_ncols; ++c) {
+            out.panel_of[c] = id;
+        }
+        p = best_end + 1;
+    }
+
+    const symbolic::MultifrontalSymbolic out_mf =
+        symbolic::multifrontal_symbolic(n, Lp, Li, out);
+    if (!valid_multifrontal_symbolic(out_mf)) {
+        if (emit_info) {
+            std::fprintf(stderr,
+                         "[analyze] tc-closure-amalgamate: candidate invalid, fallback base\n");
+        }
+        return base;
+    }
+    if (emit_info) {
+        std::fprintf(stderr,
+                     "[analyze] tc-closure-amalgamate: panels %d -> %d, groups=%d extra=%d closure_candidates=%d tc_candidates=%d, padded_fill %.3fx\n",
+                     P, out.num_panels, accepted_groups, accepted_extra_panels,
+                     closure_valid_candidates, tc_routable_candidates,
+                     base.padded_fill > 0
+                         ? static_cast<double>(out.padded_fill) / base.padded_fill
+                         : 1.0);
+    }
+    return out;
+}
+#endif  // CLS_TC_CLOSURE_PANEL_AMALGAMATE
+
 // Adaptive panel cap by problem size. A bigger cap merges longer etree chains into one panel,
 // cutting the front / solve-kernel count at the price of padded fill; larger matrices have the
 // margin to amalgamate more aggressively. Upper bound 64 from the shared pivot buffer (nc <= cap).
 static int compute_effective_panel_cap(int n, int panel_cap, bool float_front)
 {
+#ifdef CLS_RESPECT_PANEL_CAP
+    int effective_panel_cap = panel_cap;
+#else
     int effective_panel_cap = n >= 80000 ? 20 : (n >= 16000 ? 12 : panel_cap);
+#endif
     // B=1 float-front factorization benefits from a slightly wider panel around the 3K-bus /
     // 6K-unknown class: it removes tiny-front overhead without the large-front padding that hurts
     // the 6K-8K bus cases.
@@ -511,13 +970,40 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     std::vector<int> colcount(n);
     for (int j = 0; j < n; ++j) colcount[j] = Lp[j + 1] - Lp[j];
     const int effective_panel_cap = compute_effective_panel_cap(n, panel_cap, float_front);
-    const sym::PanelPartition panels =
+    sym::PanelPartition panels =
         forced_panels ? *forced_panels : sym::relaxed_panels(n, parent, colcount, effective_panel_cap);
+#ifdef CLS_SIBLING_PANEL_AMALGAMATE
+    if (!forced_panels) {
+        panels = sibling_amalgamate_panels(n, Lp, Li, panels, effective_panel_cap, emit_info);
+    }
+#endif
+#ifdef CLS_PANEL_CHAIN_AMALGAMATE
+    if (!forced_panels) {
+        panels = panel_chain_amalgamate_panels(n, Lp, Li, panels, effective_panel_cap, emit_info);
+    }
+#endif
+#ifdef CLS_VALIDATED_RUN_PANEL_AMALGAMATE
+    if (!forced_panels) {
+        panels = validated_run_amalgamate_panels(n, Lp, Li, panels, effective_panel_cap, emit_info);
+    }
+#endif
+#ifdef CLS_CLOSURE_PANEL_AMALGAMATE
+    if (!forced_panels) {
+        panels = closure_amalgamate_panels(n, Lp, Li, panels, effective_panel_cap, emit_info);
+    }
+#endif
+#ifdef CLS_TC_CLOSURE_PANEL_AMALGAMATE
+    if (!forced_panels) {
+        panels = tc_closure_amalgamate_panels(n, Lp, Li, panels, effective_panel_cap, emit_info);
+    }
+#endif
     const sym::MultifrontalSymbolic symbolic_factor = sym::multifrontal_symbolic(n, Lp, Li, panels);
     const int P = panels.num_panels;
     plan.num_panels = P;
     plan.h_front_ptr = symbolic_factor.front_ptr;   // host copies for batched dispatch / TC shared sizing
     plan.h_ncols = panels.ncols;
+    plan.h_panel_parent = symbolic_factor.panel_parent;
+    plan.h_asm_ptr = symbolic_factor.asm_ptr;
 
     std::vector<int> front_off;
     long total = 0;

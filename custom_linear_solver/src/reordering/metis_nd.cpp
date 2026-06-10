@@ -12,8 +12,23 @@ namespace custom_linear_solver::reordering {
 
 namespace {
 
-constexpr int kParNdDepth = 4;
+#ifndef CLS_PAR_ND_DEPTH
+#define CLS_PAR_ND_DEPTH 4
+#endif
+#ifndef CLS_PAR_ND_SMALL_BASE_THR
+#define CLS_PAR_ND_SMALL_BASE_THR 4000
+#endif
+#ifndef CLS_PAR_ND_LARGE_BASE_THR
+#define CLS_PAR_ND_LARGE_BASE_THR 20000
+#endif
+
+constexpr int kParNdDepth = CLS_PAR_ND_DEPTH;
 constexpr int kParNdTopInduceThreshold = 49152;
+
+int parallel_nd_base_threshold(int n)
+{
+    return n < 20000 ? CLS_PAR_ND_SMALL_BASE_THR : CLS_PAR_ND_LARGE_BASE_THR;
+}
 
 // Parallel nested dissection. METIS_NodeND is single-threaded; ND is recursively parallel
 // (after a vertex separator, the two halves are independent). Find a separator with METIS,
@@ -55,7 +70,7 @@ void induce_par(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
                 std::vector<idx_t>& sa, std::vector<int>& map);
 
 void base_nodend(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
-                 std::vector<int>& perm)
+                 std::vector<int>& perm, int seed)
 {
     const int n = static_cast<int>(xadj.size()) - 1;
     perm.assign(n, 0);
@@ -68,9 +83,9 @@ void base_nodend(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     idx_t opt[METIS_NOPTIONS];
     METIS_SetDefaultOptions(opt);
     opt[METIS_OPTION_NUMBERING] = 0;
-    opt[METIS_OPTION_SEED] = 42;  // fixed seed -> deterministic across threads
-    std::srand(42);  // reseed per call → each subgraph starts from a fixed RNG state
-                     // (deterministic with the LD_PRELOAD thread-safe rand; no-op otherwise)
+    opt[METIS_OPTION_SEED] = seed;  // fixed seed -> deterministic across threads
+    std::srand(seed);  // reseed per call -> each subgraph starts from a fixed RNG state
+                       // (deterministic with the LD_PRELOAD thread-safe rand; no-op otherwise)
     if (METIS_NodeND(&nv, const_cast<idx_t*>(xadj.data()), const_cast<idx_t*>(adj.data()),
                      nullptr, opt, p.data(), ip.data()) != METIS_OK) {
         for (int i = 0; i < n; ++i) perm[i] = i;
@@ -80,10 +95,10 @@ void base_nodend(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
 }
 
 void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
-                std::vector<int>& perm, int depth, int base_thr, bool is_root = true)
+                std::vector<int>& perm, int depth, int base_thr, int seed, bool is_root = true)
 {
     const int n = static_cast<int>(xadj.size()) - 1;
-    if (depth <= 0 || n < base_thr || adj.empty()) { base_nodend(xadj, adj, perm); return; }
+    if (depth <= 0 || n < base_thr || adj.empty()) { base_nodend(xadj, adj, perm, seed); return; }
     idx_t nv = n, sepsize = 0;
     // No graph copy. METIS_ComputeVertexSeparator treats the input graph as read-only (it
     // copies into its own internal graph_t), and induce() below reads the ORIGINAL xadj/adj
@@ -95,13 +110,13 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     idx_t opt[METIS_NOPTIONS];
     METIS_SetDefaultOptions(opt);
     opt[METIS_OPTION_NUMBERING] = 0;
-    opt[METIS_OPTION_SEED] = 42;  // fixed seed -> deterministic across threads
-    std::srand(42);  // reseed per call (see base_nodend)
+    opt[METIS_OPTION_SEED] = seed;  // fixed seed -> deterministic across threads
+    std::srand(seed);  // reseed per call (see base_nodend)
     bool got_sep = false;
     if (!got_sep &&
         METIS_ComputeVertexSeparator(&nv, mx, ma, nullptr, opt, &sepsize,
                                      part.data()) != METIS_OK) {
-        base_nodend(xadj, adj, perm);
+        base_nodend(xadj, adj, perm, seed);
         return;
     }
     std::vector<idx_t> x0, a0, x1, a1;
@@ -119,10 +134,10 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
         induce(xadj, adj, part, 1, x1, a1, m1);
     }
     const int n0 = static_cast<int>(m0.size()), n1 = static_cast<int>(m1.size());
-    if (n0 == 0 || n1 == 0) { base_nodend(xadj, adj, perm); return; }  // degenerate split
+    if (n0 == 0 || n1 == 0) { base_nodend(xadj, adj, perm, seed); return; }  // degenerate split
     std::vector<int> p0, p1;
-    std::thread th([&] { par_nd_rec(x0, a0, p0, depth - 1, base_thr, false); });
-    par_nd_rec(x1, a1, p1, depth - 1, base_thr, false);  // recursive calls go through METIS
+    std::thread th([&] { par_nd_rec(x0, a0, p0, depth - 1, base_thr, seed, false); });
+    par_nd_rec(x1, a1, p1, depth - 1, base_thr, seed, false);  // recursive calls go through METIS
     th.join();
     // perm convention is perm[new_position] = old_vertex (matches the caller's permute_sym
     // and METIS_NodeND's first output). p0[np]=old_local in part0 at sub-newpos np.
@@ -258,7 +273,7 @@ void build_symmetric_adjacency(int n, const int* col_ptr, const int* row_idx,
 // symmetric idx_t graph. Fills perm in METIS convention (perm[new_pos] = old_vertex). Shared by
 // metis_nd (CPU graph build) and metis_nd_from_graph (GPU graph build).
 bool run_nd_on_graph(int n, std::vector<idx_t>& xadj, std::vector<idx_t>& adjncy,
-                     std::vector<int>& perm, bool parallel, double t_build_ms)
+                     std::vector<int>& perm, bool parallel, int seed, double t_build_ms)
 {
     (void)t_build_ms;
 
@@ -270,11 +285,12 @@ bool run_nd_on_graph(int n, std::vector<idx_t>& xadj, std::vector<idx_t>& adjncy
     idx_t options[METIS_NOPTIONS];
     METIS_SetDefaultOptions(options);
     options[METIS_OPTION_NUMBERING] = 0;
+    options[METIS_OPTION_SEED] = seed;
 
     if (parallel) {
-        const int base_thr = n < 20000 ? 4000 : 20000;
+        const int base_thr = parallel_nd_base_threshold(n);
         std::vector<int> pp;
-        par_nd_rec(xadj, adjncy, pp, kParNdDepth, base_thr);
+        par_nd_rec(xadj, adjncy, pp, kParNdDepth, base_thr, seed);
         for (int i = 0; i < n; ++i) perm[i] = pp[i];
         return true;
     }
@@ -294,7 +310,7 @@ bool run_nd_on_graph(int n, std::vector<idx_t>& xadj, std::vector<idx_t>& adjncy
 }  // namespace
 
 bool metis_nd_from_graph(int n, std::vector<int>& xadj_in, std::vector<int>& adjncy_in,
-                         std::vector<int>& perm, bool parallel)
+                         std::vector<int>& perm, bool parallel, int seed)
 {
     if (n < 0) return false;
     perm.assign(static_cast<std::size_t>(n), 0);
@@ -310,11 +326,12 @@ bool metis_nd_from_graph(int n, std::vector<int>& xadj_in, std::vector<int>& adj
         xadj.assign(xadj_in.begin(), xadj_in.end());
         adjncy.assign(adjncy_in.begin(), adjncy_in.end());
     }
-    return run_nd_on_graph(n, xadj, adjncy, perm, parallel, 0.0);
+    return run_nd_on_graph(n, xadj, adjncy, perm, parallel, seed, 0.0);
 }
 
 bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& perm,
-              bool parallel, std::vector<int>* sym_col_ptr, std::vector<int>* sym_row_idx)
+              bool parallel, std::vector<int>* sym_col_ptr, std::vector<int>* sym_row_idx,
+              int seed)
 {
     if (n < 0 || (n > 0 && (col_ptr == nullptr || (col_ptr[n] > 0 && row_idx == nullptr)))) {
         return false;
@@ -363,6 +380,7 @@ bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& p
     idx_t options[METIS_NOPTIONS];
     METIS_SetDefaultOptions(options);
     options[METIS_OPTION_NUMBERING] = 0;
+    options[METIS_OPTION_SEED] = seed;
     // Faster METIS opts (NITER=1/2, RM coarsening) were tested: ~-2..-16% on analyze wall but
     // produced orderings whose pivot structure fails the no-pivot GPU factor on some matrices,
     // and changed the fill basis (downstream factor/solve regressed). Default METIS_NodeND
@@ -375,9 +393,9 @@ bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& p
         //   - Large Jacobians (n >= 20000): base 20000. Going deeper over-recurses on the long
         //     elimination chains typical of large power-grid Jacobians, raising fill and
         //     regressing the downstream factor/solve.
-        const int base_thr = n < 20000 ? 4000 : 20000;
+        const int base_thr = parallel_nd_base_threshold(n);
         std::vector<int> pp;
-        par_nd_rec(xadj, adjncy, pp, kParNdDepth, base_thr);
+        par_nd_rec(xadj, adjncy, pp, kParNdDepth, base_thr, seed);
         for (int i = 0; i < n; ++i) perm[i] = pp[i];
         export_sym_graph();
         return true;

@@ -34,9 +34,10 @@ defaults.
 | `precision`                      | `FP64`       | `FP64` / `FP32` / `FP16` (PTX) / `FP16_WMMA` alias / `TF32_WMMA` alias / `TF32` (PTX, recommended)       |
 | `panel_cap`                      | `8`          | Max panel width inside a supernode (1..64). Analyzer auto-bumps to 12 for n≥16k, 20 for n≥80k.           |
 | `use_parallel_nested_dissection` | `true`       | METIS-ND uses parallel host threads                                                                       |
+| `metis_seed`                     | `42`         | METIS ordering seed for reproducible serial/parallel ND A/B sweeps                                        |
 | `use_multistream_subtrees`       | `true`       | Dispatch independent subtrees on separate CUDA streams (capped at 8). Disable for single-stream debugging. |
 | `analyze_emit_info`              | `false`      | After `analyze()`, print front-size and subtree summary to stderr                                          |
-| `analyze_dump_fronts_path`       | `""`         | If non-empty, after `analyze()` write per-front CSV `(q,p,fsz,nc,uc,level)` here                          |
+| `analyze_dump_fronts_path`       | `""`         | If non-empty, after `analyze()` write per-front CSV with front shape, level, parent, assembly, and extend metadata |
 | `use_matching`                   | `false`      | Reserved — row matching pre-permutation                                                                   |
 | `enable_shift_retry`             | `true`       | Reserved — diagonal-shift fallback on singular pivot                                                      |
 | `shift_retry_epsilon`            | `1e-8`       | Reserved — shift magnitude                                                                                |
@@ -50,6 +51,9 @@ CMake options that change build behavior:
 | `CLS_BUILD_SCRIPTS`     | `ON`    | Build the `custom_linear_solver_run` CLI                                                     |
 | `CLS_BUILD_CUDSS_SCRIPT`| `OFF`   | Build the cuDSS comparison driver                                                            |
 | `CLS_CUDA_ARCHITECTURES`| `86`    | Must be ≥ 80 for the TF32 kernels                                                            |
+| `CLS_FUSE_FP16_TRAIL_EXTEND`| `ON` | Fuse FP16 Tensor Core trailing drain directly into extend-add for big fronts                  |
+| `CLS_FUSE_TF32_TRAIL_EXTEND`| `OFF`| Experimental TF32 version of the same fusion; kept off pending broader correctness evidence   |
+| `CLS_MID_FP16_TC`       | `ON`    | Use guarded FP16 Tensor Core trailing on eligible mid-tier fronts                             |
 
 ## Precision matrix
 
@@ -57,7 +61,7 @@ CMake options that change build behavior:
 |-------------|---------------|----------------------------------|------------|----------------------------------|
 | `FP64`      | FP64          | scalar FP64                      | FP64       | ~1e-13                            |
 | `FP32`      | FP32          | staged-scalar FP32               | FP32       | ~1e-4                             |
-| `FP16`      | FP32          | FP16 PTX mma.m16n8k16            | FP32       | ~1e-3 .. 1e-4 (FP16 rounding)     |
+| `FP16`      | FP32          | FP16 PTX mma.m16n8k8             | FP32       | ~1e-3 .. 1e-4 (FP16 rounding)     |
 | `FP16_WMMA` | FP32          | Alias for `FP16`                 | FP32       | ~1e-3 .. 1e-4 (FP16 rounding)     |
 | `TF32_WMMA` | FP32          | Alias for `TF32`                 | FP32       | ~1e-4 (TF32 rounding)             |
 | `TF32`      | FP32          | TF32 PTX mma.m16n8k8 / k4 hybrid | FP32       | ~1e-4 (TF32 rounding)             |
@@ -83,6 +87,7 @@ Anything you can vary at runtime from the CLI runner without rebuilding:
 | Repeat (timing)          | 1..N (median reported)                                | `--repeat`         |
 | Single-system input dtype| `fp64` / `fp32`                                       | `--single-precision` |
 | Analyze diagnostics      | summary / per-front CSV                               | `--analyze-info` / `--dump-fronts <path>` |
+| Deterministic ordering   | parallel / serial METIS ND                            | `--serial-nd`     |
 
 The TF32 PTX path is now baked in (V9h + LB(512, 2)); selecting it is just
 `--precision tf32`. Experiments that historically lived behind a build flag
@@ -121,3 +126,7 @@ Start from `docs/00-index.md`. The two most relevant optimization notes are
 (V9h stack) and
 `docs/03-optimization-notes/17-big-tier-occupancy-launch-bounds-2026-06-07.md`
 (EXP-B LB(512, 2)), both baked into `Precision::TF32`.
+
+For the current FP16 Tensor Core pass points, see
+`docs/03-optimization-notes/31-fp16-fused-trail-extend-2026-06-09.md` and
+`docs/03-optimization-notes/32-mid-fp16-tensor-core-2026-06-09.md`.

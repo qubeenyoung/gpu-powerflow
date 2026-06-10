@@ -28,6 +28,8 @@ struct MultifrontalPlan {
     std::vector<int> h_ncols;      // host copy of panel ncols, for tensor-core shared sizing
     std::vector<int> h_plcols;     // host copy of panels-by-level order (indexes into h_front_ptr)
     std::vector<int> h_front_off;  // host copy of front_off (per-panel arena offset), for per-panel cuBLAS dispatch
+    std::vector<int> h_panel_parent;  // host copy of panel_parent, for analyze/debug dumps
+    std::vector<int> h_asm_ptr;       // host copy of asm_ptr, for analyze/debug dumps
 
     // Tier-homogeneous dispatch order. Same panels as h_plcols, but within each level the panels
     // are grouped by kernel tier (see classify_front_tier) so the single-stream factor walk can

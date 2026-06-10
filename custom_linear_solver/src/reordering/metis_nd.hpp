@@ -18,13 +18,13 @@ namespace custom_linear_solver::reordering {
 // for the A win; reproducible-benchmark callers leave it false (serial).
 bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& perm,
               bool parallel = false, std::vector<int>* sym_col_ptr = nullptr,
-              std::vector<int>* sym_row_idx = nullptr);
+              std::vector<int>* sym_row_idx = nullptr, int seed = 42);
 
 // ND ordering from a prebuilt symmetric graph (xadj size n+1, adjncy = directed unique
 // off-diagonal edges, neighbors sorted+deduped per vertex) — e.g. one built on the GPU by
 // matrix::build_symmetric_graph_device. The inputs may be moved from (consumed) when the
 // METIS idx_t is 32-bit. Same ordering as metis_nd given the same graph.
 bool metis_nd_from_graph(int n, std::vector<int>& xadj, std::vector<int>& adjncy,
-                         std::vector<int>& perm, bool parallel);
+                         std::vector<int>& perm, bool parallel, int seed = 42);
 
 }  // namespace custom_linear_solver::reordering
