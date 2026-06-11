@@ -3,7 +3,6 @@
 #include <cuda_runtime.h>
 
 #include "factorize/factorize.hpp"   // register_factor_attributes, issue_factor
-#include "solve/solve.hpp"           // issue_solve
 
 namespace custom_linear_solver {
 
@@ -58,7 +57,9 @@ static void create_subtree_streams(const MultifrontalPlan& plan, State& st,
     st.fork_event = fork_evt;
 }
 
-// Capture the factor and solve kernel sequences into replayable CUDA graphs on `stream`.
+// Capture the factor kernel sequence into a replayable CUDA graph on `stream`. The solve graph is
+// captured lazily by solve.cu (it spans gather + solve levels + scatter and is keyed by the I/O
+// pointers), so setup only owns the factor graph.
 static void capture_phase_graphs(const MultifrontalPlan& plan, State& st, cudaStream_t stream)
 {
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
@@ -69,15 +70,6 @@ static void capture_phase_graphs(const MultifrontalPlan& plan, State& st, cudaSt
     cudaGraphInstantiate(&factor_exec, factor_graph, nullptr, nullptr, 0);
     cudaGraphDestroy(factor_graph);
     st.factor_graph_exec = factor_exec;
-
-    cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-    issue_solve(plan, st, stream);
-    cudaGraph_t solve_graph;
-    cudaStreamEndCapture(stream, &solve_graph);
-    cudaGraphExec_t solve_exec;
-    cudaGraphInstantiate(&solve_exec, solve_graph, nullptr, nullptr, 0);
-    cudaGraphDestroy(solve_graph);
-    st.solve_graph_exec = solve_exec;
 }
 #endif
 

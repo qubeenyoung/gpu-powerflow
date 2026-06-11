@@ -9,7 +9,7 @@ using custom_linear_solver::plan::MultifrontalPlan;
 State::~State()
 {
     if (factor_graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(factor_graph_exec));
-    if (solve_graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(solve_graph_exec));
+    if (full_solve_graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(full_solve_graph_exec));
     if (d_front_batch) cudaFree(d_front_batch);
     if (d_front_batch_f) cudaFree(d_front_batch_f);
     if (d_y_batch) cudaFree(d_y_batch);

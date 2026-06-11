@@ -122,6 +122,32 @@ __global__ void solve_bwd_small(int lbegin, int level_size, int B, int slab,
 // all `nt` block threads. The whole front lives in global memory — solve doesn't have a
 // shared-resident variant because the work per front is much lighter than factor.
 
+template <typename T, int NC>
+__device__ __forceinline__ void fwd_substitute_fixed_regular(const T* F, int fsz, const int* fr,
+                                                             T* y, T* sh_piv, int t)
+{
+    if constexpr (NC <= 8) {
+        if (t < 8) fwd_substitute_fixed<T, NC, 8>(F, fsz, fr, y, sh_piv, t, 0x000000ffu);
+    } else if constexpr (NC <= 16) {
+        if (t < 16) fwd_substitute_fixed<T, NC, 16>(F, fsz, fr, y, sh_piv, t, 0x0000ffffu);
+    } else {
+        if (t < 32) fwd_substitute_fixed<T, NC>(F, fsz, fr, y, sh_piv, t);
+    }
+}
+
+template <typename T, int NC>
+__device__ __forceinline__ void bwd_substitute_fixed_regular(const T* F, int fsz, const int* fr,
+                                                             T* y, const T* rhs, int t)
+{
+    if constexpr (NC <= 8) {
+        if (t < 8) bwd_substitute_fixed<T, NC, 8>(F, fsz, fr, y, rhs, t, 0x000000ffu);
+    } else if constexpr (NC <= 16) {
+        if (t < 16) bwd_substitute_fixed<T, NC, 16>(F, fsz, fr, y, rhs, t, 0x0000ffffu);
+    } else {
+        if (t < 32) bwd_substitute_fixed<T, NC>(F, fsz, fr, y, rhs, t);
+    }
+}
+
 template <typename T>
 __global__ void solve_fwd(int lbegin, int lend, const int* __restrict__ plcols,
                           const int* __restrict__ front_off, const int* __restrict__ front_ptr,
@@ -180,6 +206,242 @@ __global__ void solve_bwd(int lbegin, int lend, const int* __restrict__ plcols,
     __syncthreads();
     // Phase 3 — panel substitution (one warp), writes x back to y[fr[0..nc)].
     if (t < 32) bwd_substitute<T>(F, fsz, nc, fr, y, rhs, /*lane=*/t);
+}
+
+template <typename T, int NC>
+__global__ void solve_fwd_fixed_nc(int lbegin, int lend, const int* __restrict__ plcols,
+                                   const int* __restrict__ front_off, const int* __restrict__ front_ptr,
+                                   const int* __restrict__ ncols, const int* __restrict__ front_rows,
+                                   const T* frontB, T* yB, long front_total, int n)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int p = plcols[idx];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const int nc = ncols[p];
+    const T* F = front + front_off[p];
+    const int* fr = front_rows + s;
+    const int t = threadIdx.x, nt = blockDim.x;
+    __shared__ T sh_piv[kMaxPivotColumns];
+
+    if (nc == NC) {
+        fwd_substitute_fixed_regular<T, NC>(F, fsz, fr, y, sh_piv, t);
+        __syncthreads();
+        fwd_cb_update_fixed<T, NC>(F, fsz, /*cb=*/fsz - NC, fr, y, sh_piv, t, nt);
+    } else {
+        if (t < 32) fwd_substitute<T>(F, fsz, nc, fr, y, sh_piv, /*lane=*/t);
+        __syncthreads();
+        fwd_cb_update<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, t, nt);
+    }
+}
+
+template <typename T, int NC>
+__global__ void solve_fwd_exact_nc(int lbegin, int lend, const int* __restrict__ plcols,
+                                   const int* __restrict__ front_off, const int* __restrict__ front_ptr,
+                                   const int* __restrict__ front_rows,
+                                   const T* frontB, T* yB, long front_total, int n)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int p = plcols[idx];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const T* F = front + front_off[p];
+    const int* fr = front_rows + s;
+    const int t = threadIdx.x, nt = blockDim.x;
+    __shared__ T sh_piv[kMaxPivotColumns];
+
+    fwd_substitute_fixed_regular<T, NC>(F, fsz, fr, y, sh_piv, t);
+    __syncthreads();
+    fwd_cb_update_fixed<T, NC>(F, fsz, /*cb=*/fsz - NC, fr, y, sh_piv, t, nt);
+}
+
+template <typename T, int NC>
+__global__ void solve_bwd_fixed_nc(int lbegin, int lend, const int* __restrict__ plcols,
+                                   const int* __restrict__ front_off, const int* __restrict__ front_ptr,
+                                   const int* __restrict__ ncols, const int* __restrict__ front_rows,
+                                   const T* frontB, T* yB, long front_total, int n)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int p = plcols[idx];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const int nc = ncols[p];
+    const T* F = front + front_off[p];
+    const int* fr = front_rows + s;
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int cb = fsz - nc;
+
+    extern __shared__ unsigned char xsh_raw[];
+    T* xsh = reinterpret_cast<T*>(xsh_raw);
+    __shared__ T rhs[kMaxPivotColumns];
+
+    if (nc == NC) {
+        bwd_load_rhs_and_x_fixed<T, NC>(y, fr, fsz - NC, rhs, xsh, t, nt);
+        __syncthreads();
+        bwd_cb_subtract_fixed<T, NC>(F, fsz, cb, xsh, rhs, t, /*width=*/nt);
+        __syncthreads();
+        bwd_substitute_fixed_regular<T, NC>(F, fsz, fr, y, rhs, t);
+    } else {
+        bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, t, nt);
+        __syncthreads();
+        bwd_cb_subtract<T>(F, fsz, nc, cb, xsh, rhs, t, /*width=*/nt);
+        __syncthreads();
+        if (t < 32) bwd_substitute<T>(F, fsz, nc, fr, y, rhs, /*lane=*/t);
+    }
+}
+
+template <typename T, int NC>
+__global__ void solve_bwd_exact_nc(int lbegin, int lend, const int* __restrict__ plcols,
+                                   const int* __restrict__ front_off, const int* __restrict__ front_ptr,
+                                   const int* __restrict__ front_rows,
+                                   const T* frontB, T* yB, long front_total, int n)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int p = plcols[idx];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const T* F = front + front_off[p];
+    const int* fr = front_rows + s;
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int cb = fsz - NC;
+
+    extern __shared__ unsigned char xsh_raw[];
+    T* xsh = reinterpret_cast<T*>(xsh_raw);
+    __shared__ T rhs[kMaxPivotColumns];
+
+    bwd_load_rhs_and_x_fixed<T, NC>(y, fr, cb, rhs, xsh, t, nt);
+    __syncthreads();
+    bwd_cb_subtract_fixed<T, NC>(F, fsz, cb, xsh, rhs, t, /*width=*/nt);
+    __syncthreads();
+    bwd_substitute_fixed_regular<T, NC>(F, fsz, fr, y, rhs, t);
+}
+
+// =======================================================================================
+//  SPINE tier — one block per batch walks the cnt=1 chain end-to-end
+// =======================================================================================
+
+template <typename T>
+__global__ void solve_fwd_spine(int n_spine,
+                                const int* __restrict__ spine_panels,
+                                const int* __restrict__ front_off,
+                                const int* __restrict__ front_ptr,
+                                const int* __restrict__ ncols,
+                                const int* __restrict__ front_rows,
+                                const T* frontB, T* yB, long front_total, int n)
+{
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int t = threadIdx.x, nt = blockDim.x;
+    __shared__ T sh_piv[kMaxPivotColumns];
+
+    for (int idx = 0; idx < n_spine; ++idx) {
+        const int p = spine_panels[idx];
+        const int s = front_ptr[p];
+        const int fsz = front_ptr[p + 1] - s;
+        const int nc = ncols[p];
+        const T* F = front + front_off[p];
+        const int* fr = front_rows + s;
+
+        if (t < 32) fwd_substitute<T>(F, fsz, nc, fr, y, sh_piv, /*lane=*/t);
+        __syncthreads();
+        fwd_cb_update_plain<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, t, nt);
+        __syncthreads();
+    }
+}
+
+template <typename T>
+__global__ void solve_bwd_spine(int n_spine,
+                                const int* __restrict__ spine_panels,
+                                const int* __restrict__ front_off,
+                                const int* __restrict__ front_ptr,
+                                const int* __restrict__ ncols,
+                                const int* __restrict__ front_rows,
+                                const T* frontB, T* yB, long front_total, int n)
+{
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int t = threadIdx.x, nt = blockDim.x;
+    __shared__ T rhs[kMaxPivotColumns];
+    extern __shared__ unsigned char xsh_raw[];
+    T* xsh = reinterpret_cast<T*>(xsh_raw);
+
+    for (int idx = n_spine - 1; idx >= 0; --idx) {
+        const int p = spine_panels[idx];
+        const int s = front_ptr[p];
+        const int fsz = front_ptr[p + 1] - s;
+        const int nc = ncols[p];
+        const int cb = fsz - nc;
+        const T* F = front + front_off[p];
+        const int* fr = front_rows + s;
+
+        bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, t, nt);
+        __syncthreads();
+        bwd_cb_subtract<T>(F, fsz, nc, cb, xsh, rhs, t, /*width=*/nt);
+        __syncthreads();
+        if (t < 32) bwd_substitute<T>(F, fsz, nc, fr, y, rhs, /*lane=*/t);
+        __syncthreads();
+    }
+}
+
+template <typename T>
+__global__ void solve_spine(int n_spine,
+                            const int* __restrict__ spine_panels,
+                            const int* __restrict__ front_off,
+                            const int* __restrict__ front_ptr,
+                            const int* __restrict__ ncols,
+                            const int* __restrict__ front_rows,
+                            const T* frontB, T* yB, long front_total, int n)
+{
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int t = threadIdx.x, nt = blockDim.x;
+    __shared__ T sh_piv[kMaxPivotColumns];
+    __shared__ T rhs[kMaxPivotColumns];
+    extern __shared__ unsigned char xsh_raw[];
+    T* xsh = reinterpret_cast<T*>(xsh_raw);
+
+    for (int idx = 0; idx < n_spine; ++idx) {
+        const int p = spine_panels[idx];
+        const int s = front_ptr[p];
+        const int fsz = front_ptr[p + 1] - s;
+        const int nc = ncols[p];
+        const T* F = front + front_off[p];
+        const int* fr = front_rows + s;
+
+        if (t < 32) fwd_substitute<T>(F, fsz, nc, fr, y, sh_piv, /*lane=*/t);
+        __syncthreads();
+        fwd_cb_update_plain<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, t, nt);
+        __syncthreads();
+    }
+
+    for (int idx = n_spine - 1; idx >= 0; --idx) {
+        const int p = spine_panels[idx];
+        const int s = front_ptr[p];
+        const int fsz = front_ptr[p + 1] - s;
+        const int nc = ncols[p];
+        const int cb = fsz - nc;
+        const T* F = front + front_off[p];
+        const int* fr = front_rows + s;
+
+        bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, t, nt);
+        __syncthreads();
+        bwd_cb_subtract<T>(F, fsz, nc, cb, xsh, rhs, t, /*width=*/nt);
+        __syncthreads();
+        if (t < 32) bwd_substitute<T>(F, fsz, nc, fr, y, rhs, /*lane=*/t);
+        __syncthreads();
+    }
 }
 
 }  // namespace

@@ -79,11 +79,6 @@ struct MultifrontalPlan {
     // h_plcols of tier t within that cell; [...+kNumTiers] is the cell end. Empty when no subtrees.
     std::vector<int> h_subtree_level_tier_off;
 
-    void* stream = nullptr;
-    bool owns_stream = false;
-    void* graph_exec = nullptr;
-    void* solve_graph_exec = nullptr;
-    void* solve_graph = nullptr;
 
     MultifrontalPlan() = default;
     ~MultifrontalPlan();

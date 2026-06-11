@@ -8,10 +8,6 @@ namespace custom_linear_solver::plan {
 
 MultifrontalPlan::~MultifrontalPlan()
 {
-    if (graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(graph_exec));
-    if (solve_graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(solve_graph_exec));
-    if (solve_graph) cudaGraphDestroy(static_cast<cudaGraph_t>(solve_graph));
-    if (stream && owns_stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
     if (d_spine_panels) cudaFree(d_spine_panels);
     if (d_plcols_tier) cudaFree(d_plcols_tier);
     if (d_y_f) cudaFree(d_y_f);
@@ -25,11 +21,6 @@ MultifrontalPlan::MultifrontalPlan(MultifrontalPlan&& o) noexcept { *this = std:
 MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
 {
     if (this != &o) {
-        if (graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(graph_exec));
-        if (solve_graph_exec)
-            cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(solve_graph_exec));
-        if (solve_graph) cudaGraphDestroy(static_cast<cudaGraph_t>(solve_graph));
-        if (stream && owns_stream) cudaStreamDestroy(static_cast<cudaStream_t>(stream));
         if (d_spine_panels) cudaFree(d_spine_panels);
         if (d_plcols_tier) cudaFree(d_plcols_tier);
         if (d_y_f) cudaFree(d_y_f);
@@ -85,21 +76,11 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         o.d_plcols_tier = nullptr;
         d_spine_panels = o.d_spine_panels;
         o.d_spine_panels = nullptr;
-        stream = o.stream;
-        owns_stream = o.owns_stream;
-        graph_exec = o.graph_exec;
-        solve_graph_exec = o.solve_graph_exec;
-        solve_graph = o.solve_graph;
 
         o.arena = nullptr;
-        o.stream = nullptr;
-        o.owns_stream = false;
-        o.graph_exec = nullptr;
-        o.solve_graph_exec = nullptr;
         o.d_front_f = nullptr;
         o.d_y_f = nullptr;
         o.d_pivot_offset = nullptr;
-        o.solve_graph = nullptr;
     }
     return *this;
 }

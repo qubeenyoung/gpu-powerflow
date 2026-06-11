@@ -187,21 +187,22 @@ Status Solver::solve()
         return Status::kInvalidState;
     if (impl_->state.batch_count == 0) return Status::kInvalidState;
     const int* perm = impl_->d_perm.ptr;
+    const int* iperm = impl_->d_iperm.ptr;
     bool ok = false;
     const auto rt = impl_->rhs.value_type;
     const auto st = impl_->solution.value_type;
     if (rt == ValueType::kFloat64 && st == ValueType::kFloat64) {
         ok = custom_linear_solver::solve(impl_->plan, impl_->state,
                                          static_cast<const double*>(impl_->rhs.values),
-                                         static_cast<double*>(impl_->solution.values), perm);
+                                         static_cast<double*>(impl_->solution.values), perm, iperm);
     } else if (rt == ValueType::kFloat64 && st == ValueType::kFloat32) {
         ok = custom_linear_solver::solve(impl_->plan, impl_->state,
                                          static_cast<const double*>(impl_->rhs.values),
-                                         static_cast<float*>(impl_->solution.values), perm);
+                                         static_cast<float*>(impl_->solution.values), perm, iperm);
     } else if (rt == ValueType::kFloat32 && st == ValueType::kFloat32) {
         ok = custom_linear_solver::solve(impl_->plan, impl_->state,
                                          static_cast<const float*>(impl_->rhs.values),
-                                         static_cast<float*>(impl_->solution.values), perm);
+                                         static_cast<float*>(impl_->solution.values), perm, iperm);
     } else {
         return Status::kInvalidValue;
     }

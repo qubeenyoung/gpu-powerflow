@@ -2,17 +2,18 @@
 
 #include "internal/runtime/state.hpp"
 
-// Solve driver. issue_solve is the host wrapper called by internal/runtime/setup.cu for graph capture.
+// Solve driver. solve.cu lazily captures the full solve graph (gather + levels + scatter).
 
 namespace custom_linear_solver {
 
-void issue_solve(const plan::MultifrontalPlan& plan, State& state, void* stream);
-
 bool solve(const plan::MultifrontalPlan& plan, State& state,
-           const double* d_rhs_batch, double* d_solution_batch, const int* d_perm);
+           const double* d_rhs_batch, double* d_solution_batch, const int* d_perm,
+           const int* d_iperm);
 bool solve(const plan::MultifrontalPlan& plan, State& state,
-           const double* d_rhs_batch, float* d_solution_batch, const int* d_perm);
+           const double* d_rhs_batch, float* d_solution_batch, const int* d_perm,
+           const int* d_iperm);
 bool solve(const plan::MultifrontalPlan& plan, State& state,
-           const float* d_rhs_batch, float* d_solution_batch, const int* d_perm);
+           const float* d_rhs_batch, float* d_solution_batch, const int* d_perm,
+           const int* d_iperm);
 
 }  // namespace custom_linear_solver

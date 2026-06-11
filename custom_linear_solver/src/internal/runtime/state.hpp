@@ -56,7 +56,15 @@ struct State {
     void* stream = nullptr;        // internal-graph mode: solver-owned; external: caller-owned
     bool  owns_stream = false;     // true only when this State created `stream`
     void* factor_graph_exec = nullptr;
-    void* solve_graph_exec  = nullptr;
+    // Full solve graph (gather + solve levels + scatter), captured lazily by solve.cu and keyed by
+    // the (rhs, solution, perm, iperm, type) it was recorded for; a key change recaptures it. This
+    // supersedes the old solve-levels-only graph captured at setup.
+    void* full_solve_graph_exec = nullptr;
+    const void* full_solve_rhs = nullptr;
+    void* full_solve_solution = nullptr;
+    const int* full_solve_perm = nullptr;
+    const int* full_solve_iperm = nullptr;
+    int full_solve_type_tag = 0;
     // Optional cuBLAS TF32 grouped-batched trailing path. Pointer arrays are device arrays
     // indexed by the active panel order position q, then batch b: slot = q * B + b.
     void* cublas_handle = nullptr;
