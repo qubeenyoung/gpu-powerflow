@@ -1,6 +1,7 @@
 #include "factorize/factorize.hpp"
 
 #include <cuda_runtime.h>
+#include <vector>
 
 #include "factorize/assemble.cuh"   // assemble_front_values (input assembly)
 #include "factorize/schedule.cuh"   // issue_factor_levels (factor tree schedule)

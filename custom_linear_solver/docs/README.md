@@ -41,6 +41,8 @@
 - [`01-kernel-engineering.md`](03-optimization-notes/01-kernel-engineering.md) — substrate 미세최적화·병목진단·결정로그(3단 tier 커널, 동기화, 디스패치, staging, "sync≠wall").
 - [`02-tf32-trailing-gemm.md`](03-optimization-notes/02-tf32-trailing-gemm.md) — V9h PTX trailing GEMM 스택, 폐기 매크로, 영구 교훈, FP16 PTX default.
 - [`03-tensor-core-investigation.md`](03-optimization-notes/03-tensor-core-investigation.md) — 텐서코어 조사 통합: large-case 성공, 8387/13K dead-end 매트릭스, Ozaki 정확도, **honest ~1.1× 정정**.
+- [`04-solve-optimization-2026-06-10.md`](03-optimization-notes/04-solve-optimization-2026-06-10.md) — **solve 경로 ~1.5× 가속** (small-tier nc-packing, spine fusion, full solve graph, inverse scatter, B=1 fixed-nc 라우팅). 통합 완료 + 기각 가설 기록.
+- [`05-tc-eligibility-relaxation-2026-06-11.md`](03-optimization-notes/05-tc-eligibility-relaxation-2026-06-11.md) — TF32 적격 gate(`uc≤256`/mid 조건) 완화 → **거의 모든 mid/big 이 TC**. `max_uc` 클램프–cap 연동 버그 수정, **uc>256 spine(70K L25 spike 10→5.6%) 제거**, factorize ~1.02–1.06×. **기본값으로 승격**(cap 256→512, mid 하한 풀음).
 - [`archive/`](03-optimization-notes/archive/) — dead-end R&D 로그(TC dedicated, symbolic GEMM, tree restructuring, 폐기 실험). 재시도 시 회피용.
 
 ### 04. Benchmarks and Profiling
@@ -55,6 +57,8 @@
 - [`03-bench-vs-cudss.md`](05-reports/03-bench-vs-cudss.md) — cuDSS 대비(raw + ubatch+mt-auto) sweep, 정확도, analyze.
 - [`04-factorize-progress.md`](05-reports/04-factorize-progress.md) — B=1/non-GEMM factorize 가속 진행·채택 변경·tier-split gate·구조적 한계.
 - [`05-tf32-reproduction-2026-06-10.md`](05-reports/05-tf32-reproduction-2026-06-10.md) — 대표 5케이스 fp32 vs tf32 **정확도-매칭 best-vs-best 재현** (honest ~1.1× 확증).
+- [`06-cudss-vs-custom-sweep-2026-06-10.md`](05-reports/06-cudss-vs-custom-sweep-2026-06-10.md) — **선형계 단독** cuDSS vs custom **6 케이스 × 배치 5단계 전체 스윕**, analyze/factorize/solve (solve 최적화 반영 재측정).
+- [`07-cupf-backend-comparison-2026-06-11.md`](05-reports/07-cupf-backend-comparison-2026-06-11.md) — **cuPF(graph off) 전체 조류계산** 백엔드 비교(**결정적**: Ozaki TF32 + serial-ND seed 1588 + 클럭 고정), **6 case(13K 포함) × B=1/16/64/256**: fp64/mixed 에서 cuDSS vs custom. **결론: custom-mixed 가 배치서 cuDSS 대비 4–6×; tf32(Ozaki) 가 fp32 보다 근소 우위(factorize 1.05–1.2× 가 NR 에선 희석).** 교훈: parallel-ND(기본)는 비결정적이라 fp32↔tf32 비교 무효 → serial-ND 고정 필수.
 
 ## 정직성 노트
 

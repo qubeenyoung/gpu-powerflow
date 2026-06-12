@@ -22,6 +22,7 @@ struct InitializeContext {
     int32_t                   n_pv   = 0;
     const int32_t*            pq     = nullptr;
     int32_t                   n_pq   = 0;
+    const CustomSolverConfig* custom = nullptr;   // custom 백엔드 런타임 설정 (NewtonOptions::custom)
 };
 
 

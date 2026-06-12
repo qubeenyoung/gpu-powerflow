@@ -12,8 +12,8 @@ if(BUILD_EVALUATORS)
     ${CMAKE_CURRENT_SOURCE_DIR})   # so #include "dump_case_loader.hpp" resolves
 
   # Batch-scaling micro-benchmark: replicate one dump case into a B-case batch and time each NR
-  # stage. CUPF_BENCH_CUSTOM=1 benches the custom direct solver (CUPF_CUSTOM_PRECISION picks its
-  # internal factor precision); default is cuDSS.
+  # stage. The second CLI arg selects backend/compute/factor precision (for example
+  # cudss-mixed, custom-mixed-fp32, custom-mixed-tf32).
   add_executable(cupf_batch_bench
     batch_bench.cpp
     dump_case_loader.cpp

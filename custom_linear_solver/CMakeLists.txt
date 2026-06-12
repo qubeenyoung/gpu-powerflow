@@ -28,6 +28,8 @@ option(CLS_TF32_OZAKI_TC2_FIRST_ORDER
   "Experimental: omit the tail-tail product from CLS_TF32_OZAKI_TC2" OFF)
 option(CLS_RESPECT_PANEL_CAP
   "Experimental: respect the requested panel cap instead of overriding it by matrix size" OFF)
+option(CLS_SMALL_SG32_ONLY
+  "Diagnostic: force small-front factor/solve kernels to the legacy one-front-per-warp subgroup size" OFF)
 set(CLS_PAR_ND_DEPTH "4" CACHE STRING
   "Diagnostic: recursion depth for parallel nested dissection")
 if(NOT CLS_PAR_ND_DEPTH MATCHES "^[0-9]+$")
@@ -166,6 +168,9 @@ if(CLS_BUILD_CUDA_OPS)
   endif()
   if(CLS_RESPECT_PANEL_CAP)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_RESPECT_PANEL_CAP)
+  endif()
+  if(CLS_SMALL_SG32_ONLY)
+    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_SMALL_SG32_ONLY)
   endif()
   target_compile_definitions(custom_linear_solver_ops PRIVATE
     CLS_PAR_ND_DEPTH=${CLS_PAR_ND_DEPTH}

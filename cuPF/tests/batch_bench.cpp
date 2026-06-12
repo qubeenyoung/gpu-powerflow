@@ -14,24 +14,58 @@
 
 namespace {
 
-ComputePolicy parse_compute(const std::string& s)
+// Parsed "<backend>-<precision>" spec, e.g. "custom-tf32" / "cudss-fp64". A bare precision
+// ("fp64") defaults to the cuDSS backend (back-compat with the old <compute> arg).
+struct BenchSpec {
+    CudaLinearSolverKind backend     = CudaLinearSolverKind::CuDSS;
+    ComputePolicy        compute     = ComputePolicy::Mixed;
+    CustomPrecision      custom_prec = CustomPrecision::FP32;
+};
+
+// Grammar: [<backend>-]<compute>[-<custom_precision>]
+//   backend          : cudss | custom            (default cudss)
+//   compute          : fp64 | fp32 | mixed        (cuPF ComputePolicy)
+//   custom_precision : fp64 | fp32 | tf32         (custom factor precision; default fp32)
+// e.g. cudss-fp64, custom-fp64, cudss-mixed, custom-mixed-fp32, custom-mixed-tf32.
+BenchSpec parse_spec(const std::string& s)
 {
-    if (s == "fp32") return ComputePolicy::FP32;
-    if (s == "mixed") return ComputePolicy::Mixed;
-    return ComputePolicy::FP64;
+    std::vector<std::string> t;
+    for (size_t pos = 0; pos <= s.size();) {
+        size_t d = s.find('-', pos);
+        if (d == std::string::npos) d = s.size();
+        t.push_back(s.substr(pos, d - pos));
+        pos = d + 1;
+    }
+    BenchSpec spec;
+    size_t idx = 0;
+    if (!t.empty() && (t[0] == "cudss" || t[0] == "custom")) {
+        spec.backend = (t[0] == "custom") ? CudaLinearSolverKind::Custom : CudaLinearSolverKind::CuDSS;
+        idx = 1;
+    }
+    const std::string compute = (idx < t.size()) ? t[idx] : "mixed";
+    const std::string cprec   = (idx + 1 < t.size()) ? t[idx + 1] : "";
+    if      (compute == "fp64") { spec.compute = ComputePolicy::FP64;  spec.custom_prec = CustomPrecision::FP64; }
+    else if (compute == "fp32") { spec.compute = ComputePolicy::FP32;  spec.custom_prec = CustomPrecision::FP32; }
+    else if (compute == "tf32") { spec.compute = ComputePolicy::FP32;  spec.custom_prec = CustomPrecision::TF32; }
+    else                        { spec.compute = ComputePolicy::Mixed; spec.custom_prec = CustomPrecision::FP32; }
+    if      (cprec == "fp64") spec.custom_prec = CustomPrecision::FP64;
+    else if (cprec == "fp32") spec.custom_prec = CustomPrecision::FP32;
+    else if (cprec == "tf32") spec.custom_prec = CustomPrecision::TF32;
+    return spec;
 }
 
 }  // namespace
 
 int main(int argc, char** argv)
 {
-    // args: <case_dir> <compute=mixed|fp32> <B1,B2,...> [repeats]
+    // args: <case_dir> <backend-precision> <B1,B2,...> [repeats] [max_iter] [scale_step]
     if (argc < 4) {
-        std::cerr << "usage: batch_bench <case_dir> <compute> <B1,B2,...> [repeats]\n";
+        std::cerr << "usage: batch_bench <case_dir> <backend-precision> <B1,B2,...> [repeats] [max_iter] [scale_step]\n"
+                  << "  backend-precision: cudss-fp64|cudss-fp32|cudss-mixed|custom-fp64|custom-fp32|custom-tf32\n";
         return 2;
     }
     const std::string case_dir = argv[1];
-    const ComputePolicy compute = parse_compute(argv[2]);
+    const BenchSpec spec = parse_spec(argv[2]);
     std::vector<int32_t> batches;
     {
         std::string s = argv[3];
@@ -43,32 +77,29 @@ int main(int argc, char** argv)
             pos = comma + 1;
         }
     }
-    const int repeats = (argc > 4) ? std::stoi(argv[4]) : 5;
+    const int repeats              = (argc > 4) ? std::stoi(argv[4]) : 5;
+    const int max_iter             = (argc > 5) ? std::stoi(argv[5]) : 30;
+    const double load_scale_step   = (argc > 6) ? std::stod(argv[6]) : 0.001;
 
     const auto data = cupf::tests::load_dump_case(case_dir);
     const int32_t n = data.rows;
 
     NewtonOptions opts;
-    opts.backend = BackendKind::CUDA;
-    opts.compute = compute;
-    // CUPF_BENCH_CUSTOM=1 benches the custom direct solver (FP64 compute only; its internal factor
-    // precision is set by CUPF_CUSTOM_PRECISION). Default is cuDSS.
-    opts.cuda_linear_solver = (std::getenv("CUPF_BENCH_CUSTOM") != nullptr)
-                                  ? CudaLinearSolverKind::Custom
-                                  : CudaLinearSolverKind::CuDSS;
+    opts.backend            = BackendKind::CUDA;
+    opts.compute            = spec.compute;
+    opts.cuda_linear_solver = spec.backend;
+    opts.custom.precision   = spec.custom_prec;   // ignored unless backend = Custom
+    opts.custom.serial_nd   = true;               // deterministic ordering for reproducible benchmarking
+    opts.custom.metis_seed  = 1588;               // (matches the standalone sweep)
 
     NRConfig config;
     config.tolerance = 1e-8;
-    if (const char* t = std::getenv("CUPF_BENCH_TOL")) config.tolerance = std::stod(t);
-    config.max_iter = 30;
-    if (const char* m = std::getenv("CUPF_BENCH_MAX_ITER")) config.max_iter = std::stoi(m);
-    double load_scale_step = 0.001;
-    if (const char* s = std::getenv("CUPF_BENCH_SCALE_STEP")) load_scale_step = std::stod(s);
+    config.max_iter  = max_iter;
     SolveOptions solve_options;
 
     std::cout << "case=" << data.case_name << " n_bus=" << n
               << " nnz=" << data.ybus_data.size()
-              << " compute=" << argv[2] << "\n";
+              << " spec=" << argv[2] << "\n";
     std::cout << "B,solve_total_us,ibus_us,mismatch_us,mnorm_us,jac_us,prep_us,fac_us,sol_us,vupd_us,upload_us,download_us\n";
 
     for (int32_t B : batches) {

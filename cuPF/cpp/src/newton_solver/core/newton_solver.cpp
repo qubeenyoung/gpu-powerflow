@@ -205,6 +205,7 @@ void NewtonSolver::initialize(
         .n_bus = ybus.rows,
         .pv    = pv, .n_pv = n_pv,
         .pq    = pq, .n_pq = n_pq,
+        .custom = &options_.custom,
     };
 
     {

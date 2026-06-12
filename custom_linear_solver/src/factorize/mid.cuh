@@ -234,16 +234,16 @@ __global__ void factor_mid_blocked(int lbegin, int lend,
 
     // Factorize the front in place: TF32-eligible shapes take the blocked Tensor-Core path; all
     // other shapes / precisions run the scalar phases (Phase 1 panel LU + Phase 2 U-solve +
-    // Phase 3 trailing, with the fsz<=48 fused Phase 1+3 fast path).
+    // Phase 3 trailing, with the fsz<=kFusedSmallFrontMax fused Phase 1+3 fast path).
     bool did_tc = false;
     if constexpr (UseTC) {
-        if (fsz > 48 && uc >= 32 && nc >= 8 && nc <= 32 && uc <= 256) {
+        if (fsz > CLS_TC_FSZ_MIN && uc >= CLS_TC_UC_MIN && nc >= CLS_TC_NC_MIN && nc <= kTensorCorePivotColumnCap && uc <= CLS_TC_UC_CAP) {
             factorize_front_blocked_tf32(Fs, fsz, nc, t, nt, sing);
             did_tc = true;
         }
     }
     if (!did_tc) {
-        if (fsz <= 48) {
+        if (fsz <= kFusedSmallFrontMax) {
             lu_small_front<T>(Fs, fsz, nc, t, nt, sing);              // Phase 1 + Phase 3 fused
         } else {
             lu_panel_factor<T>(Fs, fsz, nc, t, nt, sing);            // Phase 1

@@ -1,6 +1,0 @@
-case_name,n_bus,ybus_nnz,B,init_ms,solve_ms,solve_ms_per_system,iterations,max_final_mismatch,source
-case3012wp,3012,10144,1,5.27179,18.227257,18.227257,4.0,8.755433349964224e-12,tutorial_cpp_reference_b1_median
-case6468rte,6468,22598,1,11.892282,38.964303,38.964303,4.0,7.305739336628312e-12,tutorial_cpp_reference_b1_median
-case8387pegase,8387,34377,1,17.663149,57.329909,57.329909,4.0,1.8074319818595086e-11,tutorial_cpp_reference_b1_median
-case_ACTIVSg25k,25000,85220,1,47.932358,243.788291,243.788291,5.0,9.107630280734219e-11,tutorial_cpp_reference_b1_median
-case_SyntheticUSA,82000,278406,1,225.66381,1771.592661,1771.592661,7.0,7.221128696883216e-11,tutorial_cpp_reference_b1_median

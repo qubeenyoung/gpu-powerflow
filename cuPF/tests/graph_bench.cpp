@@ -4,7 +4,7 @@
 // with CUDA-graph capture); it just times the whole solve_batch with warmup + averaging. solve_batch
 // is synchronous on return (it downloads results), so chrono captures the full GPU time.
 //
-//   usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats]
+//   usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats] [max_iter] [scale_step] [tol]
 //
 // backend:
 //   cudss        - cuda_linear_solver=CuDSS
@@ -25,7 +25,7 @@
 int main(int argc, char** argv)
 {
     if (argc < 4) {
-        std::cerr << "usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats]\n";
+        std::cerr << "usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats] [max_iter] [scale_step] [tol]\n";
         return 2;
     }
     const std::string case_dir = argv[1];
@@ -42,7 +42,10 @@ int main(int argc, char** argv)
             pos = comma + 1;
         }
     }
-    const int repeats = (argc > 4) ? std::stoi(argv[4]) : 10;
+    const int repeats              = (argc > 4) ? std::stoi(argv[4]) : 10;
+    const int max_iter             = (argc > 5) ? std::stoi(argv[5]) : 30;
+    const double load_scale_step   = (argc > 6) ? std::stod(argv[6]) : 0.001;
+    const double tolerance         = (argc > 7) ? std::stod(argv[7]) : 1e-8;
 
     NewtonOptions opts;
     opts.backend = BackendKind::CUDA;
@@ -63,12 +66,8 @@ int main(int argc, char** argv)
     const int32_t n = data.rows;
 
     NRConfig config;
-    config.tolerance = 1e-8;  // project default; override with CUPF_BENCH_TOL
-    if (const char* t = std::getenv("CUPF_BENCH_TOL")) config.tolerance = std::stod(t);
-    config.max_iter = 30;
-    if (const char* m = std::getenv("CUPF_BENCH_MAX_ITER")) config.max_iter = std::stoi(m);
-    double load_scale_step = 0.001;
-    if (const char* s = std::getenv("CUPF_BENCH_SCALE_STEP")) load_scale_step = std::stod(s);
+    config.tolerance = tolerance;
+    config.max_iter  = max_iter;
     SolveOptions solve_options;
 
     std::cout << "case=" << data.case_name << " n_bus=" << n

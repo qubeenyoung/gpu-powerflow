@@ -231,7 +231,7 @@ __device__ __forceinline__ void trailing_update_tf32_tc(float* F, int fsz, int n
 // contribution block straight into the parent front (fused trail+extend, baked in — removes the
 // uncoalesced CB global write+read round-trip; docs note 30/53). UseTC (T = float, TF32) runs the
 // TF32 mma trailing on eligible shapes (nc≤32, uc≤256) and scalar otherwise; FP64/FP32 run the
-// staged-scalar trailing. Big fronts are always fsz>48 (no lu_small_front fast path), so the kernel
+// staged-scalar trailing. Big fronts are always fsz>kFusedSmallFrontMax (no lu_small_front fast path), so the kernel
 // runs panel LU -> U-solve -> trailing in order and the fused drain is unconditional.
 // Supersedes factor_big_staged<T> and factor_big_tf32_ptx. The L/U staging (2·nc·uc·sizeof(T)) always
 // fits the 96 KB opt-in budget on power-grid Jacobians, so there is no non-staged fallback.
@@ -268,10 +268,10 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
         // T == float (TF32). TC-eligible shapes stage L/U as float and run the mma trailing.
         float* Ltf = reinterpret_cast<float*>(smem_big_unified);
         float* Utf = Ltf + (long)uc_pad_max * nc_pad_max;
-        const bool tc = (nc <= 32 && uc <= 256);
-        fused = (extend_ok && fsz > 48 && tc);
+        const bool tc = (nc <= kTensorCorePivotColumnCap && uc <= CLS_TC_UC_CAP);
+        fused = (extend_ok && fsz > kFusedSmallFrontMax && tc);
         (void)level_max_nc; (void)level_max_uc;
-        // Big fronts are always fsz>48, so no fused Phase 1+3 fast path: panel LU, U-solve, trailing.
+        // Big fronts are always fsz>kFusedSmallFrontMax, so no fused Phase 1+3 fast path: panel LU, U-solve, trailing.
         lu_panel_factor<float>(F, fsz, nc, t, nt, sing);            // Phase 1
         u_panel_solve<float>(F, fsz, nc, uc, t, nt);               // Phase 2
         if (!tc)        trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);          // Phase 3
@@ -281,7 +281,7 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
     } else {
         T* sh_L = reinterpret_cast<T*>(smem_big_unified);
         T* sh_U = sh_L + (long)level_max_uc * level_max_nc;
-        fused = (extend_ok && fsz > 48);
+        fused = (extend_ok && fsz > kFusedSmallFrontMax);
         (void)uc_pad_max; (void)nc_pad_max;
         lu_panel_factor<T>(F, fsz, nc, t, nt, sing);               // Phase 1
         u_panel_solve<T>(F, fsz, nc, uc, t, nt);                   // Phase 2

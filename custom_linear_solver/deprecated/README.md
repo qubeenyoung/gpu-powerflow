@@ -53,6 +53,9 @@ Solve 의 spine fusion 실험. etree 최상단 *cnt=1 chain* (spine_start_level.
 - `dispatch_spine.cuh.snippet` — 기존 `issue_solve_levels` 의 spine metadata / launch_fwd_spine / launch_bwd_spine 람다.
 - 활성화 (옛): 항상 ON, `has_spine && spine_lo < num_plevels` 시 자동 dispatch.
 
+### `big_split_2d/` (2026-06-11)
+Big-tier TF32 trailing GEMM 을 thread block 들로 fan-out 해 under-filled 레벨(few big fronts × B < SM)의 유휴 SM 을 채우는 실험 (구 `#ifdef EXP_260611_BIG_SPLIT`). ncu 로 occupancy 1→9-10 block/SM·barrier stall 5.34→0.04 확인, **usa B=1 factorize 1.14×**. 그러나 **70K 회귀(~0.95×)·B≥16 손해** — 2-커널(panel→tiled trailing)의 global 왕복 + 레벨당 2nd launch 오버헤드가 이득을 잠식. 깔끔히 이기려면 cooperative single kernel(`grid.sync`)이 필요한데 whole-iteration CUDA graph 와 충돌 우려. v2 tile 커널이 1.14× 낸 버전. 상세: `big_split_2d/README.md`.
+
 ### `factor_spine/` (2026-06-08)
 Factor 의 spine chain 실험. etree 상단 cnt=1 chain 을 단일 *staged-single* kernel (`factor_panel_chain_staged_single`) 로 fuse. 측정상 wall −1~−5% marginal. solve_spine 과 같이 ROI 낮아 master 에서 제거. plan 단의 `spine_start_level` / `h_spine_panels` / `h_subtree_*` metadata 는 multistream fork/join 의 *경계 정보* 로 여전히 사용 — 제거된 건 *spine 영역의 fused kernel + 그 dispatch 분기* 뿐.
 

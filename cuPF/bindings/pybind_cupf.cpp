@@ -190,6 +190,13 @@ PYBIND11_MODULE(_cupf, m)
         .value("Custom", CudaLinearSolverKind::Custom)
         .export_values();
 
+    py::enum_<CustomPrecision>(m, "CustomPrecision",
+        "custom 솔버 factor 정밀도.")
+        .value("FP64", CustomPrecision::FP64)
+        .value("FP32", CustomPrecision::FP32)
+        .value("TF32", CustomPrecision::TF32)
+        .export_values();
+
     py::enum_<CpuLinearSolverKind>(m, "CpuLinearSolverKind",
         "CPU sparse linear solver backend.")
         .value("KLU", CpuLinearSolverKind::KLU)
@@ -245,6 +252,24 @@ PYBIND11_MODULE(_cupf, m)
         .def_readwrite("pivot_epsilon", &CuDSSOptions::pivot_epsilon,
             "auto_pivot_epsilon=False일 때 사용할 pivot epsilon");
 
+    py::class_<CustomSolverConfig>(m, "CustomSolverConfig",
+        "custom direct solver(custom_linear_solver) 런타임 설정. cuda_linear_solver=Custom 일 때 적용.")
+        .def(py::init<>())
+        .def_readwrite("precision", &CustomSolverConfig::precision,
+            "factor 정밀도 (CustomPrecision.FP64/FP32/TF32). TF32 는 FP32 storage(compute=FP32/Mixed)에서만")
+        .def_readwrite("serial_nd", &CustomSolverConfig::serial_nd,
+            "True이면 결정적 serial METIS-ND (재현용), False이면 parallel-ND")
+        .def_readwrite("metis_seed", &CustomSolverConfig::metis_seed,
+            "nested-dissection random seed")
+        .def_readwrite("tier_split", &CustomSolverConfig::tier_split,
+            "occupancy tier-split 디스패치 활성화")
+        .def_readwrite("max_panel_width", &CustomSolverConfig::max_panel_width,
+            "supernode amalgamation cap (열 수)")
+        .def_readwrite("enable_shift_retry", &CustomSolverConfig::enable_shift_retry,
+            "특이 pivot 시 diagonal shift 재시도")
+        .def_readwrite("shift_retry_epsilon", &CustomSolverConfig::shift_retry_epsilon,
+            "shift 재시도 epsilon");
+
     py::class_<NewtonOptions>(m, "NewtonOptions",
         "solver 생성자에 전달하는 설정.\n"
         "backend, compute policy, cuDSS 옵션을 선택한다.")
@@ -260,7 +285,9 @@ PYBIND11_MODULE(_cupf, m)
         .def_readwrite("cuda_linear_solver", &NewtonOptions::cuda_linear_solver,
             "CUDA FP64 linear solver backend (CudaLinearSolverKind.CuDSS 또는 Custom)")
         .def_readwrite("cudss", &NewtonOptions::cudss,
-            "CUDA direct solver 런타임 설정")
+            "cuDSS direct solver 런타임 설정")
+        .def_readwrite("custom", &NewtonOptions::custom,
+            "custom direct solver 런타임 설정 (precision/serial_nd/seed 등; cuda_linear_solver=Custom 일 때)")
         .def_readwrite("use_cuda_graph", &NewtonOptions::use_cuda_graph,
             "전체 Newton 반복을 CUDA 그래프로 캡처해 매 스텝 replay (backend=CUDA + "
             "cuda_linear_solver=Custom + CUPF_ENABLE_CUDA_GRAPH 빌드에서만 유효)");

@@ -31,6 +31,32 @@ inline constexpr int kMaxPivotColumns = 64;
 // Tensor-core trailing GEMM caps the staged pivot dimension at this many columns.
 inline constexpr int kTensorCorePivotColumnCap = 32;
 
+// Fronts with fsz <= this run the lu_small_front fused (Phase 1+2+3) path inside the mid kernel;
+// larger fronts run the blocked panel-LU / U-solve / trailing. Big fronts are always > this.
+// (Was a scattered literal 48 in factorize/{mid,big}.cuh — consolidated here.)
+inline constexpr int kFusedSmallFrontMax = 48;
+
+
+// TC-eligibility caps for the TF32 trailing path (mid + big). Relaxed defaults (2026-06-11): nearly
+// every mid/big front takes the tensor-core path — the uc>256 spine fronts that used to fall to
+// scalar (the L25 factorize spike) now run TF32 too. Override via -D for A/Bs.
+// Shared-budget bound: the whole-front staging is (2·uc_pad·nc_pad + 4·nc_pad)·4 B ≤ 99 KiB opt-in,
+// i.e. uc_pad·nc_pad ≤ ~12.6 K. With nc cap 32 that allows uc up to 384; UC_CAP=512 is safe for
+// nc≤24 (power-grid Jacobians have nc≤16, so 512 leaves ~35 % headroom). The max_uc clamp in
+// front_range_caps.hpp tracks CLS_TC_UC_CAP so the dispatch sizes shared consistently (no OOB).
+#ifndef CLS_TC_UC_CAP
+#define CLS_TC_UC_CAP 512      // max contribution dim (uc) eligible for the TF32 mma trailing
+#endif
+#ifndef CLS_TC_NC_MIN
+#define CLS_TC_NC_MIN 1        // mid: min pivot cols (K) for the blocked TF32 path
+#endif
+#ifndef CLS_TC_UC_MIN
+#define CLS_TC_UC_MIN 1        // mid: min uc for the blocked TF32 path
+#endif
+#ifndef CLS_TC_FSZ_MIN
+#define CLS_TC_FSZ_MIN 32      // mid: min front size for the blocked TF32 path (mid starts at 33)
+#endif
+
 // Opt-in dynamic shared-memory size passed to cudaFuncAttributeMaxDynamicSharedMemorySize for the
 // shared-resident kernels (sm_86 cap). THIS budget — together with the runtime precision — is the
 // mid/big boundary: dispatch_factor_mid keeps a front shared-resident (mid kernel) only while

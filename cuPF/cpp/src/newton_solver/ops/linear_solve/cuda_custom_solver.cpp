@@ -31,23 +31,35 @@ namespace {
 
 namespace cls = custom_linear_solver;
 
-// Select the factor precision via SolverConfig. The library runs the
-// mixed/FP32/TF32/FP16 factor internally on the registered Jacobian, so cuPF
-// only picks the precision here. Env CUPF_CUSTOM_PRECISION = fp64|fp32|tf32|fp16|tc|mixed
-// (default = the per-class `dflt`). "tc" maps to TF32 for back-compat; "mixed"
-// maps to FP32 (the FP32 storage has no FP64 master to refine against).
-cls::SolverConfig config_from_env(cls::Precision dflt)
+// Build the custom_linear_solver SolverConfig from the cuPF CustomSolverConfig (NewtonOptions::
+// custom, forwarded via InitializeContext). `storage_dflt` is the precision the chosen storage
+// class can represent: FP64 storage -> FP64; FP32 / Mixed storage -> FP32. custom.precision picks
+// FP32 vs TF32 within an FP32 storage and is clamped so the compute-policy storage and the
+// requested factor precision can't contradict. `c == nullptr` (no options forwarded) falls back to
+// `storage_dflt` with library defaults.
+cls::SolverConfig make_solver_config(const CustomSolverConfig* c, cls::Precision storage_dflt)
 {
     cls::SolverConfig config;
-    config.precision = dflt;
-    if (const char* s = std::getenv("CUPF_CUSTOM_PRECISION")) {
-        if (std::strcmp(s, "fp64") == 0)      config.precision = cls::Precision::FP64;
-        else if (std::strcmp(s, "fp32") == 0) config.precision = cls::Precision::FP32;
-        else if (std::strcmp(s, "tf32") == 0) config.precision = cls::Precision::TF32;
-        else if (std::strcmp(s, "fp16") == 0) config.precision = cls::Precision::FP16;
-        else if (std::strcmp(s, "tc") == 0)   config.precision = cls::Precision::TF32; // back-compat
-        else if (std::strcmp(s, "mixed") == 0) config.precision = cls::Precision::FP32;
+    if (c == nullptr) {
+        config.precision = storage_dflt;
+        return config;
     }
+    switch (c->precision) {
+        case CustomPrecision::FP64: config.precision = cls::Precision::FP64; break;
+        case CustomPrecision::FP32: config.precision = cls::Precision::FP32; break;
+        case CustomPrecision::TF32: config.precision = cls::Precision::TF32; break;
+    }
+    if (storage_dflt == cls::Precision::FP64) {
+        config.precision = cls::Precision::FP64;          // FP64 storage factors FP64 only
+    } else if (config.precision == cls::Precision::FP64) {
+        config.precision = cls::Precision::FP32;          // FP32 storage can't factor FP64
+    }
+    config.use_parallel_nested_dissection = !c->serial_nd;
+    config.metis_seed                     = c->metis_seed;
+    config.tier_split                     = c->tier_split;
+    config.max_panel_width                = c->max_panel_width;
+    config.enable_shift_retry             = c->enable_shift_retry;
+    config.shift_retry_epsilon            = c->shift_retry_epsilon;
     return config;
 }
 
@@ -162,7 +174,7 @@ void CudaLinearSolveCustomFp64::initialize(CudaFp64Storage& buf, const Initializ
 
     // Bind J / F / dx views into the solver, then run symbolic analysis once.
     auto state = std::make_unique<State>();
-    state->solver = cls::Solver(config_from_env(cls::Precision::FP64));
+    state->solver = cls::Solver(make_solver_config(ctx.custom, cls::Precision::FP64));
     check_status(state->solver.set_data(make_matrix_view(buf)), "set_data");
     check_status(state->solver.set_rhs(make_vector_view(buf.dimF, buf.d_F.data())), "set_rhs");
     check_status(state->solver.set_solution(make_vector_view(buf.dimF, buf.d_dx.data())),
@@ -315,7 +327,7 @@ void CudaLinearSolveCustomFp32::initialize(CudaFp32Storage& buf, const Initializ
     }
 
     auto state = std::make_unique<State>();
-    state->solver = cls::Solver(config_from_env(cls::Precision::FP32));
+    state->solver = cls::Solver(make_solver_config(ctx.custom, cls::Precision::FP32));
     check_status(state->solver.set_data(make_float_matrix_view(
                      buf.dimF, buf.nnz_J, buf.d_J_row_ptr.data(), buf.d_J_col_idx.data(),
                      buf.d_J_values.data())),
@@ -483,7 +495,7 @@ void CudaLinearSolveCustomMixed::initialize(CudaMixedStorage& buf, const Initial
     matrix.values = nullptr;
 
     auto state = std::make_unique<State>();
-    state->solver = cls::Solver(config_from_env(cls::Precision::FP32));
+    state->solver = cls::Solver(make_solver_config(ctx.custom, cls::Precision::FP32));
     check_status(state->solver.set_data(matrix), "set_data");
     check_status(state->solver.analyze(), "analyze");
     sync_cuda_for_timing();
