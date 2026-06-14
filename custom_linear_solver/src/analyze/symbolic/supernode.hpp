@@ -44,4 +44,24 @@ struct PanelPartition {
 PanelPartition relaxed_panels(int n, const std::vector<int>& parent,
                               const std::vector<int>& colcount, int cap);
 
+// Deep-K amalgamation (exp_260612 compute-bound experiment, CLS_AMALG_K). relaxed_panels only
+// merges single-child etree CHAINS, so power-grid leaf regions stay thin (nc ~ colcount ~ 2-3);
+// the batched trailing GEMM is then thin-K (K=nc) and memory-bound. deep_k_panels additionally
+// absorbs whole child SUBTREES into a parent panel to thicken nc toward `cap_nc` (capped at 32 by
+// the kTensorCorePivotColumnCap + single-warp solve substitution limits), raising arithmetic
+// intensity so tensor cores can fire.
+//
+// Validity (the nesting invariant relaxed_panels guards against): a panel must be a postorder-
+// CONTIGUOUS column range so its member columns sort to the leading nc front rows, and each
+// merged child's contribution block must nest in the single parent front. Both hold here because
+// (a) we only ever absorb a child whose grown range is immediately adjacent below the parent's
+// current first column (contiguity preserved), and (b) by the elimination-tree theorem a column's
+// CB nests in its parent's structure, so absorbing it leaves the parent's CB unchanged -> a single
+// parent front. multifrontal_symbolic still re-validates via asm_idx==-1.
+//
+// `cap_nc` bounds pivot columns per panel (clamped to [1,32]). Built on top of relaxed_panels(cap_nc)
+// so chain merges are retained; only the extra sibling/subtree absorption is new.
+PanelPartition deep_k_panels(int n, const std::vector<int>& parent,
+                             const std::vector<int>& colcount, int cap_nc);
+
 }  // namespace custom_linear_solver::symbolic

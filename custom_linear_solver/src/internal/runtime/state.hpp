@@ -53,6 +53,20 @@ struct State {
     double* d_y_batch = nullptr;        // batch_count * num_rows FP64 solve vector (FP64 mode)
     float*  d_y_batch_f = nullptr;      // batch_count * num_rows FP32 solve vector (FP32/TF32)
     int* d_sing = nullptr;
+    // exp_260612 gather-based assembly (CLS_GATHER_ASM, batch fp32): factor kernels assemble fronts
+    // directly (gather matrix + children CBs) instead of global memset + scatter + extend-add.
+    const double* cur_values_d = nullptr;  // batched input values (double; cast to float front)
+    const float* cur_values_f = nullptr;   // batched input values (float)
+    int cur_values_double = 1;             // 1 -> use cur_values_d, 0 -> cur_values_f
+    const int* cur_o2c = nullptr;          // ordered_value_to_csr (q -> value slot)
+    int cur_nnz = 0;
+    bool gather_asm = false;               // gather path active this factorize
+    int gather_mode = 0;                   // 0 = atomic gather, 1 = output-centric (gather_oc)
+    bool phase_batched = false;            // gather_pb: assembly hoisted to a separate per-level pre-pass
+    float* d_cb_batch_f = nullptr;         // CB buffer (batch_count * plan.cb_total) for gather path
+    long cb_alloc_elems = 0;               // current d_cb_batch_f capacity (elements)
+    void* factor_gather_graph_exec = nullptr;  // lazily-captured graph for the gather factor path
+    const void* gather_graph_values = nullptr; // value pointer the gather graph was captured against
     void* stream = nullptr;        // internal-graph mode: solver-owned; external: caller-owned
     bool  owns_stream = false;     // true only when this State created `stream`
     void* factor_graph_exec = nullptr;

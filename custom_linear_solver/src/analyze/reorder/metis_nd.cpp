@@ -1,6 +1,7 @@
 #include "analyze/reorder/metis_nd.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <thread>
 #include <type_traits>
@@ -149,6 +150,167 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
         if (part[v] == 2) perm[n0 + n1 + (j++)] = v;               // separator last
 }
 
+// =======================================================================================
+//  GPU/TC-OBJECTIVE NESTED DISSECTION   (exp_260612 — own the recursion + objective)
+// =======================================================================================
+//
+// We own the recursion, the per-split objective, and the stopping granularity; METIS_Compute-
+// VertexSeparator stays the (well-tuned) bisection primitive. At each subgraph we generate C
+// candidate separators spanning METIS's (separator-size ↔ balance) tradeoff curve (varied
+// UFACTOR), then keep the GPU-best by a cost that — unlike METIS's fill objective — discounts
+// large separators on the TF32/Ozaki path (TC accelerates the big top fronts at B=1, doc 11) and
+// penalizes imbalance (children fill the GPU in parallel). The recursion stops at a GPU-tuned leaf
+// size (front-tier lever METIS doesn't expose). perm convention matches par_nd_rec
+// (perm[new_pos]=old_vertex, separator last) — drop-in for the pipeline.
+struct GpuNdParams {
+    int cand = 4;          // candidate separators per node (CLS_GPU_ND_CAND)
+    int leaf = 2000;       // stop dissecting below this n -> base_nodend (CLS_GPU_ND_LEAF)
+    double lambda = 0.5;   // imbalance penalty, as a fraction of separator cost (CLS_GPU_ND_LAMBDA)
+    double tc_g = 1.0;     // TC trailing speedup for the separator-cost discount (CLS_GPU_ND_TC_G)
+    int fm = 1;            // FM separator refinement toward the GPU objective (CLS_GPU_ND_FM)
+    int fm_passes = 4;     // FM passes (CLS_GPU_ND_FM_PASS)
+    int seed = 42;
+};
+
+// Critical-path cost of a separator front of size s, TC-discounted (doc 11: trailing share s_share
+// ≈ (s−nc)/s runs on tensor cores → divided by tc_g; the panel-LU part stays scalar). nc unknown at
+// graph level → approximate by the panel-width cap (~16). tc_g≤1 → plain s³ (no discount).
+double sep_front_cost(double s, double tc_g)
+{
+    double c = s * s * s;
+    if (tc_g > 1.0 && s > 0.0) {
+        const double nc = 16.0;
+        const double share = s > nc ? (s - nc) / s : 0.0;
+        c *= (1.0 - share) + share / tc_g;
+    }
+    return c;
+}
+
+// Full GPU separator-front cost = sep_front_cost(|S|) scaled by an imbalance penalty (balanced
+// children → parallelism/short critical path). This is the objective the FM refinement minimizes —
+// unlike METIS, which only minimizes |S| (fill).
+double gpu_cost(double ns, double na, double nb, double lambda, double tc_g)
+{
+    const double tot = na + nb;
+    const double imb = tot > 0.0 ? std::abs(na - nb) / tot : 0.0;
+    return sep_front_cost(ns, tc_g) * (1.0 + lambda * imb);
+}
+
+// FM vertex-separator refinement toward the GPU objective (exp_260612 — owns the SEPARATOR
+// objective, the part METIS won't give). Starts from a valid separator (part[v] ∈ {0=A,1=B,2=S})
+// and greedily applies the node-move "v∈S → side d": v leaves S to d, and every neighbor of v on
+// the opposite side (1−d) is forced into S (preserves validity — no A-B edge). |S| changes by
+// (oppcnt−1) and balance shifts; gpu_cost weighs both, so the objective can ACCEPT a larger
+// separator when it buys balance — the divergence from METIS's pure-fill local minimum. Greedy
+// hill-climb over the live separator boundary; power-grid separators are small (≈√n) so it's cheap.
+void gpu_sep_refine(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
+                    std::vector<idx_t>& part, int& na, int& nb, int& ns,
+                    double lambda, double tc_g, int max_passes)
+{
+    if (lambda <= 0.0 && tc_g <= 1.0) return;   // pure |S| objective: METIS is already at its min
+    const int n = static_cast<int>(xadj.size()) - 1;
+    auto opp_cnt = [&](int v, int d) {
+        const idx_t other = static_cast<idx_t>(1 - d); int c = 0;
+        for (idx_t p = xadj[v]; p < xadj[v + 1]; ++p) if (part[adj[p]] == other) ++c;
+        return c;
+    };
+    for (int pass = 0; pass < max_passes; ++pass) {
+        std::vector<int> sep;
+        sep.reserve(static_cast<std::size_t>(ns) + 16);
+        for (int v = 0; v < n; ++v) if (part[v] == 2) sep.push_back(v);
+        bool improved = false;
+        const long move_cap = 4L * static_cast<long>(sep.size()) + 16;
+        long moves = 0;
+        while (moves < move_cap) {
+            const double cur = gpu_cost(ns, na, nb, lambda, tc_g);
+            double best_gain = cur * 1e-9 + 1e-12;
+            int best_v = -1, best_d = 0;
+            for (int v : sep) {
+                if (part[v] != 2) continue;             // stale (already moved)
+                for (int d = 0; d < 2; ++d) {
+                    const int cnt = opp_cnt(v, d);
+                    const double new_ns = (double)ns - 1.0 + cnt;
+                    const double new_na = (d == 0) ? na + 1 : na - cnt;
+                    const double new_nb = (d == 1) ? nb + 1 : nb - cnt;
+                    if (new_na < 1.0 || new_nb < 1.0) continue;
+                    const double gain = cur - gpu_cost(new_ns, new_na, new_nb, lambda, tc_g);
+                    if (gain > best_gain) { best_gain = gain; best_v = v; best_d = d; }
+                }
+            }
+            if (best_v < 0) break;
+            const int v = best_v, d = best_d, other = 1 - d;
+            part[v] = static_cast<idx_t>(d); --ns; if (d == 0) ++na; else ++nb;
+            for (idx_t p = xadj[v]; p < xadj[v + 1]; ++p) {
+                const int u = adj[p];
+                if (part[u] == other) { part[u] = 2; ++ns; if (other == 0) --na; else --nb; sep.push_back(u); }
+            }
+            improved = true; ++moves;
+        }
+        if (!improved) break;
+    }
+}
+
+void gpu_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
+                std::vector<int>& perm, const GpuNdParams& prm)
+{
+    const int n = static_cast<int>(xadj.size()) - 1;
+    if (n < prm.leaf || adj.empty()) { base_nodend(xadj, adj, perm, prm.seed); return; }
+
+    // Generate C candidate separators (varied UFACTOR spans balanced↔imbalanced cuts), keep GPU-best.
+    std::vector<idx_t> best_part;
+    double best_score = -1.0;
+    int best_n0 = 0, best_n1 = 0;
+    idx_t* mx = const_cast<idx_t*>(xadj.data());
+    idx_t* ma = const_cast<idx_t*>(adj.data());
+    for (int c = 0; c < std::max(1, prm.cand); ++c) {
+        idx_t nv = n, sepsize = 0;
+        std::vector<idx_t> part(n);
+        idx_t opt[METIS_NOPTIONS];
+        METIS_SetDefaultOptions(opt);
+        opt[METIS_OPTION_NUMBERING] = 0;
+        opt[METIS_OPTION_SEED] = prm.seed + 1 + c;   // seed-varied candidates (robust)
+        // Cap imbalance: a small, FIXED tolerance for ALL candidates. The earlier escalating
+        // UFACTOR=1+c*120 produced extreme-imbalance traps at high CAND that the lambda penalty
+        // couldn't always reject (CAND≥6 regressed 20-130%). Vary the SEED, not the balance.
+        opt[METIS_OPTION_UFACTOR] = 30;              // ~3% imbalance tolerance, all candidates
+        std::srand(prm.seed + 1 + c);
+        if (METIS_ComputeVertexSeparator(&nv, mx, ma, nullptr, opt, &sepsize, part.data()) != METIS_OK)
+            continue;
+        int n0 = 0, n1 = 0, ns = 0;
+        for (int v = 0; v < n; ++v) { const idx_t pv = part[v]; if (pv == 0) ++n0; else if (pv == 1) ++n1; else ++ns; }
+        if (n0 == 0 || n1 == 0) continue;   // degenerate
+        const double imb = (double)std::abs(n0 - n1) / (double)(n0 + n1);  // 0=balanced
+        const double score = sep_front_cost((double)ns, prm.tc_g) * (1.0 + prm.lambda * imb);
+        if (best_score < 0.0 || score < best_score) {
+            best_score = score; best_part = part; best_n0 = n0; best_n1 = n1;
+        }
+    }
+    if (best_score < 0.0) { base_nodend(xadj, adj, perm, prm.seed); return; }
+
+    // FM-refine the chosen separator toward the GPU objective (move vertices off METIS's fill
+    // local-minimum toward better balance — the one thing METIS's fill objective cannot do).
+    if (prm.fm) {
+        int ns = n - best_n0 - best_n1;
+        gpu_sep_refine(xadj, adj, best_part, best_n0, best_n1, ns, prm.lambda, prm.tc_g, prm.fm_passes);
+    }
+
+    std::vector<idx_t> x0, a0, x1, a1;
+    std::vector<int> m0, m1;
+    induce(xadj, adj, best_part, 0, x0, a0, m0);
+    induce(xadj, adj, best_part, 1, x1, a1, m1);
+    const int n0 = static_cast<int>(m0.size()), n1 = static_cast<int>(m1.size());
+    if (n0 == 0 || n1 == 0) { base_nodend(xadj, adj, perm, prm.seed); return; }
+    std::vector<int> p0, p1;
+    gpu_nd_rec(x0, a0, p0, prm);
+    gpu_nd_rec(x1, a1, p1, prm);
+    perm.assign(n, 0);
+    for (int np = 0; np < n0; ++np) perm[np] = m0[p0[np]];
+    for (int np = 0; np < n1; ++np) perm[n0 + np] = m1[p1[np]];
+    int j = 0;
+    for (int v = 0; v < n; ++v)
+        if (best_part[v] == 2) perm[n0 + n1 + (j++)] = v;
+}
+
 template <typename Fn>
 void par_for(int lo, int hi, Fn&& fn)
 {
@@ -201,6 +363,137 @@ void induce_par(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
                 if (part[adj[p]] == which) sa[w++] = g2l[adj[p]];
         }
     });
+}
+
+// Build an EDGE-WEIGHTED symmetric adjacency from the CSR pattern+values of J. Edge (i,j) weight =
+// quantized |J[i,j]|+|J[j,i]| — the electrical coupling strength. METIS edge-weighted partitioning
+// then minimizes the *weighted* cut, i.e. cuts the electrically WEAK tie-lines (high-impedance
+// interfaces) — the natural power-grid separators that fill-objective METIS (no edge weights) cannot
+// target. Weights quantized to [1, kWmax] (METIS needs positive int weights). (exp_260612 Stage 2)
+void build_weighted_symmetric_adjacency(int n, const int* rowptr, const int* colidx,
+                                        const double* vals, std::vector<idx_t>& xadj,
+                                        std::vector<idx_t>& adjncy, std::vector<idx_t>& adjwgt)
+{
+    struct E { int a, b; double w; };
+    std::vector<E> e;
+    e.reserve(static_cast<std::size_t>(rowptr[n]));
+    for (int i = 0; i < n; ++i)
+        for (int p = rowptr[i]; p < rowptr[i + 1]; ++p) {
+            const int j = colidx[p];
+            if (j == i || j < 0 || j >= n) continue;
+            const double w = std::fabs(vals[p]);
+            e.push_back({std::min(i, j), std::max(i, j), w});   // undirected pair
+        }
+    std::sort(e.begin(), e.end(), [](const E& x, const E& y) {
+        return x.a != y.a ? x.a < y.a : x.b < y.b;
+    });
+    // Accumulate duplicate (a,b) pairs (J[i,j] and J[j,i]) into one undirected weight.
+    std::vector<E> uniq;
+    uniq.reserve(e.size());
+    double wmax = 0.0;
+    for (std::size_t k = 0; k < e.size();) {
+        std::size_t m = k;
+        double s = 0.0;
+        while (m < e.size() && e[m].a == e[k].a && e[m].b == e[k].b) { s += e[m].w; ++m; }
+        uniq.push_back({e[k].a, e[k].b, s});
+        if (s > wmax) wmax = s;
+        k = m;
+    }
+    constexpr idx_t kWmax = 1000;
+    const double scale = wmax > 0.0 ? wmax / static_cast<double>(kWmax) : 1.0;
+    // Directed CSR: each undirected (a,b) emits a→b and b→a with the same quantized weight.
+    std::vector<int> deg(n, 0);
+    for (const E& u : uniq) { ++deg[u.a]; ++deg[u.b]; }
+    xadj.assign(static_cast<std::size_t>(n) + 1, 0);
+    for (int v = 0; v < n; ++v) xadj[v + 1] = xadj[v] + deg[v];
+    adjncy.resize(static_cast<std::size_t>(xadj[n]));
+    adjwgt.resize(static_cast<std::size_t>(xadj[n]));
+    std::vector<idx_t> pos(xadj.begin(), xadj.end());
+    for (const E& u : uniq) {
+        idx_t qw = scale > 0.0 ? static_cast<idx_t>(u.w / scale) : 1;
+        if (qw < 1) qw = 1;
+        adjncy[pos[u.a]] = u.b; adjwgt[pos[u.a]] = qw; ++pos[u.a];
+        adjncy[pos[u.b]] = u.a; adjwgt[pos[u.b]] = qw; ++pos[u.b];
+    }
+}
+
+// induce() that also carries edge weights into the subgraph (for weighted recursion).
+void induce_weighted(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
+                     const std::vector<idx_t>& wgt, const std::vector<idx_t>& part, idx_t which,
+                     std::vector<idx_t>& sx, std::vector<idx_t>& sa, std::vector<idx_t>& sw,
+                     std::vector<int>& map)
+{
+    const int n = static_cast<int>(xadj.size()) - 1;
+    std::vector<int> g2l(n, -1);
+    map.clear();
+    for (int v = 0; v < n; ++v)
+        if (part[v] == which) { g2l[v] = static_cast<int>(map.size()); map.push_back(v); }
+    const int sn = static_cast<int>(map.size());
+    sx.assign(sn + 1, 0);
+    for (int li = 0; li < sn; ++li) {
+        const int v = map[li];
+        for (idx_t p = xadj[v]; p < xadj[v + 1]; ++p) if (part[adj[p]] == which) sx[li + 1]++;
+    }
+    for (int i = 0; i < sn; ++i) sx[i + 1] += sx[i];
+    sa.resize(sx[sn]); sw.resize(sx[sn]);
+    std::vector<idx_t> pos(sx.begin(), sx.end());
+    for (int li = 0; li < sn; ++li) {
+        const int v = map[li];
+        for (idx_t p = xadj[v]; p < xadj[v + 1]; ++p)
+            if (part[adj[p]] == which) { sa[pos[li]] = g2l[adj[p]]; sw[pos[li]] = wgt[p]; ++pos[li]; }
+    }
+}
+
+// Top-of-tree electrical recursion: for the first `depth` levels, bisect by EDGE-WEIGHTED METIS
+// partitioning (cut weak ties) and derive a vertex separator from the cut boundary; FM-refine it to
+// the GPU balance objective; recurse. Below `depth`, hand to the (unweighted) gpu_nd_rec. The
+// near-planar power grid makes the top separator dominate the B=1 span, so the electrical structure
+// matters most exactly here. (exp_260612 Stage 2)
+void gpu_nd_weighted_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
+                         const std::vector<idx_t>& wgt, std::vector<int>& perm,
+                         const GpuNdParams& prm, int depth)
+{
+    const int n = static_cast<int>(xadj.size()) - 1;
+    if (depth <= 0 || n < prm.leaf || adj.empty()) { gpu_nd_rec(xadj, adj, perm, prm); return; }
+
+    idx_t nv = n, ncon = 1, nparts = 2, edgecut = 0;
+    std::vector<idx_t> part(n, 0);
+    idx_t opt[METIS_NOPTIONS];
+    METIS_SetDefaultOptions(opt);
+    opt[METIS_OPTION_NUMBERING] = 0;
+    opt[METIS_OPTION_SEED] = prm.seed;
+    opt[METIS_OPTION_UFACTOR] = 30;   // ~3% balance tolerance
+    if (METIS_PartGraphRecursive(&nv, &ncon, const_cast<idx_t*>(xadj.data()),
+                                 const_cast<idx_t*>(adj.data()), nullptr, nullptr,
+                                 const_cast<idx_t*>(wgt.data()), &nparts, nullptr, nullptr,
+                                 opt, &edgecut, part.data()) != METIS_OK) {
+        gpu_nd_rec(xadj, adj, perm, prm); return;
+    }
+    // Derive a vertex separator: move part-1 vertices that border part-0 into S (part==2).
+    for (int v = 0; v < n; ++v) {
+        if (part[v] != 1) continue;
+        for (idx_t p = xadj[v]; p < xadj[v + 1]; ++p)
+            if (part[adj[p]] == 0) { part[v] = 2; break; }
+    }
+    int na = 0, nb = 0, ns = 0;
+    for (int v = 0; v < n; ++v) { const idx_t pv = part[v]; if (pv == 0) ++na; else if (pv == 1) ++nb; else ++ns; }
+    if (na == 0 || nb == 0) { gpu_nd_rec(xadj, adj, perm, prm); return; }
+    if (prm.fm) gpu_sep_refine(xadj, adj, part, na, nb, ns, prm.lambda, prm.tc_g, prm.fm_passes);
+
+    std::vector<idx_t> x0, a0, w0, x1, a1, w1;
+    std::vector<int> m0, m1;
+    induce_weighted(xadj, adj, wgt, part, 0, x0, a0, w0, m0);
+    induce_weighted(xadj, adj, wgt, part, 1, x1, a1, w1, m1);
+    const int n0 = static_cast<int>(m0.size()), n1 = static_cast<int>(m1.size());
+    if (n0 == 0 || n1 == 0) { gpu_nd_rec(xadj, adj, perm, prm); return; }
+    std::vector<int> p0, p1;
+    gpu_nd_weighted_rec(x0, a0, w0, p0, prm, depth - 1);
+    gpu_nd_weighted_rec(x1, a1, w1, p1, prm, depth - 1);
+    perm.assign(n, 0);
+    for (int np = 0; np < n0; ++np) perm[np] = m0[p0[np]];
+    for (int np = 0; np < n1; ++np) perm[n0 + np] = m1[p1[np]];
+    int j = 0;
+    for (int v = 0; v < n; ++v) if (part[v] == 2) perm[n0 + n1 + (j++)] = v;
 }
 
 void build_symmetric_adjacency(int n, const int* col_ptr, const int* row_idx,
@@ -327,6 +620,69 @@ bool metis_nd_from_graph(int n, std::vector<int>& xadj_in, std::vector<int>& adj
         adjncy.assign(adjncy_in.begin(), adjncy_in.end());
     }
     return run_nd_on_graph(n, xadj, adjncy, perm, parallel, seed, 0.0);
+}
+
+bool gpu_nd_from_graph(int n, std::vector<int>& xadj_in, std::vector<int>& adjncy_in,
+                       std::vector<int>& perm, int seed)
+{
+    if (n < 0) return false;
+    perm.assign(static_cast<std::size_t>(n), 0);
+    if (n <= 1) { if (n == 1) perm[0] = 0; return true; }
+
+    std::vector<idx_t> xadj, adjncy;
+    if constexpr (std::is_same_v<idx_t, int>) {
+        xadj = std::move(xadj_in);
+        adjncy = std::move(adjncy_in);
+    } else {
+        xadj.assign(xadj_in.begin(), xadj_in.end());
+        adjncy.assign(adjncy_in.begin(), adjncy_in.end());
+    }
+    if (adjncy.empty()) { for (int i = 0; i < n; ++i) perm[i] = i; return true; }
+
+    auto envi = [](const char* k, int d) { const char* s = std::getenv(k); return s ? std::atoi(s) : d; };
+    auto envd = [](const char* k, double d) { const char* s = std::getenv(k); return s ? std::atof(s) : d; };
+    GpuNdParams prm;
+    prm.cand = std::max(1, envi("CLS_GPU_ND_CAND", 4));
+    prm.leaf = std::max(1, envi("CLS_GPU_ND_LEAF", 2000));
+    prm.lambda = std::max(0.0, envd("CLS_GPU_ND_LAMBDA", 0.5));
+    prm.tc_g = std::max(0.0, envd("CLS_GPU_ND_TC_G", 1.0));
+    prm.fm = envi("CLS_GPU_ND_FM", 1);
+    prm.fm_passes = std::max(0, envi("CLS_GPU_ND_FM_PASS", 4));
+    prm.seed = seed;
+
+    std::vector<int> p;
+    gpu_nd_rec(xadj, adjncy, p, prm);
+    perm = std::move(p);
+    return true;
+}
+
+bool gpu_nd_weighted_from_graph(int n, const int* rowptr, const int* colidx, const double* vals,
+                                std::vector<int>& perm, int seed)
+{
+    if (n < 0) return false;
+    perm.assign(static_cast<std::size_t>(n), 0);
+    if (n <= 1) { if (n == 1) perm[0] = 0; return true; }
+
+    std::vector<idx_t> xadj, adjncy, adjwgt;
+    build_weighted_symmetric_adjacency(n, rowptr, colidx, vals, xadj, adjncy, adjwgt);
+    if (adjncy.empty()) { for (int i = 0; i < n; ++i) perm[i] = i; return true; }
+
+    auto envi = [](const char* k, int d) { const char* s = std::getenv(k); return s ? std::atoi(s) : d; };
+    auto envd = [](const char* k, double d) { const char* s = std::getenv(k); return s ? std::atof(s) : d; };
+    GpuNdParams prm;
+    prm.cand = std::max(1, envi("CLS_GPU_ND_CAND", 4));
+    prm.leaf = std::max(1, envi("CLS_GPU_ND_LEAF", 2000));
+    prm.lambda = std::max(0.0, envd("CLS_GPU_ND_LAMBDA", 0.5));
+    prm.tc_g = std::max(0.0, envd("CLS_GPU_ND_TC_G", 1.0));
+    prm.fm = envi("CLS_GPU_ND_FM", 1);
+    prm.fm_passes = std::max(0, envi("CLS_GPU_ND_FM_PASS", 4));
+    prm.seed = seed;
+    const int ew_depth = std::max(1, envi("CLS_GPU_ND_EW_DEPTH", 3));   // top levels cut electrically
+
+    std::vector<int> pp;
+    gpu_nd_weighted_rec(xadj, adjncy, adjwgt, pp, prm, ew_depth);
+    perm = std::move(pp);
+    return true;
 }
 
 bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& perm,

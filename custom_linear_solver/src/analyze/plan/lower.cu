@@ -425,6 +425,137 @@ static std::vector<int> build_assembly_map(MultifrontalPlan& plan,
 }
 
 // Lay out the single device arena (kArenaAlignmentBytes-aligned sub-arrays), allocate it, upload
+// exp_260612 gather-based assembly: build per-front matrix-nnz buckets (front -> (local_pos, q))
+// and per-parent child lists, host-side from a_pos + front_off + panel_parent. Used only by the
+// CLS_GATHER_ASM factor path; cheap, built once per analyze.
+static bool build_gather_structures(MultifrontalPlan& plan, const std::vector<int>& front_off,
+                                    const std::vector<int>& front_ptr, const std::vector<int>& ncols,
+                                    const std::vector<int>& panel_parent,
+                                    const std::vector<int>& asm_ptr, const std::vector<int>& asm_local,
+                                    int P)
+{
+    const int nnz = plan.nnz;
+    std::vector<int> h_apos(std::max(1, nnz));
+    if (nnz > 0 && cudaMemcpy(h_apos.data(), plan.d_a_pos, (size_t)nnz * sizeof(int),
+                              cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+    // Bucket each nnz q by the front owning a_pos[q] (front_off is increasing, size P+1).
+    std::vector<int> owner(std::max(1, nnz), -1), lpos(std::max(1, nnz), 0);
+    std::vector<int> off(P + 1, 0);
+    for (int q = 0; q < nnz; ++q) {
+        const int pos = h_apos[q];
+        if (pos < 0) continue;
+        const int p = (int)(std::upper_bound(front_off.begin(), front_off.end(), pos) - front_off.begin()) - 1;
+        if (p < 0 || p >= P) continue;
+        owner[q] = p; lpos[q] = pos - front_off[p];
+        ++off[p + 1];
+    }
+    for (int p = 0; p < P; ++p) off[p + 1] += off[p];
+    const int tot = off[P];
+    std::vector<int> blpos(std::max(1, tot)), bq(std::max(1, tot));
+    std::vector<int> cur(off);
+    for (int q = 0; q < nnz; ++q) {
+        const int p = owner[q];
+        if (p < 0) continue;
+        const int idx = cur[p]++;
+        blpos[idx] = lpos[q]; bq[idx] = q;
+    }
+    // Invert panel_parent -> per-parent child list.
+    std::vector<int> coff(P + 1, 0);
+    for (int c = 0; c < P; ++c) { const int par = panel_parent[c]; if (par >= 0) ++coff[par + 1]; }
+    for (int p = 0; p < P; ++p) coff[p + 1] += coff[p];
+    std::vector<int> clist(std::max(1, coff[P]));
+    std::vector<int> ccur(coff);
+    for (int c = 0; c < P; ++c) { const int par = panel_parent[c]; if (par >= 0) clist[ccur[par]++] = c; }
+
+    // Per-front CB-buffer offset. Children are assigned in clist (parent-grouped) order so a
+    // parent's children's CBs are CONTIGUOUS → coalesced reads/writes. Roots (no parent, not in
+    // clist) get their own slots at the end so every front writes in-bounds to a distinct region.
+    std::vector<int> cb_pos(P, -1);
+    long cb_total = 0;
+    auto add_slot = [&](int c) {
+        const int uc_c = (front_ptr[c + 1] - front_ptr[c]) - ncols[c];
+        cb_pos[c] = (int)cb_total;
+        if (uc_c > 0) cb_total += (long)uc_c * uc_c;
+    };
+    for (int ci = 0; ci < coff[P]; ++ci) add_slot(clist[ci]);
+    for (int p = 0; p < P; ++p) if (cb_pos[p] < 0) add_slot(p);
+    plan.cb_total = cb_total;
+
+    // ---- Output-centric assembly CSR (gather_oc): per front, occupied positions (sorted) and the
+    // contributions summing into each, so each position is written ONCE (no atomics). A contribution
+    // is one matrix entry (src=q, src<nnz) or one child-CB element (src=nnz+cb_offset). -----------
+    struct Tri { int p; int pos; long src; };
+    std::vector<Tri> tri;
+    tri.reserve((size_t)tot + (size_t)cb_total);   // matrix contribs + child-CB contribs
+    for (int q = 0; q < nnz; ++q) {                // matrix: a_pos already inverted into owner/lpos
+        const int p = owner[q];
+        if (p < 0) continue;
+        tri.push_back({p, lpos[q], (long)q});      // src = q < nnz  (matrix discriminator)
+    }
+    for (int c = 0; c < P; ++c) {                  // child CB: scatter c's uc_c^2 block into its parent
+        const int par = panel_parent[c];
+        if (par < 0) continue;                     // roots contribute no CB
+        const int uc_c = (front_ptr[c + 1] - front_ptr[c]) - ncols[c];
+        if (uc_c <= 0) continue;
+        const int pfsz = front_ptr[par + 1] - front_ptr[par];
+        const int ab = asm_ptr[c];
+        for (int a = 0; a < uc_c; ++a) {
+            const int ra = asm_local[ab + a];
+            if (ra < 0) continue;                  // guard invalid mapping (skip = correct)
+            for (int b = 0; b < uc_c; ++b) {
+                const int rb = asm_local[ab + b];
+                if (rb < 0) continue;
+                const int ppos = ra * pfsz + rb;
+                const long src = (long)nnz + cb_pos[c] + (long)a * uc_c + b;  // CB discriminator
+                tri.push_back({par, ppos, src});
+            }
+        }
+    }
+    std::sort(tri.begin(), tri.end(), [](const Tri& x, const Tri& y) {
+        return x.p != y.p ? x.p < y.p : x.pos < y.pos;   // group by (front, position)
+    });
+    std::vector<int> gasm_off(P + 1, 0), gasm_pos, gasm_src_off;
+    std::vector<long> gasm_src;
+    gasm_pos.reserve(tri.size());
+    gasm_src.reserve(tri.size());
+    int cur_p = -1, cur_pos = -1, filled = 0;
+    for (const Tri& tr : tri) {
+        if (tr.p != cur_p || tr.pos != cur_pos) {        // new occupied position
+            while (filled <= tr.p) gasm_off[filled++] = (int)gasm_pos.size();
+            gasm_pos.push_back(tr.pos);
+            gasm_src_off.push_back((int)gasm_src.size());  // CSR start of this position's contributions
+            cur_p = tr.p; cur_pos = tr.pos;
+        }
+        gasm_src.push_back(tr.src);
+    }
+    while (filled <= P) gasm_off[filled++] = (int)gasm_pos.size();
+    gasm_src_off.push_back((int)gasm_src.size());          // CSR terminator (length = gasm_npos+1)
+    plan.gasm_npos = (long)gasm_pos.size();
+
+    auto up = [](int** d, const std::vector<int>& v) -> bool {
+        if (cudaMalloc(d, std::max((size_t)1, v.size()) * sizeof(int)) != cudaSuccess) return false;
+        if (!v.empty()) cudaMemcpy(*d, v.data(), v.size() * sizeof(int), cudaMemcpyHostToDevice);
+        return true;
+    };
+    auto up_long = [](long** d, const std::vector<long>& v) -> bool {
+        if (cudaMalloc(d, std::max((size_t)1, v.size()) * sizeof(long)) != cudaSuccess) return false;
+        if (!v.empty()) cudaMemcpy(*d, v.data(), v.size() * sizeof(long), cudaMemcpyHostToDevice);
+        return true;
+    };
+    if (std::getenv("CLS_GATHER_DEBUG")) {
+        long maxlpos = 0; for (int i = 0; i < tot; ++i) maxlpos = std::max(maxlpos, (long)blpos[i]);
+        std::fprintf(stderr, "[gather] nnz=%d bucketed=%d children=%d P=%d maxlpos=%ld front_off[P]=%d "
+                     "gasm_npos=%ld gasm_src=%zu cb_total=%ld\n",
+                     nnz, tot, coff[P], P, maxlpos, front_off.empty() ? -1 : front_off.back(),
+                     plan.gasm_npos, gasm_src.size(), cb_total);
+    }
+    return up(&plan.d_front_nnz_off, off) && up(&plan.d_front_nnz_lpos, blpos) &&
+           up(&plan.d_front_nnz_q, bq) && up(&plan.d_child_off, coff) && up(&plan.d_child_list, clist) &&
+           up(&plan.d_cb_pos, cb_pos) &&
+           up(&plan.d_gasm_off, gasm_off) && up(&plan.d_gasm_pos, gasm_pos) &&
+           up(&plan.d_gasm_src_off, gasm_src_off) && up_long(&plan.d_gasm_src, gasm_src);
+}
+
 // the host plan arrays, and build the assembly position map (a_pos) on device. Returns false if
 // the a_pos kernel fails.
 static bool allocate_and_upload_plan(MultifrontalPlan& plan,
@@ -503,6 +634,9 @@ static bool allocate_and_upload_plan(MultifrontalPlan& plan,
     cudaDeviceSynchronize();
     if (apos_err != cudaSuccess) return false;
     plan.a_pos_unique = determine_a_pos_unique(plan.d_a_pos, plan.nnz, total, emit_info);
+    if (!build_gather_structures(plan, front_off, symbolic_factor.front_ptr, panels.ncols,
+                                 symbolic_factor.panel_parent, symbolic_factor.asm_ptr, asm_local,
+                                 P)) return false;
     return true;
 }
 

@@ -69,7 +69,7 @@ __global__ void factor_small(int lbegin, int level_size, int B, int front_area,
                               const int* __restrict__ panel_parent,
                               const int* __restrict__ asm_ptr,
                               const int* __restrict__ asm_local, FrontType* frontB,
-                              long front_total, int* sing, int do_extend)
+                              long front_total, int* sing, int do_extend, GatherArgs ga)
 {
     constexpr int fronts_per_warp = 32 / sub_group_size;                          // fronts per warp
     extern __shared__ unsigned char smem_sw_raw[];
@@ -101,15 +101,38 @@ __global__ void factor_small(int lbegin, int level_size, int B, int front_area,
     // Per-sub-group shared scratch (slot front_area reserved per sub-group).
     FrontType* Fs = smem_sw + (long)(warp_in_blk * fronts_per_warp + sg) * front_area;
 
-    // 1. global F → per-sub-group Fs.
-    for (int e = sl; e < fsz2; e += sub_group_size) Fs[e] = F[e];
-    __syncwarp(mask);
+    // 1. assemble Fs: fused gather (zero + gather matrix + gather children), or load from the
+    // global front (scatter, or phase-batched where a separate pre-pass already assembled F).
+#ifdef CLS_FACTOR_GATHER
+    if (ga.active && !ga.phase_batched) {
+        zero_front<FrontType>(Fs, fsz2, sl, sub_group_size);
+        __syncwarp(mask);
+        if (ga.mode == 1) {
+            assemble_outputs<FrontType>(Fs, ga, batch_idx, p, sl, sub_group_size);
+        } else {
+            gather_matrix<FrontType>(Fs, ga, batch_idx, p, sl, sub_group_size);
+            gather_children<FrontType>(Fs, fsz, ga, asm_ptr, asm_local, batch_idx, p, sl, sub_group_size);
+        }
+        __syncwarp(mask);
+    } else
+#endif
+    {
+        for (int e = sl; e < fsz2; e += sub_group_size) Fs[e] = F[e];
+        __syncwarp(mask);
+    }
 
     // 2. fused panel LU + trailing on Fs.
     lu_small_warp<FrontType, sub_group_size>(Fs, fsz, nc, sl, mask, sing);
     __syncwarp(mask);
 
-    // 3. writeback factored panel.
+    // 3. writeback L/U for the solve + this front's CB to the buffer for its parent.
+#ifdef CLS_FACTOR_GATHER
+    if (ga.active) {
+        writeback_factored<FrontType, FrontType>(F, Fs, fsz, nc, uc, sl, sub_group_size);
+        write_cb<FrontType>(ga, batch_idx, ga.cb_pos[p], Fs, fsz, nc, uc, sl, sub_group_size);
+        return;
+    }
+#endif
     writeback_factored<FrontType, FrontType>(F, Fs, fsz, nc, uc, sl, sub_group_size);
 
     // 4. CB extend-add into parent front (skip for roots / when disabled).
@@ -145,12 +168,12 @@ template <typename FrontType, int sub_group_size>
 static inline void launch_factor_small(int num_blocks, int threads_per_block, size_t shared_bytes, cudaStream_t stream,
                                        int b, int level_size, int B, int front_area,
                                        const MultifrontalPlan& plan, const int* d_plc,
-                                       FrontType* frontB, int* sing, int do_extend)
+                                       FrontType* frontB, int* sing, int do_extend, GatherArgs ga)
 {
     factor_small<FrontType, sub_group_size><<<num_blocks, threads_per_block, shared_bytes, stream>>>(
         b, level_size, B, front_area, d_plc, plan.d_front_off, plan.d_front_ptr,
         plan.d_ncols, plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, frontB,
-        plan.front_total, sing, do_extend);
+        plan.front_total, sing, do_extend, ga);
 }
 
 // Launch the small kernel with (front type fixed, sub_group_size resolved at the call site).
@@ -158,11 +181,11 @@ template <typename FrontType>
 static inline void launch_factor_small_t(int sub_group_size, int num_blocks, int threads_per_block, size_t shared_bytes, cudaStream_t stream,
                                          int b, int level_size, int B, int front_area,
                                          const MultifrontalPlan& plan, const int* d_plc,
-                                         FrontType* frontB, int* sing, int do_extend)
+                                         FrontType* frontB, int* sing, int do_extend, GatherArgs ga)
 {
-    if (sub_group_size == 8)       launch_factor_small<FrontType, 8>(num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area, plan, d_plc, frontB, sing, do_extend);
-    else if (sub_group_size == 16) launch_factor_small<FrontType, 16>(num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area, plan, d_plc, frontB, sing, do_extend);
-    else               launch_factor_small<FrontType, 32>(num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area, plan, d_plc, frontB, sing, do_extend);
+    if (sub_group_size == 8)       launch_factor_small<FrontType, 8>(num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area, plan, d_plc, frontB, sing, do_extend, ga);
+    else if (sub_group_size == 16) launch_factor_small<FrontType, 16>(num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area, plan, d_plc, frontB, sing, do_extend, ga);
+    else               launch_factor_small<FrontType, 32>(num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area, plan, d_plc, frontB, sing, do_extend, ga);
 }
 
 // SMALL tier: sub-group-packed kernel. One sub-group of sub_group_size lanes owns one front; 32/sub_group_size fronts
@@ -183,12 +206,13 @@ static void dispatch_factor_small(const MultifrontalPlan& plan, State& st, cudaS
     const int front_area = caps.max_fsz * caps.max_fsz;
     const size_t element_bytes = (precision == Precision::FP64) ? sizeof(double) : sizeof(float);
     const size_t shared_bytes = (size_t)kSmallTierWarpsPerBlock * fronts_per_warp * front_area * element_bytes;
+    GatherArgs ga = make_gather_args(plan, st);
     if (precision == Precision::FP64)
         launch_factor_small_t<double>(sub_group_size, num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area,
-                                      plan, d_plc, st.d_front_batch, st.d_sing, do_extend);
+                                      plan, d_plc, st.d_front_batch, st.d_sing, do_extend, ga);
     else
         launch_factor_small_t<float>(sub_group_size, num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area,
-                                     plan, d_plc, st.d_front_batch_f, st.d_sing, do_extend);
+                                     plan, d_plc, st.d_front_batch_f, st.d_sing, do_extend, ga);
 }
 
 }  // namespace

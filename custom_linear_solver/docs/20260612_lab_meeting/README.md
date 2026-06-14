@@ -24,6 +24,7 @@
 - [**왜 small tier 는 텐서코어 가속 불가**](small-tier-no-tensorcore.md) — trailing GEMM 4×4×2급·수십 FLOP, Ampere 텐서코어 최소 타일 16×8×8 대비 ~3% 채움(Hopper M=64·Blackwell 256은 더 불리).
 - [**Fill-in · 메모리 — custom vs cuDSS**](fill-in-memory-vs-cudss.md) — factor L+U nnz 는 동급(둘 다 METIS-ND, fill/nnz 2–3×), device 메모리는 **custom 이 2–10× 적음**(cuDSS 워크스페이스 오버헤드). cuDSS 는 `cudssDataGet(LU_NNZ/MEMORY_ESTIMATES)` 쿼리로 측정.
 - [**factorize 병목 — ncu 레벨·티어별 (B=1/16/64)**](factorize-bottleneck-ncu.md) — small/mid/big 커널을 레벨별로 occupancy·TC·DRAM·L1·L2 프로파일. **B=1=latency/under-fill, B≥16=메모리 대역폭 bound**, occupancy 23–33%(1 block/SM)·starved TC 는 공통. ncu metric 정식 이름·의미 포함.
+- [**factorize 레벨별 병목 — 13K/25K/70K (B=1)**](factorize-bottleneck-3case.md) — 위를 3 케이스로 확장(graph 우회 OFF 빌드, 레벨당 1 launch 매핑). **13K·25K 는 big tier 없는 mid-dominated(85–87%), 70K 는 big-dominated(60%)** — 병목 tier 가 case 크기로 이동. mid 도 big 과 같이 1 block/SM(warp 31–33%)·TC<2% 라 occupancy 천장이 보편. 원자료 `data/level_profile_3case_2026-06-12/`.
 
 ## 연산자별 파이차트 (cuPF mixed, B=1)
 

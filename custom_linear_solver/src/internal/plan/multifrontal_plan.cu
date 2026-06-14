@@ -6,6 +6,24 @@
 
 namespace custom_linear_solver::plan {
 
+static void free_gather(MultifrontalPlan& p)
+{
+    if (p.d_front_nnz_off) cudaFree(p.d_front_nnz_off);
+    if (p.d_front_nnz_lpos) cudaFree(p.d_front_nnz_lpos);
+    if (p.d_front_nnz_q) cudaFree(p.d_front_nnz_q);
+    if (p.d_child_off) cudaFree(p.d_child_off);
+    if (p.d_child_list) cudaFree(p.d_child_list);
+    if (p.d_cb_pos) cudaFree(p.d_cb_pos);
+    if (p.d_gasm_off) cudaFree(p.d_gasm_off);
+    if (p.d_gasm_pos) cudaFree(p.d_gasm_pos);
+    if (p.d_gasm_src_off) cudaFree(p.d_gasm_src_off);
+    if (p.d_gasm_src) cudaFree(p.d_gasm_src);
+    p.d_front_nnz_off = p.d_front_nnz_lpos = p.d_front_nnz_q = nullptr;
+    p.d_child_off = p.d_child_list = p.d_cb_pos = nullptr;
+    p.d_gasm_off = p.d_gasm_pos = p.d_gasm_src_off = nullptr;
+    p.d_gasm_src = nullptr;
+}
+
 MultifrontalPlan::~MultifrontalPlan()
 {
     if (d_spine_panels) cudaFree(d_spine_panels);
@@ -13,6 +31,7 @@ MultifrontalPlan::~MultifrontalPlan()
     if (d_y_f) cudaFree(d_y_f);
     if (d_front_f) cudaFree(d_front_f);
     if (d_pivot_offset) cudaFree(d_pivot_offset);
+    free_gather(*this);
     if (arena) cudaFree(arena);
 }
 
@@ -26,8 +45,21 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept
         if (d_y_f) cudaFree(d_y_f);
         if (d_front_f) cudaFree(d_front_f);
         if (d_pivot_offset) cudaFree(d_pivot_offset);
+        free_gather(*this);
         if (arena) cudaFree(arena);
 
+        d_front_nnz_off = o.d_front_nnz_off;   o.d_front_nnz_off = nullptr;
+        d_front_nnz_lpos = o.d_front_nnz_lpos; o.d_front_nnz_lpos = nullptr;
+        d_front_nnz_q = o.d_front_nnz_q;       o.d_front_nnz_q = nullptr;
+        d_child_off = o.d_child_off;           o.d_child_off = nullptr;
+        d_child_list = o.d_child_list;         o.d_child_list = nullptr;
+        d_cb_pos = o.d_cb_pos;                 o.d_cb_pos = nullptr;
+        cb_total = o.cb_total;
+        d_gasm_off = o.d_gasm_off;             o.d_gasm_off = nullptr;
+        d_gasm_pos = o.d_gasm_pos;             o.d_gasm_pos = nullptr;
+        d_gasm_src_off = o.d_gasm_src_off;     o.d_gasm_src_off = nullptr;
+        d_gasm_src = o.d_gasm_src;             o.d_gasm_src = nullptr;
+        gasm_npos = o.gasm_npos;
         num_rows = o.num_rows;
         num_panels = o.num_panels;
         num_plevels = o.num_plevels;

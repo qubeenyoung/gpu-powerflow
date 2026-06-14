@@ -30,6 +30,12 @@ struct PlanBuildOptions {
     int max_panel_width = 8;
     bool float_front = false;  // true if the factor/solve front is float (FP32 / TF32);
                                // controls whether float scratch arenas get allocated.
+    // Build exactly one serial-ND plan for `metis_seed`, bypassing the env-driven best-of-k
+    // (CLS_ORDER_K) and custom-ND (CLS_GPU_ND) branches. Used by the solver's measured best-of-k
+    // ordering selection, which evaluates candidate seeds by *timing a real factorize* (the proxy
+    // CLS_ORDER_K uses is anti-informative at B=1, exp_260612 doc 14/15) and so must drive the
+    // per-seed plan build itself.
+    bool single_seed_only = false;
     // Debug dumps (off by default; surfaced through SolverConfig).
     // non-empty -> write q,p,fsz,nc,uc,level plus parent/extend metadata CSV here
     std::string dump_fronts_csv_path;

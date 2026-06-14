@@ -158,9 +158,19 @@ __device__ __forceinline__ void lu_small_front(T* F, int fsz, int nc, int t, int
 template <typename T>
 __device__ __forceinline__ void lu_panel_factor(T* F, int fsz, int nc, int t, int nt, int* sing)
 {
+    // Row-fused panel LU pays 1 block barrier/pivot (vs the two-phase form's 2). Barrier cost
+    // dominates the latency-bound mid kernel (exp_260612), but the row-fused form serializes the
+    // per-thread inner panel loop, which costs more on TALL fronts (more rows/thread). So take the
+    // fewer-barrier path for nc<=12 always, and extend to the panel-width cap (nc<=16, n>=16K) only
+    // when the front is short enough that the serial inner loop is cheap (measured: helps ACTIVSg25k
+    // ~3%, avoids the SyntheticUSA regression that a blanket nc<=16 cutoff caused).
     constexpr int ROWFUSED_NC_MAX = 12;
+    constexpr int ROWFUSED_WIDE_NC = 16;     // up to the panel-width cap
+    constexpr int ROWFUSED_WIDE_FSZ = 96;    // only on short fronts
+    const bool row_fused = (nc > 0) &&
+        (nc <= ROWFUSED_NC_MAX || (nc <= ROWFUSED_WIDE_NC && fsz <= ROWFUSED_WIDE_FSZ));
 
-    if (nc > 0 && nc <= ROWFUSED_NC_MAX) {
+    if (row_fused) {
         // Row-fused form. For each k, every thread that owns one of the rows below the pivot
         // (i.e. i = k + 1 + t (mod nt)) does the divide and the in-row panel update in a
         // single pass — `lik` is kept in a register and applied across the panel columns
@@ -228,6 +238,26 @@ __device__ __forceinline__ void u_panel_solve(T* F, int fsz, int nc, int uc, int
     }
 }
 
+// Sync-free U-panel solve (exp_260612 barrier-cut): each thread owns one U column jj and forward-
+// substitutes all nc rows in-thread (the per-row dependency lives inside the thread). The nc block
+// barriers of the row-parallel form above collapse to ONE barrier (caller-side, before the trailing
+// update reads U). Same column parallelism (uc / nt) and same arithmetic; only the barriers change.
+// Wins when the front is barrier-bound (deep under-filled levels, low occupancy). Numerically
+// identical to u_panel_solve (same op order per element).
+template <typename T>
+__device__ __forceinline__ void u_panel_solve_fewsync(T* F, int fsz, int nc, int uc, int t, int nt)
+{
+    for (int e = t; e < uc; e += nt) {
+        const int jj = nc + e;
+        for (int k = 1; k < nc; ++k) {
+            T v = F[(long)k * fsz + jj];
+            for (int i = 0; i < k; ++i) v -= F[(long)k * fsz + i] * F[(long)i * fsz + jj];
+            F[(long)k * fsz + jj] = v;
+        }
+    }
+    __syncthreads();
+}
+
 template <typename T>
 __device__ __forceinline__ void trailing_update_scalar(T* F, int fsz, int nc, int uc, int t,
                                                        int nt)
@@ -239,6 +269,53 @@ __device__ __forceinline__ void trailing_update_scalar(T* F, int fsz, int nc, in
         T acc = T(0);
         for (int k = 0; k < nc; ++k) acc += F[(long)ii * fsz + k] * F[(long)k * fsz + jj];
         F[(long)ii * fsz + jj] -= acc;
+    }
+}
+
+// Register-blocked trailing (exp_260612): the scalar version does 1 FMA per 2 strided shared loads
+// with a per-iteration k*fsz address → ~5% FMA throughput (latency/overhead bound, not compute
+// bound). Here each thread owns one row ii and a contiguous MR-wide column strip: L[ii,k] is loaded
+// ONCE per k and reused across MR outputs, and U[k, jj0..) is read contiguously, so the FMA:load
+// ratio rises from 1:2 to MR:(1+MR) and the strided address is amortized over MR outputs.
+template <typename T, int MR>
+__device__ __forceinline__ void trailing_update_rb(T* F, int fsz, int nc, int uc, int t, int nt)
+{
+    const int nstrip = (uc + MR - 1) / MR;
+    const long work = (long)uc * nstrip;
+    for (long w = t; w < work; w += nt) {
+        const int r = (int)(w / nstrip);
+        const int s = (int)(w % nstrip);
+        const int ii = nc + r;
+        const int jj0 = nc + s * MR;
+        const int width = min(MR, uc - s * MR);
+        const T* __restrict__ Lrow = F + (long)ii * fsz;
+        T acc[MR];
+        #pragma unroll
+        for (int m = 0; m < MR; ++m) acc[m] = T(0);
+        for (int k = 0; k < nc; ++k) {
+            const T l = Lrow[k];
+            const T* __restrict__ Urow = F + (long)k * fsz + jj0;
+            #pragma unroll
+            for (int m = 0; m < MR; ++m)
+                if (m < width) acc[m] += l * Urow[m];
+        }
+        T* __restrict__ Orow = F + (long)ii * fsz + jj0;
+        #pragma unroll
+        for (int m = 0; m < MR; ++m)
+            if (m < width) Orow[m] -= acc[m];
+    }
+}
+
+// Dispatch: env CLS_TRAIL_RB={0(scalar),2,4,8} selects the register-block width. Default 4.
+template <typename T>
+__device__ __forceinline__ void trailing_update(T* F, int fsz, int nc, int uc, int t, int nt,
+                                                 int rb)
+{
+    switch (rb) {
+        case 0:  trailing_update_scalar<T>(F, fsz, nc, uc, t, nt); break;
+        case 2:  trailing_update_rb<T, 2>(F, fsz, nc, uc, t, nt); break;
+        case 8:  trailing_update_rb<T, 8>(F, fsz, nc, uc, t, nt); break;
+        default: trailing_update_rb<T, 4>(F, fsz, nc, uc, t, nt); break;
     }
 }
 
@@ -279,6 +356,190 @@ __device__ __forceinline__ void writeback_factored(MT* M, const WT* W, int fsz, 
         const long id2 = (long)(nc + e / nc) * fsz + (e % nc);
         M[id2] = static_cast<MT>(W[id2]);
     }
+}
+
+// =======================================================================================
+//  GATHER-BASED (LEFT-LOOKING) ASSEMBLY   (exp_260612, CLS_GATHER_ASM)
+// =======================================================================================
+//
+// Replaces the global memset + atomic scatter + atomic extend-add with per-front gather: the
+// factor kernel zeros its front F, gathers its own matrix entries, then pulls each child's CB
+// out of the (already-factored) child front and adds it into F via the asm_local map. The child
+// must have written its FULL front (L/U + CB) to global first (level order guarantees this).
+// Both gathers use shared/global atomicAdd because several matrix entries / several children can
+// land on the same front entry (the assembly sum).
+
+// Bundle of the per-factorize gather inputs, passed by value to each tier kernel (active=0 keeps
+// the legacy stage-in + extend-add path).
+struct GatherArgs {
+    const int* front_nnz_off = nullptr;
+    const int* front_nnz_lpos = nullptr;
+    const int* front_nnz_q = nullptr;
+    const int* child_off = nullptr;
+    const int* child_list = nullptr;
+    const int* o2c = nullptr;
+    const double* values = nullptr;     // input values when values_double != 0
+    const float* values_f = nullptr;    // input values when values_double == 0
+    const int* front_ptr = nullptr;     // per-front size prefix (for child uc)
+    const int* ncols = nullptr;         // per-front pivot-col count (for child uc)
+    const int* cb_pos = nullptr;        // per-front CB-buffer offset (parent-grouped, coalesced)
+    float* cb = nullptr;                // CB buffer (B * cb_total)
+    // Output-centric assembly CSR (mode==1): per-front occupied positions + their contributions.
+    const int* gasm_off = nullptr;      // P+1: front -> occupied-position range
+    const int* gasm_pos = nullptr;      // occupied front-local positions
+    const int* gasm_src_off = nullptr;  // per-position CSR into gasm_src
+    const long* gasm_src = nullptr;     // src<nnz: matrix slot q; else cb offset (src-nnz)
+    long cb_total = 0;
+    long nnz = 0;
+    int values_double = 1;
+    int mode = 0;                       // 0 = atomic gather (legacy), 1 = output-centric
+    int phase_batched = 0;              // 1 = assembly done by a separate pre-pass; factor stages in
+    int active = 0;
+};
+
+// Zero the front (call, then __syncthreads, then the gathers).
+template <typename T>
+__device__ __forceinline__ void zero_front(T* F, int fsz2, int t, int nt)
+{
+    for (int e = t; e < fsz2; e += nt) F[e] = T(0);
+}
+
+// Add this front's matrix entries:  F[lpos] += valuesB[b*nnz + o2c[q]].
+template <typename T>
+__device__ __forceinline__ void gather_matrix(T* F, const GatherArgs& ga, long b, int p, int t, int nt)
+{
+    const int s = ga.front_nnz_off[p], e = ga.front_nnz_off[p + 1];
+    const long base = b * ga.nnz;
+    for (int i = s + t; i < e; i += nt) {
+        const int q = ga.front_nnz_q[i];
+        const T v = ga.values_double ? static_cast<T>(ga.values[base + ga.o2c[q]])
+                                      : static_cast<T>(ga.values_f[base + ga.o2c[q]]);
+        atomicAdd(&F[ga.front_nnz_lpos[i]], v);
+    }
+}
+
+// Write this front's CB (the uc×uc Schur, post-factor) to its slot in the coalesced CB buffer, so
+// its parent can pull it with a contiguous read. `W` is the factored front (shared or global).
+template <typename T>
+__device__ __forceinline__ void write_cb(const GatherArgs& ga, long b, int cb_pos_p, const T* W,
+                                         int fsz, int nc, int uc, int t, int nt)
+{
+    if (uc <= 0 || !ga.cb) return;
+    float* __restrict__ dst = ga.cb + b * ga.cb_total + cb_pos_p;
+    for (int e = t; e < uc * uc; e += nt) {
+        const int a = e / uc, bb = e % uc;
+        dst[e] = static_cast<float>(W[(long)(nc + a) * fsz + (nc + bb)]);   // contiguous write
+    }
+}
+
+// Pull every child's CB into the parent front F (parent size `fsz`) from the CB buffer. The
+// children's CBs are contiguous in the buffer (parent-grouped), so the reads are coalesced; the
+// asm_local scatter then lands them in F (shared).
+template <typename T>
+__device__ __forceinline__ void gather_children(T* F, int fsz, const GatherArgs& ga,
+                                                const int* __restrict__ asm_ptr,
+                                                const int* __restrict__ asm_local,
+                                                long b, int p, int t, int nt)
+{
+    const int cs = ga.child_off[p], ce = ga.child_off[p + 1];
+    for (int ci = cs; ci < ce; ++ci) {
+        const int c = ga.child_list[ci];
+        const int uc_c = (ga.front_ptr[c + 1] - ga.front_ptr[c]) - ga.ncols[c];
+        if (uc_c <= 0) continue;
+        const float* __restrict__ Ccb = ga.cb + b * ga.cb_total + ga.cb_pos[c];   // contiguous child CB
+        const int ab = asm_ptr[c];
+        for (int e = t; e < uc_c * uc_c; e += nt) {
+            const int a = e / uc_c, bb = e % uc_c;
+            atomicAdd(&F[(long)asm_local[ab + a] * fsz + asm_local[ab + bb]],
+                      static_cast<T>(Ccb[e]));
+        }
+    }
+}
+
+// Output-centric (atomic-free) assembly: each occupied front position is computed by ONE thread —
+// it sums its contributions (matrix entries + children-CB elements) and writes F[pos] exactly once.
+// Positions are sorted ascending per front so the writes coalesce. F is shared (mid/small) or global
+// (big). Caller must zero_front first (positions absent from the CSR stay 0). No atomics.
+template <typename T>
+__device__ __forceinline__ void assemble_outputs(T* F, const GatherArgs& ga, long b, int p,
+                                                 int t, int nt)
+{
+    const int s = ga.gasm_off[p], e = ga.gasm_off[p + 1];
+    const long vbase = b * ga.nnz;
+    const long cbbase = b * ga.cb_total;
+    for (int i = s + t; i < e; i += nt) {
+        const int pos = ga.gasm_pos[i];
+        const int cs = ga.gasm_src_off[i], ce = ga.gasm_src_off[i + 1];
+        T acc = T(0);
+        for (int k = cs; k < ce; ++k) {
+            const long src = ga.gasm_src[k];
+            if (src < ga.nnz)   // matrix slot q -> values[b*nnz + o2c[q]]  (match gather_matrix)
+                acc += ga.values_double ? static_cast<T>(ga.values[vbase + ga.o2c[(int)src]])
+                                        : static_cast<T>(ga.values_f[vbase + ga.o2c[(int)src]]);
+            else                // child-CB element at cb-buffer offset (src - nnz)
+                acc += static_cast<T>(ga.cb[cbbase + (src - ga.nnz)]);
+        }
+        F[pos] = acc;           // single write, no atomic
+    }
+}
+
+// =======================================================================================
+//  PHASE-BATCHED GATHER ASSEMBLY   (exp_260612, CLS_ASM_MODE=gather_pb)
+// =======================================================================================
+//
+// The fused gather (above) assembles each front inside the factor kernel — so the memory-bound
+// gather runs trapped at the factor's register-limited occupancy (ncu: factor_mid is 60 reg/thread,
+// 8 blocks/SM; the in-kernel gather then runs ~2x slower than scatter's separate high-occupancy
+// memset+scatter). This kernel hoists the gather into its OWN lean, high-occupancy pre-pass that
+// writes the assembled front to the GLOBAL arena; the factor kernel then stages in clean (exactly
+// like scatter) and only writes the CB back to the parent-grouped buffer (no in-kernel gather, no
+// push extend-add). One block per (front, batch); children CBs come from already-factored deeper
+// levels via the cb buffer, so the schedule must run assemble(L) after factor(deeper) — guaranteed
+// by issuing it per level in the leaf->root walk.
+template <typename T>
+__global__ void assemble_level_gather(int lbegin, int lend,
+                                      const int* __restrict__ plcols,
+                                      const int* __restrict__ front_off,
+                                      const int* __restrict__ asm_ptr,
+                                      const int* __restrict__ asm_local,
+                                      T* frontB, long front_total, GatherArgs ga)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const int p = plcols[idx];
+    const int fsz = ga.front_ptr[p + 1] - ga.front_ptr[p];
+    const int fsz2 = fsz * fsz;
+    T* F = frontB + (long)blockIdx.y * front_total + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    (void)fsz2;   // arena pre-zeroed once by a whole-arena cudaMemsetAsync (efficient streaming write)
+    if (ga.mode == 1) {
+        assemble_outputs<T>(F, ga, blockIdx.y, p, t, nt);     // atomic-free output-centric
+    } else {
+        gather_matrix<T>(F, ga, blockIdx.y, p, t, nt);        // matrix entries (atomic)
+        gather_children<T>(F, fsz, ga, asm_ptr, asm_local, blockIdx.y, p, t, nt);  // children CBs (atomic)
+    }
+}
+
+// Populate the per-factorize gather inputs from the plan + runtime state (active=0 when the gather
+// path is off → tier kernels keep the legacy stage-in + extend path). Shared by every tier dispatch
+// and the phase-batched assemble pre-pass so the wiring lives in one place.
+static GatherArgs make_gather_args(const MultifrontalPlan& plan, const State& st)
+{
+    GatherArgs ga;
+    if (!st.gather_asm) return ga;
+    ga.front_nnz_off = plan.d_front_nnz_off;  ga.front_nnz_lpos = plan.d_front_nnz_lpos;
+    ga.front_nnz_q = plan.d_front_nnz_q;      ga.child_off = plan.d_child_off;
+    ga.child_list = plan.d_child_list;        ga.o2c = st.cur_o2c;
+    ga.values = st.cur_values_d;              ga.values_f = st.cur_values_f;
+    ga.values_double = st.cur_values_double;  ga.nnz = st.cur_nnz;
+    ga.front_ptr = plan.d_front_ptr;          ga.ncols = plan.d_ncols;
+    ga.cb_pos = plan.d_cb_pos;                ga.cb = st.d_cb_batch_f;
+    ga.cb_total = plan.cb_total;
+    ga.gasm_off = plan.d_gasm_off;            ga.gasm_pos = plan.d_gasm_pos;
+    ga.gasm_src_off = plan.d_gasm_src_off;    ga.gasm_src = plan.d_gasm_src;
+    ga.mode = st.gather_mode;                 ga.phase_batched = st.phase_batched ? 1 : 0;
+    ga.active = 1;
+    return ga;
 }
 
 // Each tier kernel sequences these phases itself (Phase 1 panel LU -> Phase 2 U-solve ->

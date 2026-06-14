@@ -244,11 +244,13 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
                                    const int* __restrict__ asm_ptr,
                                    const int* __restrict__ asm_local, T* frontB,
                                    long front_total, int* sing, int do_extend,
-                                   int level_max_nc, int level_max_uc, int uc_pad_max, int nc_pad_max)
+                                   int level_max_nc, int level_max_uc, int uc_pad_max, int nc_pad_max,
+                                   GatherArgs ga)
 {
     const int idx = lbegin + blockIdx.x;
     if (idx >= lend) return;
-    T* front = frontB + (long)blockIdx.y * front_total;
+    const long batch_off = (long)blockIdx.y * front_total;
+    T* front = frontB + batch_off;
     const int p = plcols[idx];
     const int fsz = front_ptr[p + 1] - front_ptr[p];
     const int nc = ncols[p];
@@ -257,7 +259,27 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
     const int uc = fsz - nc;
     const int par = panel_parent[p];
 
-    const bool extend_ok = (par >= 0 && do_extend);
+#ifdef CLS_FACTOR_GATHER
+    if (ga.active && !ga.phase_batched) {
+        // Fused gather-based assembly directly in the global front (no memset/scatter/extend).
+        // (Phase-batched mode skips this: a separate pre-pass already assembled F in global.)
+        zero_front<T>(F, fsz * fsz, t, nt);
+        __syncthreads();
+        if (ga.mode == 1) {
+            assemble_outputs<T>(F, ga, blockIdx.y, p, t, nt);
+        } else {
+            gather_matrix<T>(F, ga, blockIdx.y, p, t, nt);
+            gather_children<T>(F, fsz, ga, asm_ptr, asm_local, blockIdx.y, p, t, nt);
+        }
+        __syncthreads();
+    }
+    const bool ga_active = ga.active;
+#else
+    constexpr bool ga_active = false;
+#endif
+
+    // Gather path never fuses the CB drain (the parent pulls it from F later) and never extends.
+    const bool extend_ok = (par >= 0 && do_extend) && !ga_active;
     T* Fp = (par >= 0) ? (front + front_off[par]) : nullptr;
     const int pfsz = (par >= 0) ? (front_ptr[par + 1] - front_ptr[par]) : 0;
     const int abase = asm_ptr[p];
@@ -273,7 +295,7 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
         (void)level_max_nc; (void)level_max_uc;
         // Big fronts are always fsz>kFusedSmallFrontMax, so no fused Phase 1+3 fast path: panel LU, U-solve, trailing.
         lu_panel_factor<float>(F, fsz, nc, t, nt, sing);            // Phase 1
-        u_panel_solve<float>(F, fsz, nc, uc, t, nt);               // Phase 2
+        u_panel_solve_fewsync<float>(F, fsz, nc, uc, t, nt);        // Phase 2 (barrier-cut)
         if (!tc)        trailing_update_scalar<float>(F, fsz, nc, uc, t, nt);          // Phase 3
         else if (fused) trailing_update_tf32_tc<true>(F, fsz, nc, uc, Ltf, Utf, t, nt,
                                                       Fp, pfsz, asm_local, abase);
@@ -284,12 +306,20 @@ __global__ void factor_big(int lbegin, int lend, const int* __restrict__ plcols,
         fused = (extend_ok && fsz > kFusedSmallFrontMax);
         (void)uc_pad_max; (void)nc_pad_max;
         lu_panel_factor<T>(F, fsz, nc, t, nt, sing);               // Phase 1
-        u_panel_solve<T>(F, fsz, nc, uc, t, nt);                   // Phase 2
+        u_panel_solve_fewsync<T>(F, fsz, nc, uc, t, nt);           // Phase 2 (barrier-cut)
         if (fused) trailing_update_staged<T, true>(F, fsz, nc, uc, t, nt, sh_L, sh_U,   // Phase 3
                                                    Fp, pfsz, asm_local, abase);
         else       trailing_update_staged<T>(F, fsz, nc, uc, t, nt, sh_L, sh_U);
     }
 
+#ifdef CLS_FACTOR_GATHER
+    if (ga.active) {
+        // The CB (Schur) is in F's trailing; copy it to the CB buffer for this front's parent.
+        __syncthreads();
+        write_cb<T>(ga, blockIdx.y, ga.cb_pos[p], F, fsz, nc, uc, t, nt);
+        return;
+    }
+#endif
     if (fused || !extend_ok) return;
     __syncthreads();
     extend_add<T, T>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
@@ -313,13 +343,15 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
     (void)max_fsz; (void)h_plc;
     dim3 grid(e - b, st.batch_count);
 
+    GatherArgs ga = make_gather_args(plan, st);
+
     if (precision == Precision::FP64) {
         constexpr int T = 128;  // FP64 register pressure caps the block size
         const size_t sh = (size_t)2 * level_max_nc * level_max_uc * sizeof(double);
         factor_big<double, false><<<grid, T, sh, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
-            plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, 0, 0);
+            plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, 0, 0, ga);
         return;
     }
     if (precision == Precision::TF32) {
@@ -330,7 +362,7 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
         factor_big<float, true><<<grid, bigT, sh, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-            plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, uc_pad_max, nc_pad_max);
+            plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, uc_pad_max, nc_pad_max, ga);
         return;
     }
     // FP32
@@ -339,7 +371,7 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
     factor_big<float, false><<<grid, bigT, sh, stream>>>(
         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
         plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-        plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, 0, 0);
+        plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, 0, 0, ga);
 }
 
 }  // namespace
