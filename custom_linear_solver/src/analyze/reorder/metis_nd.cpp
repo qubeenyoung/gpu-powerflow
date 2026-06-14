@@ -112,9 +112,7 @@ void par_nd_rec(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     opt[METIS_OPTION_NUMBERING] = 0;
     opt[METIS_OPTION_SEED] = seed;  // fixed seed -> deterministic across threads
     std::srand(seed);  // reseed per call (see base_nodend)
-    bool got_sep = false;
-    if (!got_sep &&
-        METIS_ComputeVertexSeparator(&nv, mx, ma, nullptr, opt, &sepsize,
+    if (METIS_ComputeVertexSeparator(&nv, mx, ma, nullptr, opt, &sepsize,
                                      part.data()) != METIS_OK) {
         base_nodend(xadj, adj, perm, seed);
         return;
@@ -203,80 +201,11 @@ void induce_par(const std::vector<idx_t>& xadj, const std::vector<idx_t>& adj,
     });
 }
 
-void build_symmetric_adjacency(int n, const int* col_ptr, const int* row_idx,
-                               std::vector<idx_t>& xadj, std::vector<idx_t>& adjncy)
-{
-    std::vector<int> off(static_cast<std::size_t>(n) + 1, 0);
-    auto valid = [&](int row, int col) { return row >= 0 && row < n && row != col; };
-    for (int col = 0; col < n; ++col) {
-        for (int p = col_ptr[col]; p < col_ptr[col + 1]; ++p) {
-            const int row = row_idx[p];
-            if (!valid(row, col)) continue;
-            ++off[row + 1];
-            ++off[col + 1];
-        }
-    }
-    for (int v = 0; v < n; ++v) off[v + 1] += off[v];
-
-    std::vector<int> adj(static_cast<std::size_t>(off[n]));
-    {
-        std::vector<int> next(off.begin(), off.end());
-        for (int col = 0; col < n; ++col) {
-            for (int p = col_ptr[col]; p < col_ptr[col + 1]; ++p) {
-                const int row = row_idx[p];
-                if (!valid(row, col)) continue;
-                adj[next[row]++] = col;
-                adj[next[col]++] = row;
-            }
-        }
-    }
-
-    std::vector<int> unique_counts(n, 0);
-    par_for(0, n, [&](int lo, int hi) {
-        for (int v = lo; v < hi; ++v) {
-            const int b = off[v];
-            const int e = off[v + 1];
-            std::sort(adj.begin() + b, adj.begin() + e);
-            int count = 0;
-            int last = -1;
-            for (int p = b; p < e; ++p) {
-                if (adj[p] != last) {
-                    ++count;
-                    last = adj[p];
-                }
-            }
-            unique_counts[v] = count;
-        }
-    });
-
-    xadj.assign(static_cast<std::size_t>(n) + 1, 0);
-    for (int v = 0; v < n; ++v) {
-        xadj[v + 1] = xadj[v] + static_cast<idx_t>(unique_counts[v]);
-    }
-    adjncy.resize(static_cast<std::size_t>(xadj[n]));
-
-    par_for(0, n, [&](int lo, int hi) {
-        for (int v = lo; v < hi; ++v) {
-            idx_t w = xadj[v];
-            int last = -1;
-            for (int p = off[v]; p < off[v + 1]; ++p) {
-                if (adj[p] != last) {
-                    adjncy[static_cast<std::size_t>(w++)] = static_cast<idx_t>(adj[p]);
-                    last = adj[p];
-                }
-            }
-        }
-    });
-}
-
 // Run the ND ordering (parallel nested dissection or serial METIS NodeND) on an already-built
-// symmetric idx_t graph. Fills perm in METIS convention (perm[new_pos] = old_vertex). Shared by
-// metis_nd (CPU graph build) and metis_nd_from_graph (GPU graph build).
+// symmetric idx_t graph. Fills perm in METIS convention (perm[new_pos] = old_vertex).
 bool run_nd_on_graph(int n, std::vector<idx_t>& xadj, std::vector<idx_t>& adjncy,
-                     std::vector<int>& perm, bool parallel, int seed, double t_build_ms)
+                     std::vector<int>& perm, bool parallel, int seed)
 {
-    (void)t_build_ms;
-
     if (adjncy.empty()) {  // no edges: natural order is optimal
         for (int i = 0; i < n; ++i) perm[i] = i;
         return true;
@@ -326,100 +255,7 @@ bool metis_nd_from_graph(int n, std::vector<int>& xadj_in, std::vector<int>& adj
         xadj.assign(xadj_in.begin(), xadj_in.end());
         adjncy.assign(adjncy_in.begin(), adjncy_in.end());
     }
-    return run_nd_on_graph(n, xadj, adjncy, perm, parallel, seed, 0.0);
-}
-
-bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& perm,
-              bool parallel, std::vector<int>* sym_col_ptr, std::vector<int>* sym_row_idx,
-              int seed)
-{
-    if (n < 0 || (n > 0 && (col_ptr == nullptr || (col_ptr[n] > 0 && row_idx == nullptr)))) {
-        return false;
-    }
-    perm.assign(static_cast<std::size_t>(n), 0);
-    if (n <= 1) {
-        if (n == 1) {
-            perm[0] = 0;
-        }
-        return true;
-    }
-
-    std::vector<idx_t> xadj;
-    std::vector<idx_t> adjncy;
-    build_symmetric_adjacency(n, col_ptr, row_idx, xadj, adjncy);
-    auto export_sym_graph = [&] {
-        if (sym_col_ptr != nullptr) {
-            if constexpr (std::is_same_v<idx_t, int>) {
-                *sym_col_ptr = std::move(xadj);
-            } else {
-                sym_col_ptr->resize(static_cast<std::size_t>(n) + 1);
-                for (int i = 0; i <= n; ++i) (*sym_col_ptr)[i] = static_cast<int>(xadj[i]);
-            }
-        }
-        if (sym_row_idx != nullptr) {
-            if constexpr (std::is_same_v<idx_t, int>) {
-                *sym_row_idx = std::move(adjncy);
-            } else {
-                sym_row_idx->resize(adjncy.size());
-                for (std::size_t i = 0; i < adjncy.size(); ++i) {
-                    (*sym_row_idx)[i] = static_cast<int>(adjncy[i]);
-                }
-            }
-        }
-    };
-
-    // No edges at all (e.g. a diagonal block): natural order is optimal.
-    if (adjncy.empty()) {
-        for (int i = 0; i < n; ++i) {
-            perm[i] = i;
-        }
-        export_sym_graph();
-        return true;
-    }
-
-    idx_t options[METIS_NOPTIONS];
-    METIS_SetDefaultOptions(options);
-    options[METIS_OPTION_NUMBERING] = 0;
-    options[METIS_OPTION_SEED] = seed;
-    // Faster METIS opts (NITER=1/2, RM coarsening) were tested: ~-2..-16% on analyze wall but
-    // produced orderings whose pivot structure fails the no-pivot GPU factor on some matrices,
-    // and changed the fill basis (downstream factor/solve regressed). Default METIS_NodeND
-    // stays — analyze is METIS_NodeND-bound (~92-95%).
-
-    // PARALLEL nested dissection: same ND quality, multi-core. Enabled by the `parallel` arg.
-    if (parallel) {
-        // Base-case threshold for the parallel recursion. The two regimes:
-        //   - Small Jacobians (n < 20000): recurse deeper (base 4000) — faster AND lower fill.
-        //   - Large Jacobians (n >= 20000): base 20000. Going deeper over-recurses on the long
-        //     elimination chains typical of large power-grid Jacobians, raising fill and
-        //     regressing the downstream factor/solve.
-        const int base_thr = parallel_nd_base_threshold(n);
-        std::vector<int> pp;
-        par_nd_rec(xadj, adjncy, pp, kParNdDepth, base_thr, seed);
-        for (int i = 0; i < n; ++i) perm[i] = pp[i];
-        export_sym_graph();
-        return true;
-    }
-    idx_t nvtxs = n;
-    std::vector<idx_t> mperm(n);
-    std::vector<idx_t> miperm(n);
-    const int rc = METIS_NodeND(&nvtxs, xadj.data(), adjncy.data(), nullptr,
-                                options, mperm.data(), miperm.data());
-    if (rc != METIS_OK) {
-        // Degrade gracefully: natural order keeps the solver usable, just
-        // without the fill reduction for this block.
-        for (int i = 0; i < n; ++i) {
-            perm[i] = i;
-        }
-        export_sym_graph();
-        return true;
-    }
-
-    for (int i = 0; i < n; ++i) {
-        perm[i] = static_cast<int>(mperm[i]);
-    }
-    export_sym_graph();
-    return true;
+    return run_nd_on_graph(n, xadj, adjncy, perm, parallel, seed);
 }
 
 }  // namespace custom_linear_solver::reordering
