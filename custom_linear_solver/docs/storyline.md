@@ -1,6 +1,6 @@
 # Research Storyline — Tiny-Front 전력망 Jacobian 을 위한 배치 GPU Multifrontal 기여
 
-> **상태**: canonical   **갱신**: 2026-06-10
+> **상태**: canonical   **갱신**: 2026-06-13
 > **한 줄**: 하나의 근원(tiny-front regime)에서 내려오는 연구 기여 4개와 그 ablation 토글 매핑, 그리고 텐서코어 기여의 정직한 분해.
 
 **구성**: cuDSS 와 공유하는 substrate 를 분리하고, 그 위의 **연구 기여 4개**를 체계적으로 서술한다.
@@ -135,6 +135,12 @@
 - 기타 폐기(cuBLAS grouped mid, fused trail+extend, sibling/chain/validated amalgamation, FP16 force-all,
   batch-dim packing)는 회귀/무효라 master 에서 제거 — 전수 목록은
   [`03-optimization-notes/03-tensor-core-investigation.md`](03-optimization-notes/03-tensor-core-investigation.md).
+- **exp_260612 음성군**(`deprecated/` 로 이관): gather assembly(scatter 우위), deep-K amalgamation(thin-K 천장),
+  custom GPU-objective ND·전기적-weighted bisection(≈/악화 vs METIS), tiled-trailing(re-staging), mid-fewsync/
+  blocked-fp32/sysblk(barrier 는 증상), small-band TC(<1%). 공통 교훈: 전력망+ND 의 thin-K 구조가 compute-bound
+  전환을 막는다 — 레버는 occupancy(panel-residency)와 ordering 선택뿐. 상세
+  [`03-optimization-notes/07-batch-factorize-structural-2026-06-13.md`](03-optimization-notes/07-batch-factorize-structural-2026-06-13.md) §negative,
+  [`08-ordering-best-of-k-2026-06-13.md`](03-optimization-notes/08-ordering-best-of-k-2026-06-13.md) §2.
 
 ---
 
@@ -177,11 +183,16 @@
 | A | **Dispatch scheduling** | launch 낭비 / level 동시성 | 동형 정책, `--no-multistream` | 70K/USA −11~15%; 8387 −22% |
 | B | **TC trailing** | thin-K 저정밀 trailing | `MID_TF32_TC`,`BIG_TF32_BLOCKED_TC`,`OZAKI_*` | mma +6~9%; relres 5e-2→1e-4 |
 | B | **TC-routable front coarsening** | tiny-K underfill | `TC_CLOSURE_*`,`SMALL_FRONT_MAX_16` | 8387/13K raw 1.24× (공정 net≈0, §3B2) |
+| C | **Panel-resident mid 커널** (exp_260612) | whole-front shared 1 block/SM | `CLS_MID_PANEL`(default), `CLS_TRAIL_RB` | DRAM 2–32%→55–65%; USA B=64 −9.3% |
+| C | **B=1 TC 체제 반전** (exp_260612) | B=1 block-starved critical path | `--precision tf32`+`OZAKI_*` | USA −17% (B=1; B=64 와 정반대) |
+| C | **Measured best-of-k ordering** (exp_260612) | proxy anti-informative | `CLS_ORDER_MEASURE_K` | B=1 −6~13% + 결정성 |
 | — | (substrate) 배치·정적 plan·kernel optimization | — | — | cuDSS 공유 / 엔지니어링(exp#3 62%) |
-| — | (음성) column-U-solve | panel barrier | `TF32_COLUMN_USOLVE` | ≈0% |
+| — | (음성) column-U-solve, exp_260612 음성군 | panel barrier / thin-K | `TF32_COLUMN_USOLVE`; `deprecated/` | ≈0% / 회귀 |
 
 **메시지**: 근원은 tiny-front regime. cuDSS 와 공유하는 배치 정적 multifrontal 위에, **front 를 어디로/
 언제 보낼지(tier routing, dispatch scheduling)** 정하고 **trailing 을 텐서코어에 태우되 작은 front 를
 키워(TC trailing, front coarsening)** thin-K 를 푼다. 정직한 분해(exp#3 + notes 54/55)상 텐서코어 자체는
 +6~9% 의 *방법론적* 기여(정확도 보존이 핵심)이고, 가장 큰 raw 속도 덩어리는 연구 축 밖의 kernel
-optimization 이다.
+optimization 이다. **축 C(exp_260612)**는 이 진단을 배치·B=1 체제로 확장한다 — 배치에선 occupancy(panel-residency)가,
+B=1 에선 텐서코어(critical-path 단축)와 ordering 선택이 레버이며, 두 체제의 최적 커널은 정반대다(상세
+[`03-optimization-notes/06`](03-optimization-notes/06-b1-factorize-regime-2026-06-13.md)·[`07`](03-optimization-notes/07-batch-factorize-structural-2026-06-13.md)·[`08`](03-optimization-notes/08-ordering-best-of-k-2026-06-13.md)).

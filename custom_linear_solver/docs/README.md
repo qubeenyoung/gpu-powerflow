@@ -43,6 +43,9 @@
 - [`03-tensor-core-investigation.md`](03-optimization-notes/03-tensor-core-investigation.md) — 텐서코어 조사 통합: large-case 성공, 8387/13K dead-end 매트릭스, Ozaki 정확도, **honest ~1.1× 정정**.
 - [`04-solve-optimization-2026-06-10.md`](03-optimization-notes/04-solve-optimization-2026-06-10.md) — **solve 경로 ~1.5× 가속** (small-tier nc-packing, spine fusion, full solve graph, inverse scatter, B=1 fixed-nc 라우팅). 통합 완료 + 기각 가설 기록.
 - [`05-tc-eligibility-relaxation-2026-06-11.md`](03-optimization-notes/05-tc-eligibility-relaxation-2026-06-11.md) — TF32 적격 gate(`uc≤256`/mid 조건) 완화 → **거의 모든 mid/big 이 TC**. `max_uc` 클램프–cap 연동 버그 수정, **uc>256 spine(70K L25 spike 10→5.6%) 제거**, factorize ~1.02–1.06×. **기본값으로 승격**(cap 256→512, mid 하한 풀음).
+- [`06-b1-factorize-regime-2026-06-13.md`](03-optimization-notes/06-b1-factorize-regime-2026-06-13.md) — **B=1 = under-fill(occupancy) 바운드**. scheduling/tiling/sync/amalgamation 무효, 두 레버뿐: ordering + **B=1 텐서코어(Ozaki-TC, fp32 정확도, USA −17%)**. B=64 와 정반대 체제. (exp_260612 01·03·04·05·11 압축)
+- [`07-batch-factorize-structural-2026-06-13.md`](03-optimization-notes/07-batch-factorize-structural-2026-06-13.md) — **STRUCTURAL: panel-resident mid 커널**(L/U 패널만 shared → DRAM 2–32%→55–65%, **USA B=64 −9.3%**, default-on). register-block(+4%)·scatter 미세최적화(+2–3%). gather/tiled/fewsync/sysblk/small-band-TC 회귀 → `deprecated/`. (exp_260612 06·09·10 압축)
+- [`08-ordering-best-of-k-2026-06-13.md`](03-optimization-notes/08-ordering-best-of-k-2026-06-13.md) — **tailored ND 반증**(custom GPU-ND·전기적-weighted ≈/악화 vs METIS), 실익은 **measured best-of-k**(`CLS_ORDER_MEASURE_K`, B=1 −6~13% + 결정성). (exp_260612 12·13·14·15 압축, 코드 `deprecated/gpu_nd/`)
 - [`archive/`](03-optimization-notes/archive/) — dead-end R&D 로그(TC dedicated, symbolic GEMM, tree restructuring, 폐기 실험). 재시도 시 회피용.
 
 ### 04. Benchmarks and Profiling
