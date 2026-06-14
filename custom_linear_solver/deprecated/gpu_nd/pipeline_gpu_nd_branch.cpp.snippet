@@ -1,0 +1,50 @@
+// pipeline.cpp build_plan_from_csr CLS_GPU_ND selection branch + EW/gpu_nd in build_plan_seed (snapshot 7fe15a7).
+        // 3. Nested-dissection ordering: METIS (fill), GPU-objective ND, or ELECTRICAL-weighted ND
+        // (Stage 2: cut weak |J_ij| tie-lines — needs the Jacobian values, downloaded to host once).
+        out.perm.assign(static_cast<std::size_t>(n), 0);
+        const bool use_ew = use_gpu_nd && env_int("CLS_GPU_ND_EW", 0) != 0;
+        if (use_ew) {
+            std::vector<int> h_rp(static_cast<std::size_t>(n) + 1), h_ci(static_cast<std::size_t>(nnz));
+            std::vector<double> h_v(static_cast<std::size_t>(nnz));
+            cudaMemcpy(h_rp.data(), d_csr_row_ptr, (static_cast<std::size_t>(n) + 1) * sizeof(int), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_ci.data(), d_csr_col_idx, static_cast<std::size_t>(nnz) * sizeof(int), cudaMemcpyDeviceToHost);
+            if (matrix.value_type == ValueType::kFloat64) {
+                cudaMemcpy(h_v.data(), matrix.values, static_cast<std::size_t>(nnz) * sizeof(double), cudaMemcpyDeviceToHost);
+            } else {
+                std::vector<float> hf(static_cast<std::size_t>(nnz));
+                cudaMemcpy(hf.data(), matrix.values, static_cast<std::size_t>(nnz) * sizeof(float), cudaMemcpyDeviceToHost);
+                for (long i = 0; i < nnz; ++i) h_v[i] = hf[i];
+            }
+            if (!reordering::gpu_nd_weighted_from_graph(n, h_rp.data(), h_ci.data(), h_v.data(), out.perm, metis_seed))
+                return false;
+        } else {
+            std::vector<int> nd_xadj = metis_sym_col_ptr;     // consumed (moved-from) by ND call
+            std::vector<int> nd_adjncy = metis_sym_row_idx;
+            const bool ok = use_gpu_nd
+                ? reordering::gpu_nd_from_graph(n, nd_xadj, nd_adjncy, out.perm, metis_seed)
+                : reordering::metis_nd_from_graph(n, nd_xadj, nd_adjncy, out.perm, parallel_nd, metis_seed);
+            if (!ok) return false;
+        }
+    // exp_260612: custom GPU/TC-objective ND (CLS_GPU_ND). Build the gpu_nd plan + a METIS baseline,
+    // and keep gpu_nd ONLY if its dense front fill stays within budget (CLS_GPU_ND_FILL, default 1.3)
+    // — a GPU objective can trade fill for structure, so gate it cheaply at analyze time (no GPU run).
+    if (env_int("CLS_GPU_ND", 0) != 0) {
+        PlanBuildResult gpu, base;
+        const bool gok = build_plan_seed(matrix, options, options.metis_seed,
+                                         /*parallel_nd=*/false, gpu, /*use_gpu_nd=*/true);
+        const bool bok = build_plan_seed(matrix, options, options.metis_seed,
+                                         /*parallel_nd=*/false, base, /*use_gpu_nd=*/false);
+        if (!gok && !bok) return false;
+        if (!gok) { out = std::move(base); return true; }
+        if (!bok) { out = std::move(gpu); return true; }
+        const char* fs = std::getenv("CLS_GPU_ND_FILL");
+        const double budget = fs ? std::atof(fs) : 1.3;
+        const double ratio = base.plan.front_total > 0
+            ? (double)gpu.plan.front_total / (double)base.plan.front_total : 1.0;
+        std::fprintf(stderr,
+                     "[analyze] gpu_nd front_total %ld vs metis %ld  fill_ratio=%.3f (budget %.2f) -> %s\n",
+                     gpu.plan.front_total, base.plan.front_total, ratio, budget,
+                     ratio <= budget ? "gpu_nd" : "metis(reject)");
+        out = (ratio <= budget) ? std::move(gpu) : std::move(base);
+        return true;
+    }

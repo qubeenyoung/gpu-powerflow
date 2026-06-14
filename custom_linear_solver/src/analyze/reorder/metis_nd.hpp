@@ -27,20 +27,4 @@ bool metis_nd(int n, const int* col_ptr, const int* row_idx, std::vector<int>& p
 bool metis_nd_from_graph(int n, std::vector<int>& xadj, std::vector<int>& adjncy,
                          std::vector<int>& perm, bool parallel, int seed = 42);
 
-// exp_260612: GPU/TC-objective nested dissection from a prebuilt symmetric graph. Owns the
-// recursion + per-split objective + stopping granularity (reusing METIS_ComputeVertexSeparator as
-// the bisection primitive); optimizes a GPU critical-path cost (TC-discounted separator front +
-// imbalance penalty) instead of fill. Knobs via env: CLS_GPU_ND_CAND/_LEAF/_LAMBDA/_TC_G. Same
-// perm convention as metis_nd_from_graph (drop-in). Inputs may be moved from.
-bool gpu_nd_from_graph(int n, std::vector<int>& xadj, std::vector<int>& adjncy,
-                       std::vector<int>& perm, int seed = 42);
-
-// exp_260612 Stage 2: ELECTRICAL-weighted ND from the Jacobian CSR (host arrays: rowptr/colidx/vals).
-// Builds a |J_ij|-weighted symmetric graph and, for the top CLS_GPU_ND_EW_DEPTH levels, bisects by
-// edge-weighted METIS partitioning (cuts electrically weak tie-lines — the power-grid separators
-// METIS_NodeND cannot target since it has no edge weights), deriving + FM-refining a vertex
-// separator; below that depth it falls back to gpu_nd. Same perm convention. Knobs: CLS_GPU_ND_EW_DEPTH.
-bool gpu_nd_weighted_from_graph(int n, const int* rowptr, const int* colidx, const double* vals,
-                                std::vector<int>& perm, int seed = 42);
-
 }  // namespace custom_linear_solver::reordering

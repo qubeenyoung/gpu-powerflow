@@ -69,6 +69,60 @@ docs/13 의 P1+P2(+P4) 결합 별도 커널. P1 (reciprocal multiply) 은 defaul
 - `mid_opt.cuh` — `factor_mid_opt<T>` kernel.
 - 활성화 env (옛): `CLS_USE_OPT_MID`.
 
+### `tiled_trailing/` (2026-06-12, exp_260612)
+Under-filled 대형 레벨(few big fronts × B < SM)을 2-커널(panel→trailing_tiled)로 분해해 Phase 3 trailing 을
+tiles × SMs 로 fan-out 하는 prototype. ncu 상 occupancy 는 올랐으나 **B=1 0.66–0.72×, B=64 강제-on 0.62–0.68× 회귀** —
+L/U 를 DRAM 으로 재staging(+28%)·launch +57% 의 비용이 occupancy 이득을 잠식. thin-K 전력망 front 에선 tiling 이
+구조적으로 비효율. cooperative single-kernel(`grid.sync`)이 필요하나 whole-iteration CUDA graph 와 충돌. TF32 한정.
+- `tiled.cuh` — `factor_tiled_panel`, `factor_tiled_trail_tf32`, `dispatch_factor_tiled_tf32`, `tiled_trailing_eligible`.
+- `schedule_hook.cuh.snippet` — `src/factorize/schedule.cuh` 의 include + dispatch 분기.
+- 활성화 env (옛): `CLS_TILED_TRAILING`, `CLS_TILED_FILL`. 측정: `docs/03-optimization-notes/07-batch-factorize-structural-2026-06-13.md` §negative.
+
+### `gather_assembly/` (2026-06-12, exp_260612)
+좌향(left-looking) gather assembly: 전역 memset+atomic scatter+atomic extend-add 대신 각 factor 커널이 front 를
+직접 조립(matrix gather + children CB gather). 5 모드(gather/gather_oc/gather_pb/gather_pb_oc) 전부 회귀
+(**fused gather −15%, phase-batched +78~100%**). scatter 의 구조적 우위(streaming memset + atomic-free unique
+scatter + factor-fused extend-add) 를 어떤 layout/phasing 도 못 이김. 기본 빌드에서 `#ifndef CLS_FACTOR_GATHER` 로 컴파일 제외.
+- `front_ops_gather.cuh.snippet` — `GatherArgs`, `zero_front`/`gather_matrix`/`write_cb`/`gather_children`/`assemble_outputs`/`assemble_level_gather`/`make_gather_args`.
+- `factorize_dispatch.cu.snippet` — gather/skip-assemble dispatch + lazy graph.
+- `lower_gather_build.cu.snippet` — `build_gather_structures` (per-front nnz/child/CB CSR).
+- `plan_gather_fields.snippet` — `MultifrontalPlan` 의 `d_front_nnz_*`/`d_child_*`/`d_cb_pos`/`d_gasm_*` + `free_gather`.
+- `state_and_small_hooks.snippet` — `State` gather 필드 + `factor_small` gather hook.
+- 활성화 (옛): 빌드 `-DCLS_FACTOR_GATHER`, 런타임 `CLS_ASM_MODE`/`CLS_GATHER_ASM`/`CLS_SKIP_ASSEMBLE`/`CLS_GATHER_KEEP_MEMSET`. 측정: `docs/03-optimization-notes/07-...md` §negative.
+
+### `amalgamation/` (2026-06-13, exp_260612)
+Deep-K supernode amalgamation: child subtree 를 부모 패널에 흡수해 nc 를 두껍게(→ TC 발화하도록 arithmetic
+intensity 상승). fill↓(0.87×)·level↓(29→16)에도 **factor 는 모든 cap 에서 +1.4~21.6% 회귀** — 전력망+ND front 는
+work-weighted nc ~4.6 의 thin-K 구조적 천장이라 AI 벽을 못 넘음. 위 예약 폴더(2026-06-05 노트)의 후속·확정.
+- `deep_k_panels.cpp.snippet` — `symbolic::deep_k_panels` (+ `supernode.hpp` decl).
+- `maybe_amalgamate.cpp.snippet` — `pipeline.cpp` 의 nesting/fill-budget 검증 주입부 + `front_arena_fill`.
+- 활성화 env (옛): `CLS_AMALG_K`, `CLS_AMALG_FILL`. 측정: `docs/03-optimization-notes/07-...md` §negative.
+
+### `gpu_nd/` (2026-06-13, exp_260612)
+Custom GPU/TC-objective nested dissection (재귀·목적·정지 our-owned, bisection 은 METIS_ComputeVertexSeparator 재사용)
++ 전기적-weighted bisection(|J_ij| 약한 tie-line cut). best-of-k METIS envelope 대비 **gpu_nd ≈ METIS(시드 노이즈 내)**,
+EW 는 모든 depth 에서 **+9~73% 악화(fill +28%)**. 초기 보고된 win 은 single-seed+UFACTOR artifact. METIS fill 목적이
+이 문제엔 near-optimal — 실익은 깨진 best-of-k proxy 수정(→ measured best-of-k, `CLS_ORDER_MEASURE_K` 로 src 잔류)뿐.
+- `gpu_nd.cpp.snippet` — `metis_nd.cpp` 의 `gpu_nd_from_graph`/`gpu_nd_weighted_from_graph` + 재귀/refine 헬퍼 (+ `.hpp` decls).
+- `pipeline_gpu_nd_branch.cpp.snippet` — `build_plan_from_csr` 의 CLS_GPU_ND 선택 분기 + `build_plan_seed` EW/gpu_nd 경로.
+- 활성화 env (옛): `CLS_GPU_ND`, `CLS_GPU_ND_CAND/_LAMBDA/_LEAF/_TC_G/_EW/_FILL`. 측정: `docs/03-optimization-notes/08-ordering-best-of-k-2026-06-13.md`.
+
+### `mid_fewsync/` (2026-06-12, exp_260612)
+mid 의 barrier-bound(__syncthreads stall 5.5) 를 줄이려는 right-looking blocked-LU 두 변형: (1) sync-free U-solve 의
+few-sync TF32 커널, (2) 정밀도-안전 true-fp32 blocked-LU(`block_update_scalar_rb`). barrier 5.36→5.12 로 줄지만
+occupancy/wall **중립~+2% 회귀** — barrier 는 증상이고, 묶이는 건 whole-front shared 의 1 block/SM. 커널-레벨 탈출 없음.
+- `mid_fewsync.cuh.snippet` — `factorize_front_blocked_tf32_fewsync`, `factorize_front_blocked_fp32`, `block_update_scalar_rb<MR>`, 게이트.
+- 활성화 env (옛): `CLS_MID_FEWSYNC`, `CLS_MID_BLOCKED_FP32`. 측정: `docs/03-optimization-notes/07-...md` §negative.
+
+### `mid_sysblk/` (2026-06-12, exp_260612)
+Pipelined systems-per-block mid 커널: 한 block 이 G 시스템을 처리하고 cp.async front 로드를 double-buffer 해 다음
+시스템 로드를 현재 factorize 뒤로 숨김(global-load latency hide 시도). 측정상 이득 없음(중립/회귀) → 미채택.
+- `mid_sysblk.cuh.snippet` — `factor_mid_blocked_sysblk<T>`, `mid_sysblk_g`.
+- 활성화 env (옛): `CLS_MID_SYSBLK`, `CLS_MID_FSZ_MAX`(연동 probe). 측정: `docs/03-optimization-notes/07-...md` §negative.
+
+> 위 6개 폴더(exp_260612)의 코드는 스니펫으로 보존되며, **정확한 통합 형태(라인 단위 diff)는 git 커밋 `7fe15a7`**
+> ("import: exp_260612 experiments … pre-curation") 에 전량 보존되어 있다. 복원 시 그 커밋을 기준으로 cherry-pick 권장.
+
 ## 복원 방법
 
 1. 필요 파일을 `deprecated/<area>/` 에서 `src/<해당 폴더>/` 로 복사.

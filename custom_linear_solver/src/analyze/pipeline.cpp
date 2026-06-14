@@ -1,7 +1,5 @@
 #include "analyze/analyze.hpp"
 
-#include <cuda_runtime.h>
-
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -13,7 +11,6 @@
 #include "analyze/plan/lower.hpp"
 #include "analyze/reorder/metis_nd.hpp"
 #include "analyze/symbolic/elimination_tree.hpp"
-#include "analyze/symbolic/multifrontal.hpp"
 #include "analyze/symbolic/supernode.hpp"
 
 namespace custom_linear_solver::plan {
@@ -161,87 +158,11 @@ double ordering_cost_model(const MultifrontalPlan& plan)
 
 }  // namespace
 
-// Σ fsz² (the dense front arena size == plan.front_total) for a panel partition.
-static long front_arena_fill(const symbolic::MultifrontalSymbolic& mf)
-{
-    long t = 0;
-    for (int p = 0; p < mf.num_panels; ++p) {
-        const long fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
-        t += fsz * fsz;
-    }
-    return t;
-}
-
-// exp_260612 Stage 0: deep-K amalgamation (CLS_AMALG_K). When set, replace the default
-// relaxed_panels chain partition with deep_k_panels (thicker nc -> higher arithmetic intensity).
-// Guards before accepting it: (1) the nesting invariant — multifrontal_symbolic flags any child
-// CB row that does not nest in its parent front as asm_idx==-1; (2) a fill-growth budget
-// CLS_AMALG_FILL (default 1.30 = +30% dense front arena vs the baseline the solver would use).
-// Returns true and fills `out` only if both pass; otherwise the default ordering is kept.
-static bool maybe_amalgamate(int n, int max_panel_width,
-                             const std::vector<int>& parent, const std::vector<int>& colcount,
-                             const std::vector<int>& Lp, const std::vector<int>& Li,
-                             bool emit_info, symbolic::PanelPartition& out)
-{
-    const int amalg_k = env_int("CLS_AMALG_K", 0);
-    if (amalg_k <= 0 || n <= 0) return false;
-
-    // Baseline partition the solver would otherwise use (mirrors compute_effective_panel_width).
-    int eff = (n >= 16000) ? 16 : max_panel_width;
-    if (eff < 1) eff = 1;
-    if (eff > 64) eff = 64;
-    const symbolic::PanelPartition base = symbolic::relaxed_panels(n, parent, colcount, eff);
-    const symbolic::PanelPartition amalg = symbolic::deep_k_panels(n, parent, colcount, amalg_k);
-
-    const symbolic::MultifrontalSymbolic mf = symbolic::multifrontal_symbolic(n, Lp, Li, amalg);
-    long nest_bad = 0;
-    for (std::size_t i = 0; i < mf.asm_idx.size(); ++i)
-        if (mf.asm_idx[i] < 0) ++nest_bad;
-
-    const symbolic::MultifrontalSymbolic mfb = symbolic::multifrontal_symbolic(n, Lp, Li, base);
-    const long fill_amalg = front_arena_fill(mf);
-    const long fill_base = front_arena_fill(mfb);
-    const double ratio = fill_base > 0 ? static_cast<double>(fill_amalg) / fill_base : 1.0;
-    const char* fs = std::getenv("CLS_AMALG_FILL");
-    const double budget = fs ? std::atof(fs) : 1.30;
-
-    if (emit_info) {
-        auto nc_hist = [](const symbolic::PanelPartition& pp, const char* tag) {
-            long b[6] = {0};  // nc in {1-2,3-4,5-8,9-16,17-32,>32}
-            double wsum = 0; long wn = 0;
-            for (int p = 0; p < pp.num_panels; ++p) {
-                const int c = pp.ncols[p];
-                int k = c <= 2 ? 0 : c <= 4 ? 1 : c <= 8 ? 2 : c <= 16 ? 3 : c <= 32 ? 4 : 5;
-                ++b[k]; wsum += (double)c * c; wn += c;  // wsum weights by column-share of work
-            }
-            std::fprintf(stderr,
-                "  nc-hist %s [1-2]=%ld [3-4]=%ld [5-8]=%ld [9-16]=%ld [17-32]=%ld [>32]=%ld meanw=%.1f\n",
-                tag, b[0], b[1], b[2], b[3], b[4], b[5], wn ? wsum / wn : 0.0);
-        };
-        std::fprintf(stderr,
-                     "[analyze] amalg K=%d panels %d->%d fill_ratio=%.3f (budget %.2f) nest_bad=%ld\n",
-                     amalg_k, base.num_panels, amalg.num_panels, ratio, budget, nest_bad);
-        nc_hist(base, "base ");
-        nc_hist(amalg, "amalg");
-    }
-    if (nest_bad > 0) {
-        std::fprintf(stderr, "[analyze] amalg REJECT: %ld nesting violations -> baseline\n", nest_bad);
-        return false;
-    }
-    if (ratio > budget) {
-        std::fprintf(stderr, "[analyze] amalg REJECT: fill_ratio %.3f > budget %.2f -> baseline\n",
-                     ratio, budget);
-        return false;
-    }
-    out = amalg;
-    return true;
-}
-
-// Build the plan for one fixed ND seed / mode (the original single-ordering pipeline).
+// Build the plan for one fixed ND seed (the original single-ordering pipeline).
 static bool build_plan_seed(const CsrMatrixView& matrix,
                             const PlanBuildOptions& options,
                             int metis_seed, bool parallel_nd,
-                            PlanBuildResult& out, bool use_gpu_nd = false)
+                            PlanBuildResult& out)
 {
     try {
         const int n = static_cast<int>(matrix.nrows);
@@ -259,31 +180,14 @@ static bool build_plan_seed(const CsrMatrixView& matrix,
         if (matrix::build_symmetric_graph_device(csc_device, metis_sym_col_ptr, metis_sym_row_idx)
             != Status::kSuccess) return false;
 
-        // 3. Nested-dissection ordering: METIS (fill), GPU-objective ND, or ELECTRICAL-weighted ND
-        // (Stage 2: cut weak |J_ij| tie-lines — needs the Jacobian values, downloaded to host once).
+        // 3. METIS nested-dissection.
         out.perm.assign(static_cast<std::size_t>(n), 0);
-        const bool use_ew = use_gpu_nd && env_int("CLS_GPU_ND_EW", 0) != 0;
-        if (use_ew) {
-            std::vector<int> h_rp(static_cast<std::size_t>(n) + 1), h_ci(static_cast<std::size_t>(nnz));
-            std::vector<double> h_v(static_cast<std::size_t>(nnz));
-            cudaMemcpy(h_rp.data(), d_csr_row_ptr, (static_cast<std::size_t>(n) + 1) * sizeof(int), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_ci.data(), d_csr_col_idx, static_cast<std::size_t>(nnz) * sizeof(int), cudaMemcpyDeviceToHost);
-            if (matrix.value_type == ValueType::kFloat64) {
-                cudaMemcpy(h_v.data(), matrix.values, static_cast<std::size_t>(nnz) * sizeof(double), cudaMemcpyDeviceToHost);
-            } else {
-                std::vector<float> hf(static_cast<std::size_t>(nnz));
-                cudaMemcpy(hf.data(), matrix.values, static_cast<std::size_t>(nnz) * sizeof(float), cudaMemcpyDeviceToHost);
-                for (long i = 0; i < nnz; ++i) h_v[i] = hf[i];
-            }
-            if (!reordering::gpu_nd_weighted_from_graph(n, h_rp.data(), h_ci.data(), h_v.data(), out.perm, metis_seed))
-                return false;
-        } else {
+        {
             std::vector<int> nd_xadj = metis_sym_col_ptr;     // consumed (moved-from) by ND call
             std::vector<int> nd_adjncy = metis_sym_row_idx;
-            const bool ok = use_gpu_nd
-                ? reordering::gpu_nd_from_graph(n, nd_xadj, nd_adjncy, out.perm, metis_seed)
-                : reordering::metis_nd_from_graph(n, nd_xadj, nd_adjncy, out.perm, parallel_nd, metis_seed);
-            if (!ok) return false;
+            if (!reordering::metis_nd_from_graph(n, nd_xadj, nd_adjncy, out.perm,
+                                                 parallel_nd, metis_seed))
+                return false;
         }
         out.iperm.assign(static_cast<std::size_t>(n), 0);
         for (int k = 0; k < n; ++k) out.iperm[out.perm[k]] = k;
@@ -310,19 +214,10 @@ static bool build_plan_seed(const CsrMatrixView& matrix,
         std::vector<int> Lp, Li;
         symbolic::fill_pattern(n, sym_col_ptr.data(), sym_row_idx.data(), parent, Lp, Li);
 
-        // 7b. exp_260612 Stage 0: optional deep-K amalgamation (CLS_AMALG_K), validated for
-        // nesting + a fill-growth budget. Injected via analyze_multifrontal's forced_panels.
-        std::vector<int> colcount(static_cast<std::size_t>(n));
-        for (int j = 0; j < n; ++j) colcount[j] = Lp[j + 1] - Lp[j];
-        symbolic::PanelPartition amalg_panels;
-        const bool use_amalg = maybe_amalgamate(n, options.max_panel_width, parent, colcount,
-                                                Lp, Li, options.emit_analyze_info, amalg_panels);
-
         // 8. Build the multifrontal plan.
         out.plan = analyze_multifrontal(n, nnz, ordered_device.col_ptr.ptr,
                                         ordered_device.row_idx.ptr, Lp, Li, parent,
-                                        options.max_panel_width,
-                                        use_amalg ? &amalg_panels : nullptr,
+                                        options.max_panel_width, /*forced_panels=*/nullptr,
                                         options.float_front, options.emit_analyze_info);
         if (out.plan.num_panels == 0) return false;
 
@@ -339,34 +234,10 @@ bool build_plan_from_csr(const CsrMatrixView& matrix,
                          const PlanBuildOptions& options,
                          PlanBuildResult& out)
 {
-    // Measured best-of-k drives per-seed builds itself: one serial-ND plan, no env best-of-k / GPU-ND.
+    // Measured best-of-k drives per-seed builds itself: one serial-ND plan, no env best-of-k.
     if (options.single_seed_only)
         return build_plan_seed(matrix, options, options.metis_seed,
                                /*parallel_nd=*/false, out);
-
-    // exp_260612: custom GPU/TC-objective ND (CLS_GPU_ND). Build the gpu_nd plan + a METIS baseline,
-    // and keep gpu_nd ONLY if its dense front fill stays within budget (CLS_GPU_ND_FILL, default 1.3)
-    // — a GPU objective can trade fill for structure, so gate it cheaply at analyze time (no GPU run).
-    if (env_int("CLS_GPU_ND", 0) != 0) {
-        PlanBuildResult gpu, base;
-        const bool gok = build_plan_seed(matrix, options, options.metis_seed,
-                                         /*parallel_nd=*/false, gpu, /*use_gpu_nd=*/true);
-        const bool bok = build_plan_seed(matrix, options, options.metis_seed,
-                                         /*parallel_nd=*/false, base, /*use_gpu_nd=*/false);
-        if (!gok && !bok) return false;
-        if (!gok) { out = std::move(base); return true; }
-        if (!bok) { out = std::move(gpu); return true; }
-        const char* fs = std::getenv("CLS_GPU_ND_FILL");
-        const double budget = fs ? std::atof(fs) : 1.3;
-        const double ratio = base.plan.front_total > 0
-            ? (double)gpu.plan.front_total / (double)base.plan.front_total : 1.0;
-        std::fprintf(stderr,
-                     "[analyze] gpu_nd front_total %ld vs metis %ld  fill_ratio=%.3f (budget %.2f) -> %s\n",
-                     gpu.plan.front_total, base.plan.front_total, ratio, budget,
-                     ratio <= budget ? "gpu_nd" : "metis(reject)");
-        out = (ratio <= budget) ? std::move(gpu) : std::move(base);
-        return true;
-    }
 
     const int K = std::max(1, env_int("CLS_ORDER_K", 1));
     if (K <= 1)

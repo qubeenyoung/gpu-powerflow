@@ -1,0 +1,27 @@
+// exp_260612 tiled-trailing dispatch hook (schedule.cuh added lines, snapshot 7fe15a7).
+#include "factorize/tiled.cuh"   // under-fill tiled-trailing path (prototype, env-gated)
+// Phase-batched gather (CLS_ASM_MODE=gather_pb): a separate lean, high-occupancy pre-pass that
+// assembles every front in [b,e) into the global arena (gather matrix + pull children CBs from the
+// already-factored deeper levels). Launched right before the range's factor kernel on the same
+// stream, so stream ordering makes the assembled front visible without an explicit barrier. The
+// factor kernels then stage in clean (no in-kernel gather), restoring full factor occupancy.
+static void issue_assemble_gather(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
+                                  int b, int e, const int* d_plc)
+{
+    if (e <= b || !is_fp32_front(st.precision)) return;
+    GatherArgs ga = make_gather_args(plan, st);
+    dim3 grid(e - b, st.batch_count);
+    constexpr int threads = 256;   // lean kernel → high occupancy (not factor's 60-reg / 8-block cap)
+    assemble_level_gather<float><<<grid, threads, 0, stream>>>(
+        b, e, d_plc, plan.d_front_off, plan.d_asm_ptr, plan.d_asm_local,
+        st.d_front_batch_f, plan.front_total, ga);
+}
+
+    if (st.phase_batched && st.gather_asm) issue_assemble_gather(plan, st, stream, b, e, d_plc);
+            // Under-filled large levels (few fronts × B < SMs) leave SMs idle and run 1 block/SM:
+            // route the whole range (mid- or big-sized) through the tiled-trailing path so Phase 3
+            // fans out across tiles × SMs. Env-gated, TF32 only; off by default (prototype).
+            if (tiled_trailing_eligible(st, e - b)) {
+                dispatch_factor_tiled_tf32(plan, st, stream, b, e, d_plc, caps);
+                return;
+            }

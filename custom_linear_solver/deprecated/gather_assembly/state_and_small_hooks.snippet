@@ -1,0 +1,56 @@
+// State gather fields + small.cuh gather hook (added lines, snapshot 7fe15a7).
+    // exp_260612 gather-based assembly (CLS_GATHER_ASM, batch fp32): factor kernels assemble fronts
+    // directly (gather matrix + children CBs) instead of global memset + scatter + extend-add.
+    const double* cur_values_d = nullptr;  // batched input values (double; cast to float front)
+    const float* cur_values_f = nullptr;   // batched input values (float)
+    int cur_values_double = 1;             // 1 -> use cur_values_d, 0 -> cur_values_f
+    const int* cur_o2c = nullptr;          // ordered_value_to_csr (q -> value slot)
+    int cur_nnz = 0;
+    bool gather_asm = false;               // gather path active this factorize
+    int gather_mode = 0;                   // 0 = atomic gather, 1 = output-centric (gather_oc)
+    bool phase_batched = false;            // gather_pb: assembly hoisted to a separate per-level pre-pass
+    float* d_cb_batch_f = nullptr;         // CB buffer (batch_count * plan.cb_total) for gather path
+    long cb_alloc_elems = 0;               // current d_cb_batch_f capacity (elements)
+    void* factor_gather_graph_exec = nullptr;  // lazily-captured graph for the gather factor path
+    const void* gather_graph_values = nullptr; // value pointer the gather graph was captured against
+// --- state.cu dtor ---
+    if (factor_gather_graph_exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(factor_gather_graph_exec));
+    if (d_cb_batch_f) cudaFree(d_cb_batch_f);
+// --- small.cuh ---
+                              long front_total, int* sing, int do_extend, GatherArgs ga)
+    // 1. assemble Fs: fused gather (zero + gather matrix + gather children), or load from the
+    // global front (scatter, or phase-batched where a separate pre-pass already assembled F).
+#ifdef CLS_FACTOR_GATHER
+    if (ga.active && !ga.phase_batched) {
+        zero_front<FrontType>(Fs, fsz2, sl, sub_group_size);
+        __syncwarp(mask);
+        if (ga.mode == 1) {
+            assemble_outputs<FrontType>(Fs, ga, batch_idx, p, sl, sub_group_size);
+        } else {
+            gather_matrix<FrontType>(Fs, ga, batch_idx, p, sl, sub_group_size);
+            gather_children<FrontType>(Fs, fsz, ga, asm_ptr, asm_local, batch_idx, p, sl, sub_group_size);
+        }
+        __syncwarp(mask);
+    } else
+#endif
+    {
+        for (int e = sl; e < fsz2; e += sub_group_size) Fs[e] = F[e];
+        __syncwarp(mask);
+    }
+    // 3. writeback L/U for the solve + this front's CB to the buffer for its parent.
+#ifdef CLS_FACTOR_GATHER
+    if (ga.active) {
+        writeback_factored<FrontType, FrontType>(F, Fs, fsz, nc, uc, sl, sub_group_size);
+        write_cb<FrontType>(ga, batch_idx, ga.cb_pos[p], Fs, fsz, nc, uc, sl, sub_group_size);
+        return;
+    }
+#endif
+                                       FrontType* frontB, int* sing, int do_extend, GatherArgs ga)
+        plan.front_total, sing, do_extend, ga);
+                                         FrontType* frontB, int* sing, int do_extend, GatherArgs ga)
+    if (sub_group_size == 8)       launch_factor_small<FrontType, 8>(num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area, plan, d_plc, frontB, sing, do_extend, ga);
+    else if (sub_group_size == 16) launch_factor_small<FrontType, 16>(num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area, plan, d_plc, frontB, sing, do_extend, ga);
+    else               launch_factor_small<FrontType, 32>(num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area, plan, d_plc, frontB, sing, do_extend, ga);
+    GatherArgs ga = make_gather_args(plan, st);
+                                      plan, d_plc, st.d_front_batch, st.d_sing, do_extend, ga);
+                                     plan, d_plc, st.d_front_batch_f, st.d_sing, do_extend, ga);

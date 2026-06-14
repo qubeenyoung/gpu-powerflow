@@ -7,30 +7,12 @@
 #include "factorize/small.cuh"
 #include "factorize/mid.cuh"
 #include "factorize/big.cuh"
-#include "factorize/tiled.cuh"   // under-fill tiled-trailing path (prototype, env-gated)
 
 namespace custom_linear_solver {
 
 using custom_linear_solver::plan::MultifrontalPlan;
 
 namespace {
-
-// Phase-batched gather (CLS_ASM_MODE=gather_pb): a separate lean, high-occupancy pre-pass that
-// assembles every front in [b,e) into the global arena (gather matrix + pull children CBs from the
-// already-factored deeper levels). Launched right before the range's factor kernel on the same
-// stream, so stream ordering makes the assembled front visible without an explicit barrier. The
-// factor kernels then stage in clean (no in-kernel gather), restoring full factor occupancy.
-static void issue_assemble_gather(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
-                                  int b, int e, const int* d_plc)
-{
-    if (e <= b || !is_fp32_front(st.precision)) return;
-    GatherArgs ga = make_gather_args(plan, st);
-    dim3 grid(e - b, st.batch_count);
-    constexpr int threads = 256;   // lean kernel → high occupancy (not factor's 60-reg / 8-block cap)
-    assemble_level_gather<float><<<grid, threads, 0, stream>>>(
-        b, e, d_plc, plan.d_front_off, plan.d_asm_ptr, plan.d_asm_local,
-        st.d_front_batch_f, plan.front_total, ga);
-}
 
 // Per-range dispatcher: scan the panels in plcols[b..e), pick the tier from the level's max front
 // size, and dispatch one right-sized kernel. A mid range whose shared layout overflows the
@@ -40,20 +22,12 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
                                      const int* d_plc, const int* h_plc)
 {
     if (e <= b) return;
-    if (st.phase_batched && st.gather_asm) issue_assemble_gather(plan, st, stream, b, e, d_plc);
     const FrontRangeCaps caps = scan_front_range(plan, h_plc, b, e);
     switch (classify_front_tier(caps.max_fsz)) {
         case FrontTier::kSmall:
             dispatch_factor_small(plan, st, stream, b, e, d_plc, caps);
             return;
         case FrontTier::kLarge:
-            // Under-filled large levels (few fronts × B < SMs) leave SMs idle and run 1 block/SM:
-            // route the whole range (mid- or big-sized) through the tiled-trailing path so Phase 3
-            // fans out across tiles × SMs. Env-gated, TF32 only; off by default (prototype).
-            if (tiled_trailing_eligible(st, e - b)) {
-                dispatch_factor_tiled_tf32(plan, st, stream, b, e, d_plc, caps);
-                return;
-            }
             // Large fronts try the shared-resident mid kernel first; the mid/big split is the
             // per-precision shared-budget fit decided inside dispatch_factor_mid (fsz*fsz*sizeof(elem)
             // <= the opt-in budget). Fronts that overflow fall through to the global big tier.

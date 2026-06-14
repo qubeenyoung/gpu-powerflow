@@ -17,24 +17,6 @@ struct MultifrontalPlan {
     int *d_plcols = nullptr, *d_panel_parent = nullptr;
     int *d_asm_ptr = nullptr, *d_asm_local = nullptr;
     int* d_a_pos = nullptr;
-    // exp_260612 gather-based (left-looking) assembly (CLS_GATHER_ASM). Per-front matrix-nnz
-    // buckets + per-parent child lists let each factor kernel assemble its front directly (zero
-    // shared, gather matrix entries, gather children CBs) instead of the global memset + atomic
-    // scatter + atomic extend-add. Separate cudaMallocs (freed in dtor). Built once in analyze.
-    int* d_front_nnz_off = nullptr;   // P+1 CSR offsets into the per-front nnz lists
-    int* d_front_nnz_lpos = nullptr;  // nnz: local front position (= a_pos - front_off[p])
-    int* d_front_nnz_q = nullptr;     // nnz: original csr index q (for o2c[q] value lookup)
-    int* d_child_off = nullptr;       // P+1 CSR offsets into the per-parent child list
-    int* d_child_list = nullptr;      // child panel ids (children of each parent)
-    int* d_cb_pos = nullptr;          // per-front offset of its CB in the (parent-grouped) CB buffer
-    long cb_total = 0;                // CB-buffer size per system (sum of uc^2 over fronts)
-    // Output-centric (atomic-free) assembly CSR for the gather_oc path: per front, the occupied
-    // front-local positions (sorted asc) and the contributions that sum into each.
-    int* d_gasm_off = nullptr;        // P+1: front -> range in the occupied-position list
-    int* d_gasm_pos = nullptr;        // gasm_npos: occupied front-local positions (sorted per front)
-    int* d_gasm_src_off = nullptr;    // gasm_npos+1: global CSR, position -> contribution range
-    long* d_gasm_src = nullptr;       // contributions: src<nnz -> matrix slot q; else CB offset src-nnz
-    long gasm_npos = 0;               // number of occupied positions (= gasm_off[P])
     int* d_sing = nullptr;
     int* d_front_rows = nullptr;
     double* d_y = nullptr;

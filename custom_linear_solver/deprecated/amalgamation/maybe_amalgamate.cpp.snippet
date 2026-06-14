@@ -1,0 +1,76 @@
+// maybe_amalgamate + front_arena_fill — pipeline.cpp (snapshot 7fe15a7).
+// Σ fsz² (the dense front arena size == plan.front_total) for a panel partition.
+static long front_arena_fill(const symbolic::MultifrontalSymbolic& mf)
+{
+    long t = 0;
+    for (int p = 0; p < mf.num_panels; ++p) {
+        const long fsz = mf.front_ptr[p + 1] - mf.front_ptr[p];
+        t += fsz * fsz;
+    }
+    return t;
+}
+
+// exp_260612 Stage 0: deep-K amalgamation (CLS_AMALG_K). When set, replace the default
+// relaxed_panels chain partition with deep_k_panels (thicker nc -> higher arithmetic intensity).
+// Guards before accepting it: (1) the nesting invariant — multifrontal_symbolic flags any child
+// CB row that does not nest in its parent front as asm_idx==-1; (2) a fill-growth budget
+// CLS_AMALG_FILL (default 1.30 = +30% dense front arena vs the baseline the solver would use).
+// Returns true and fills `out` only if both pass; otherwise the default ordering is kept.
+static bool maybe_amalgamate(int n, int max_panel_width,
+                             const std::vector<int>& parent, const std::vector<int>& colcount,
+                             const std::vector<int>& Lp, const std::vector<int>& Li,
+                             bool emit_info, symbolic::PanelPartition& out)
+{
+    const int amalg_k = env_int("CLS_AMALG_K", 0);
+    if (amalg_k <= 0 || n <= 0) return false;
+
+    // Baseline partition the solver would otherwise use (mirrors compute_effective_panel_width).
+    int eff = (n >= 16000) ? 16 : max_panel_width;
+    if (eff < 1) eff = 1;
+    if (eff > 64) eff = 64;
+    const symbolic::PanelPartition base = symbolic::relaxed_panels(n, parent, colcount, eff);
+    const symbolic::PanelPartition amalg = symbolic::deep_k_panels(n, parent, colcount, amalg_k);
+
+    const symbolic::MultifrontalSymbolic mf = symbolic::multifrontal_symbolic(n, Lp, Li, amalg);
+    long nest_bad = 0;
+    for (std::size_t i = 0; i < mf.asm_idx.size(); ++i)
+        if (mf.asm_idx[i] < 0) ++nest_bad;
+
+    const symbolic::MultifrontalSymbolic mfb = symbolic::multifrontal_symbolic(n, Lp, Li, base);
+    const long fill_amalg = front_arena_fill(mf);
+    const long fill_base = front_arena_fill(mfb);
+    const double ratio = fill_base > 0 ? static_cast<double>(fill_amalg) / fill_base : 1.0;
+    const char* fs = std::getenv("CLS_AMALG_FILL");
+    const double budget = fs ? std::atof(fs) : 1.30;
+
+    if (emit_info) {
+        auto nc_hist = [](const symbolic::PanelPartition& pp, const char* tag) {
+            long b[6] = {0};  // nc in {1-2,3-4,5-8,9-16,17-32,>32}
+            double wsum = 0; long wn = 0;
+            for (int p = 0; p < pp.num_panels; ++p) {
+                const int c = pp.ncols[p];
+                int k = c <= 2 ? 0 : c <= 4 ? 1 : c <= 8 ? 2 : c <= 16 ? 3 : c <= 32 ? 4 : 5;
+                ++b[k]; wsum += (double)c * c; wn += c;  // wsum weights by column-share of work
+            }
+            std::fprintf(stderr,
+                "  nc-hist %s [1-2]=%ld [3-4]=%ld [5-8]=%ld [9-16]=%ld [17-32]=%ld [>32]=%ld meanw=%.1f\n",
+                tag, b[0], b[1], b[2], b[3], b[4], b[5], wn ? wsum / wn : 0.0);
+        };
+        std::fprintf(stderr,
+                     "[analyze] amalg K=%d panels %d->%d fill_ratio=%.3f (budget %.2f) nest_bad=%ld\n",
+                     amalg_k, base.num_panels, amalg.num_panels, ratio, budget, nest_bad);
+        nc_hist(base, "base ");
+        nc_hist(amalg, "amalg");
+    }
+    if (nest_bad > 0) {
+        std::fprintf(stderr, "[analyze] amalg REJECT: %ld nesting violations -> baseline\n", nest_bad);
+        return false;
+    }
+    if (ratio > budget) {
+        std::fprintf(stderr, "[analyze] amalg REJECT: fill_ratio %.3f > budget %.2f -> baseline\n",
+                     ratio, budget);
+        return false;
+    }
+    out = amalg;
+    return true;
+}
