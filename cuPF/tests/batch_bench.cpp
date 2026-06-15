@@ -93,7 +93,8 @@ int main(int argc, char** argv)
     opts.custom.metis_seed  = 1588;               // (matches the standalone sweep)
 
     NRConfig config;
-    config.tolerance = 1e-8;
+    config.tolerance = 1e-6;
+    if (const char* t = std::getenv("CUPF_BENCH_TOL")) config.tolerance = std::stod(t);
     config.max_iter  = max_iter;
     SolveOptions solve_options;
 

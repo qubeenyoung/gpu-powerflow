@@ -32,6 +32,16 @@ if(BUILD_EVALUATORS)
   target_include_directories(cupf_graph_bench PRIVATE
     ${PROJECT_SOURCE_DIR}/cpp/inc
     ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # First-solve lifecycle benchmark: fresh solver per trial, reporting initialize + first solve.
+  add_executable(cupf_lifecycle_bench
+    lifecycle_bench.cpp
+    dump_case_loader.cpp
+  )
+  target_link_libraries(cupf_lifecycle_bench PRIVATE cupf CUDA::cudart)
+  target_include_directories(cupf_lifecycle_bench PRIVATE
+    ${PROJECT_SOURCE_DIR}/cpp/inc
+    ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 # Evaluator-only configure (BUILD_EVALUATORS=ON, BUILD_TESTING=OFF): stop here.

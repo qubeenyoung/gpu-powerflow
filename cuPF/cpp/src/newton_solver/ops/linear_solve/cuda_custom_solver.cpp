@@ -16,6 +16,7 @@
 #include "newton_solver/storage/cuda/cuda_fp32_storage.hpp"
 #include "newton_solver/storage/cuda/cuda_mixed_storage.hpp"
 #include "utils/cuda_utils.hpp"
+#include "utils/timer.hpp"
 
 #include <solver.hpp>
 
@@ -179,7 +180,10 @@ void CudaLinearSolveCustomFp64::initialize(CudaFp64Storage& buf, const Initializ
     check_status(state->solver.set_rhs(make_vector_view(buf.dimF, buf.d_F.data())), "set_rhs");
     check_status(state->solver.set_solution(make_vector_view(buf.dimF, buf.d_dx.data())),
                  "set_solution");
-    check_status(state->solver.analyze(), "analyze");
+    {
+        newton_solver::utils::ScopedTimer timer("NR.initialize.custom_analyze");
+        check_status(state->solver.analyze(), "analyze");
+    }
     sync_cuda_for_timing();
     state->analyzed = true;
 
@@ -335,7 +339,10 @@ void CudaLinearSolveCustomFp32::initialize(CudaFp32Storage& buf, const Initializ
     check_status(state->solver.set_rhs(make_vector_view(buf.dimF, buf.d_F.data())), "set_rhs");
     check_status(state->solver.set_solution(make_vector_view(buf.dimF, buf.d_dx.data())),
                  "set_solution");
-    check_status(state->solver.analyze(), "analyze");
+    {
+        newton_solver::utils::ScopedTimer timer("NR.initialize.custom_analyze");
+        check_status(state->solver.analyze(), "analyze");
+    }
     sync_cuda_for_timing();
     state->analyzed = true;
 
@@ -497,7 +504,10 @@ void CudaLinearSolveCustomMixed::initialize(CudaMixedStorage& buf, const Initial
     auto state = std::make_unique<State>();
     state->solver = cls::Solver(make_solver_config(ctx.custom, cls::Precision::FP32));
     check_status(state->solver.set_data(matrix), "set_data");
-    check_status(state->solver.analyze(), "analyze");
+    {
+        newton_solver::utils::ScopedTimer timer("NR.initialize.custom_analyze");
+        check_status(state->solver.analyze(), "analyze");
+    }
     sync_cuda_for_timing();
     state->analyzed = true;
 
