@@ -1,0 +1,153 @@
+// few-sync blocked-LU + true-fp32 blocked-LU + block_update_scalar_rb — mid.cuh (snapshot 7fe15a7).
+// --- few-sync blocked-LU variant (prototype 2026-06-12, goal 3 redirect: cut __syncthreads) ---
+//
+// Diagnosis (factorize-bottleneck-3case + mid stall measurement): mid is barrier-bound at B=1 —
+// __syncthreads stall 5.51 dominates (vs global-mem 1.97). The baseline factorize_front_blocked_tf32
+// pays ~2·nc block barriers (one per pivot column in the panel AND U-solve kk-loops). This variant
+// keeps the SAME monolithic shared-resident kernel (no extra staging — the lesson from the failed
+// tiled-trailing prototype) and only restructures the panel into a right-looking blocked LU:
+//   (A) one warp factors the kb×kb diagonal block with __syncwarp (cheap, was nc block barriers);
+//   (B) the tall L-panel rows (next..fsz) each update against the factored block in one thread —
+//       sequential in kb, independent across rows, so NO cross-thread sync;
+//   (C) the U-panel cols (next..fsz) each forward-substitute in one thread — NO sync;
+//   (D) the trailing TC update (unchanged) + one barrier.
+// => ~3 __syncthreads + kb __syncwarp per BK block, vs ~2·nc+nc/8 block barriers. The numeric
+// result in F is identical (right-looking LU), so writeback/extend-add are unaffected.
+// Runtime-gated (CLS_MID_FEWSYNC=1); off by default -> baseline path.
+static bool mid_fewsync_enabled()
+{
+    static const bool v = [] {
+        const char* s = std::getenv("CLS_MID_FEWSYNC");
+        return s && std::atoi(s) != 0;
+    }();
+    return v;
+}
+
+__device__ __forceinline__ void factorize_front_blocked_tf32_fewsync(float* F, int fsz, int nc,
+                                                                     int t, int nt, int* sing)
+{
+    constexpr int BK = 8;
+    for (int k0 = 0; k0 < nc; k0 += BK) {
+        const int kb = (k0 + BK <= nc) ? BK : (nc - k0);
+        const int next = k0 + kb;
+
+        // (P) Panel LU — IDENTICAL to the baseline (all threads, one __syncthreads per pivot). The
+        //     earlier warp-0-only diagonal variant regressed: it idled 7/8 warps at the barrier and
+        //     RAISED the barrier stall 5.2->11.2 (load imbalance, not fewer barriers, is what 1
+        //     block/SM punishes). So keep the balanced panel; only the U-solve syncs are removable.
+        for (int kk = 0; kk < kb; ++kk) {
+            const int k = k0 + kk;
+            float piv = F[(long)k * fsz + k];
+            if (piv == 0.0f) { if (t == 0) *sing = 1; piv = 1.0f; }
+            const float inv_piv = 1.0f / piv;
+            for (int i = k + 1 + t; i < fsz; i += nt) {
+                const float lik = F[(long)i * fsz + k] * inv_piv;
+                F[(long)i * fsz + k] = lik;
+                for (int jj = k + 1; jj < next; ++jj)
+                    F[(long)i * fsz + jj] -= lik * F[(long)k * fsz + jj];
+            }
+            __syncthreads();
+        }
+
+        // (C) U-solve — sync-FREE. Each thread owns one column j of the U panel and forward-
+        //     substitutes the kb block rows (L11^-1 · A12) in its own sequential chain. Columns are
+        //     independent, so the per-row dependency lives inside one thread: the nc U-solve block
+        //     barriers of the baseline are removed WITHOUT serializing onto fewer threads.
+        for (int j = next + t; j < fsz; j += nt) {
+            for (int kk = 1; kk < kb; ++kk) {
+                const int row = k0 + kk;
+                float v = F[(long)row * fsz + j];
+                for (int m = 0; m < kk; ++m)
+                    v -= F[(long)row * fsz + (k0 + m)] * F[(long)(k0 + m) * fsz + j];
+                F[(long)row * fsz + j] = v;
+            }
+        }
+        __syncthreads();   // U panel visible for the trailing update
+
+        // (D) Trailing TC update over the remaining (fsz-next)² block (unchanged).
+        const int dim = fsz - next;
+        if (dim > 0) {
+            block_update_tf32_tc(F, fsz, next, next, dim, k0, kb, t, nt);
+            __syncthreads();
+        }
+    }
+}
+
+// Register-blocked SCALAR block update for the right-looking blocked LU (K = kb <= 8): the trailing
+// dim×dim block at [next,next) gets  -= L[:, k0:next] · U[k0:next, :].  Each thread owns one row r
+// and an MR-wide column strip; L[r,kk] is loaded once and reused across the strip.
+template <int MR>
+__device__ __forceinline__ void block_update_scalar_rb(float* F, int fsz, int next, int dim,
+                                                       int k0, int kb, int t, int nt)
+{
+    const int nstrip = (dim + MR - 1) / MR;
+    const long work = (long)dim * nstrip;
+    for (long w = t; w < work; w += nt) {
+        const int r = next + (int)(w / nstrip);
+        const int s = (int)(w % nstrip);
+        const int c0 = next + s * MR;
+        const int width = min(MR, dim - s * MR);
+        const float* __restrict__ Lrow = F + (long)r * fsz + k0;
+        float acc[MR];
+        #pragma unroll
+        for (int m = 0; m < MR; ++m) acc[m] = 0.0f;
+        for (int kk = 0; kk < kb; ++kk) {
+            const float l = Lrow[kk];
+            const float* __restrict__ Urow = F + (long)(k0 + kk) * fsz + c0;
+            #pragma unroll
+            for (int m = 0; m < MR; ++m) if (m < width) acc[m] += l * Urow[m];
+        }
+        float* __restrict__ O = F + (long)r * fsz + c0;
+        #pragma unroll
+        for (int m = 0; m < MR; ++m) if (m < width) O[m] -= acc[m];
+    }
+}
+
+// Blocked-LU for true FP32: identical right-looking BK=8 structure as the tf32 path (whose speedup
+// comes from the blocking, not the barely-firing TC trailing — ncu: TC pipe ~0%), but with a scalar
+// register-blocked block update → same structural win, no precision loss. (exp_260612)
+__device__ __forceinline__ void factorize_front_blocked_fp32(float* F, int fsz, int nc,
+                                                             int t, int nt, int* sing)
+{
+    constexpr int BK = 8;
+    for (int k0 = 0; k0 < nc; k0 += BK) {
+        const int kb = (k0 + BK <= nc) ? BK : (nc - k0);
+        const int next = k0 + kb;
+        for (int kk = 0; kk < kb; ++kk) {
+            const int k = k0 + kk;
+            float piv = F[(long)k * fsz + k];
+            if (piv == 0.0f) { if (t == 0) *sing = 1; piv = 1.0f; }
+            const float inv_piv = 1.0f / piv;
+            for (int i = k + 1 + t; i < fsz; i += nt) {
+                const float lik = F[(long)i * fsz + k] * inv_piv;
+                F[(long)i * fsz + k] = lik;
+                for (int jj = k + 1; jj < next; ++jj)
+                    F[(long)i * fsz + jj] -= lik * F[(long)k * fsz + jj];
+            }
+            __syncthreads();
+        }
+        for (int kk = 0; kk < kb; ++kk) {
+            const int row = k0 + kk;
+            for (int j = next + t; j < fsz; j += nt) {
+                float v = F[(long)row * fsz + j];
+                for (int i = k0; i < row; ++i) v -= F[(long)row * fsz + i] * F[(long)i * fsz + j];
+                F[(long)row * fsz + j] = v;
+            }
+            __syncthreads();
+        }
+        const int dim = fsz - next;
+        if (dim > 0) {
+            block_update_scalar_rb<4>(F, fsz, next, dim, k0, kb, t, nt);
+            __syncthreads();
+        }
+    }
+}
+
+static bool mid_blocked_fp32_enabled()
+{
+    static const bool v = [] {
+        const char* s = std::getenv("CLS_MID_BLOCKED_FP32");
+        return s && std::atoi(s) != 0;   // default OFF: measured neutral (blocking alone ≠ tf32 win)
+    }();
+    return v;
+}

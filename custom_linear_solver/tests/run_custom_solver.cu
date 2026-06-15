@@ -1,4 +1,7 @@
 #include <cuda_runtime.h>
+#ifdef CLS_ENABLE_NVTX
+#include <nvtx3/nvToolsExt.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -9,9 +12,27 @@
 #include <string>
 #include <vector>
 
-#include "batched/multifrontal_batched.hpp"
+#include "internal/runtime/state.hpp"
 #include "io.hpp"
 #include "solver.hpp"
+
+namespace {
+
+// Minimal RAII NVTX range. When CLS_ENABLE_NVTX is off the constructor / destructor are
+// empty and nothing links against libnvToolsExt.
+class NvtxRange {
+public:
+#ifdef CLS_ENABLE_NVTX
+    explicit NvtxRange(const char* name) { nvtxRangePushA(name); }
+    ~NvtxRange() { nvtxRangePop(); }
+#else
+    explicit NvtxRange(const char*) {}
+#endif
+    NvtxRange(const NvtxRange&) = delete;
+    NvtxRange& operator=(const NvtxRange&) = delete;
+};
+
+}  // namespace
 
 namespace cls = custom_linear_solver;
 namespace scripts = custom_linear_solver::scripts;
@@ -23,12 +44,22 @@ struct Options {
     fs::path matrix_path;
     fs::path rhs_path;
     fs::path solution_out;
+    fs::path dump_fronts_path;
     bool write_solution = false;
     int repeat = 1;
+    int warmup = 0;  // untimed factor/solve iterations discarded before the timed `repeat` set
     int batch = 0;  // uniform-batch experiment: B systems sharing the sparsity pattern
-    bool batch_only = false;  // skip the single-system factor/solve (e.g. nc>16 amalgamation)
+    bool batch_only = false;  // skip the single-system factor/solve
     bool single_fp32 = false;
-    bool mixed = false;  // FP64 data, FP64-master + FP32-working LU
+    int max_panel_width = 8;  // analyze: max panel width inside a supernode; -1 keeps default
+    bool use_parallel_nested_dissection = true;  // false: deterministic serial METIS NodeND
+    int metis_seed = 42;  // METIS ordering seed for deterministic A/B sweeps
+    bool no_multistream = false;     // disable subtree multi-stream dispatch
+    bool no_tier_split = false;      // disable occupancy-gated per-front tier split
+    bool analyze_info = false;       // print analyze-phase front/subtree summary
+    // Numeric precision. See state.hpp for what each mode does.
+    //   fp64 / fp32 / tf32 (V9h PTX, recommended).
+    cls::Precision precision = cls::Precision::FP64;
 };
 
 template <typename T>
@@ -101,8 +132,27 @@ void usage(const char* argv0)
 {
     std::cerr
         << "Usage:\n"
-        << "  " << argv0 << " <case-dir> [--repeat N] [--single-precision fp64|fp32] [--solution-out x.mtx]\n"
-        << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [--repeat N] [--single-precision fp64|fp32] [--solution-out x.mtx]\n";
+        << "  " << argv0 << " <case-dir> [options]\n"
+        << "  " << argv0 << " --matrix J.mtx --rhs F.mtx [options]\n"
+        << "\nOptions:\n"
+        << "  --repeat N            time-averaging trials (median reported)\n"
+        << "  --warmup N            untimed factor/solve iters discarded before timing\n"
+        << "  --single-precision fp64|fp32\n"
+        << "                        single-system (non-batch) input precision\n"
+        << "  --batch B             also run a uniform-batch experiment with B systems\n"
+        << "  --batch-only          skip the single-system run\n"
+        << "  --precision MODE      batched factor precision; MODE one of\n"
+        << "                          fp64       (reference, ~1e-13)\n"
+        << "                          fp32       (~1e-4, ~2x speed of FP64)\n"
+        << "                          tf32       (FP32 + TF32 PTX trailing — V9h+LB, recommended)\n"
+        << "  --max-panel-width N         analyze: max panel width inside a supernode (1..64)\n"
+        << "  --serial-nd          use deterministic serial METIS NodeND for benchmark A/Bs\n"
+        << "  --metis-seed N       METIS ordering seed for serial/parallel ND A/Bs\n"
+        << "  --no-multistream      disable subtree multi-stream dispatch (single stream)\n"
+        << "  --no-tier-split       disable occupancy-gated per-front tier split (whole-level)\n"
+        << "  --analyze-info        print front-size and subtree summary after analyze\n"
+        << "  --dump-fronts <path>  write per-front CSV after analyze\n"
+        << "  --solution-out <path> write the recovered x as MatrixMarket\n";
 }
 
 Options parse_args(int argc, char** argv)
@@ -126,6 +176,10 @@ Options parse_args(int argc, char** argv)
             if (++i >= argc) throw std::runtime_error("--repeat requires a count");
             options.repeat = std::stoi(argv[i]);
             if (options.repeat <= 0) throw std::runtime_error("--repeat must be positive");
+        } else if (arg == "--warmup") {
+            if (++i >= argc) throw std::runtime_error("--warmup requires a count");
+            options.warmup = std::stoi(argv[i]);
+            if (options.warmup < 0) throw std::runtime_error("--warmup must be >= 0");
         } else if (arg == "--batch") {
             if (++i >= argc) throw std::runtime_error("--batch requires a count");
             options.batch = std::stoi(argv[i]);
@@ -136,8 +190,34 @@ Options parse_args(int argc, char** argv)
             const std::string value = argv[i];
             if (value == "fp64") options.single_fp32 = false;
             else if (value == "fp32") options.single_fp32 = true;
-            else if (value == "mixed") { options.single_fp32 = false; options.mixed = true; }
-            else throw std::runtime_error("--single-precision must be fp64, fp32 or mixed");
+            else throw std::runtime_error("--single-precision must be fp64 or fp32");
+        } else if (arg == "--max-panel-width") {
+            if (++i >= argc) throw std::runtime_error("--max-panel-width requires an int");
+            options.max_panel_width = std::stoi(argv[i]);
+        } else if (arg == "--serial-nd") {
+            options.use_parallel_nested_dissection = false;
+        } else if (arg == "--metis-seed") {
+            if (++i >= argc) throw std::runtime_error("--metis-seed requires an int");
+            options.metis_seed = std::stoi(argv[i]);
+        } else if (arg == "--no-multistream") {
+            options.no_multistream = true;
+        } else if (arg == "--no-tier-split") {
+            options.no_tier_split = true;
+        } else if (arg == "--analyze-info") {
+            options.analyze_info = true;
+        } else if (arg == "--dump-fronts") {
+            if (++i >= argc) throw std::runtime_error("--dump-fronts requires a path");
+            options.dump_fronts_path = argv[i];
+        } else if (arg == "--precision") {
+            if (++i >= argc) throw std::runtime_error(
+                "--precision requires fp64|fp32|tf32");
+            const std::string value = argv[i];
+            using cls::Precision;
+            if      (value == "fp64")      options.precision = Precision::FP64;
+            else if (value == "fp32")      options.precision = Precision::FP32;
+            else if (value == "tf32")      options.precision = Precision::TF32;
+            else throw std::runtime_error(
+                "--precision must be fp64|fp32|tf32");
         } else if (arg == "-h" || arg == "--help") {
             usage(argv[0]);
             std::exit(0);
@@ -163,7 +243,7 @@ Options parse_args(int argc, char** argv)
 
 void require_success(cls::Status status, const char* phase)
 {
-    if (status != cls::Status::Success) {
+    if (status != cls::Status::kSuccess) {
         throw std::runtime_error(std::string(phase) + " failed: " + cls::status_string(status));
     }
 }
@@ -256,19 +336,25 @@ int main(int argc, char** argv)
         const auto t_upload = std::chrono::steady_clock::now();
 
         cls::SolverConfig solver_config;
-        solver_config.single_precision =
-            options.single_fp32 ? cls::SinglePrecision::FP32
-                                : (options.mixed ? cls::SinglePrecision::Mixed
-                                                 : cls::SinglePrecision::FP64);
+        solver_config.precision = options.precision;
+        solver_config.use_parallel_nested_dissection = options.use_parallel_nested_dissection;
+        solver_config.metis_seed = options.metis_seed;
+        if (options.max_panel_width > 0) solver_config.max_panel_width = options.max_panel_width;
+        solver_config.use_multistream_subtrees = !options.no_multistream;
+        solver_config.tier_split = !options.no_tier_split;
+        solver_config.analyze_emit_info = options.analyze_info;
+        if (!options.dump_fronts_path.empty()) {
+            solver_config.analyze_dump_fronts_path = options.dump_fronts_path.string();
+        }
         cls::Solver solver(solver_config);
         cls::CsrMatrixView matrix_view;
         matrix_view.nrows = matrix.rows;
         matrix_view.ncols = matrix.cols;
         matrix_view.nnz = matrix.nnz();
-        matrix_view.index_type = cls::IndexType::Int32;
-        matrix_view.location = cls::DataLocation::Device;
+        matrix_view.index_type = cls::IndexType::kInt32;
+        matrix_view.location = cls::DataLocation::kDevice;
         matrix_view.value_type =
-            options.single_fp32 ? cls::ValueType::Float32 : cls::ValueType::Float64;
+            options.single_fp32 ? cls::ValueType::kFloat32 : cls::ValueType::kFloat64;
         matrix_view.row_offsets = d_row_ptr.get();
         matrix_view.col_indices = d_col_idx.get();
         matrix_view.values = options.single_fp32
@@ -277,18 +363,18 @@ int main(int argc, char** argv)
 
         cls::DenseVectorView rhs_view;
         rhs_view.size = rhs.size();
-        rhs_view.location = cls::DataLocation::Device;
+        rhs_view.location = cls::DataLocation::kDevice;
         rhs_view.value_type =
-            options.single_fp32 ? cls::ValueType::Float32 : cls::ValueType::Float64;
+            options.single_fp32 ? cls::ValueType::kFloat32 : cls::ValueType::kFloat64;
         rhs_view.values = options.single_fp32
                               ? static_cast<void*>(d_rhs_f.get())
                               : static_cast<void*>(d_rhs.get());
 
         cls::DenseVectorView solution_view;
         solution_view.size = rhs.size();
-        solution_view.location = cls::DataLocation::Device;
+        solution_view.location = cls::DataLocation::kDevice;
         solution_view.value_type =
-            options.single_fp32 ? cls::ValueType::Float32 : cls::ValueType::Float64;
+            options.single_fp32 ? cls::ValueType::kFloat32 : cls::ValueType::kFloat64;
         solution_view.values = options.single_fp32
                                    ? static_cast<void*>(d_solution_f.get())
                                    : static_cast<void*>(d_solution.get());
@@ -304,29 +390,33 @@ int main(int argc, char** argv)
 
         std::vector<double> factor_ms;
         std::vector<double> solve_ms;
-        std::vector<double> factor_kms;
-        std::vector<double> solve_kms;
         factor_ms.reserve(static_cast<std::size_t>(options.repeat));
         solve_ms.reserve(static_cast<std::size_t>(options.repeat));
-        const bool kernel_time = std::getenv("CLS_KERNEL_TIME") != nullptr;
         if (options.batch_only) { factor_ms.push_back(0); solve_ms.push_back(0); }
 
+        // Warmup (untimed): excludes first-call graph instantiation / lazy allocation from the
+        // timed median. The timed loop syncs inside the measured region so the wall-clock span
+        // covers GPU execution, not just async launch — matching the batched path below (B-1/B-2).
+        for (int r = 0; r < options.warmup && !options.batch_only; ++r) {
+            require_success(solver.factorize(), "factorize(warmup)");
+            require_success(solver.solve(), "solve(warmup)");
+        }
+        cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize after warmup");
+
         for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
-            double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
-            require_success(solver.factorize(kernel_time ? &kms : nullptr), "factorize");
+            require_success(solver.factorize(), "factorize");
+            cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize after factorize");
             const auto stop = std::chrono::steady_clock::now();
             factor_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
-            if (kernel_time) factor_kms.push_back(kms);
         }
 
         for (int r = 0; r < options.repeat && !options.batch_only; ++r) {
-            double kms = 0.0;
             const auto start = std::chrono::steady_clock::now();
-            require_success(solver.solve(kernel_time ? &kms : nullptr), "solve");
+            require_success(solver.solve(), "solve");
+            cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize after solve");
             const auto stop = std::chrono::steady_clock::now();
             solve_ms.push_back(std::chrono::duration<double, std::milli>(stop - start).count());
-            if (kernel_time) solve_kms.push_back(kms);
         }
         const auto t_solve = std::chrono::steady_clock::now();
 
@@ -348,15 +438,6 @@ int main(int argc, char** argv)
         if (options.batch > 0) {
             const int B = options.batch;
             const int n = matrix.rows, nnz = matrix.nnz();
-            // Map env knobs to the batch precision mode. Default: Mixed for small/medium (it passes
-            // 1e-3 without refinement), FP64 for large. MF_TC / MF_FP32 / MF_MIXED / MF_NO_MIXED force.
-            using cls::batched::BatchPrecision;
-            BatchPrecision prec = (n < 24000) ? BatchPrecision::Mixed : BatchPrecision::FP64;
-            if (std::getenv("MF_NO_MIXED")) prec = BatchPrecision::FP64;
-            if (std::getenv("MF_FP32")) prec = BatchPrecision::FP32;
-            if (std::getenv("MF_MIXED")) prec = BatchPrecision::Mixed;
-            if (std::getenv("MF_TC")) prec = BatchPrecision::TC;
-            if (std::getenv("MF_TC32")) prec = BatchPrecision::TC32;
             // B identical copies (same pattern + values) -> each batch solves the same system,
             // so the per-batch residual must match the single-system solve (correctness check).
             std::vector<double> hvalB((std::size_t)B * nnz), hrhsB((std::size_t)B * n);
@@ -368,40 +449,63 @@ int main(int argc, char** argv)
             d_valB.upload(hvalB);
             d_rhsB.upload(hrhsB);
             d_solB.allocate((std::size_t)B * n);
-            require_success(solver.batched_setup(B, prec), "batched_setup");
+
+            // Register the batched buffers (size = B * nnz / B * n) and run the phase API.
+            cls::CsrMatrixView batched_matrix = matrix_view;
+            batched_matrix.values = d_valB.get();
+            cls::DenseVectorView batched_rhs;
+            batched_rhs.size = (std::size_t)B * n;
+            batched_rhs.location = cls::DataLocation::kDevice;
+            batched_rhs.value_type = cls::ValueType::kFloat64;
+            batched_rhs.values = d_rhsB.get();
+            cls::DenseVectorView batched_sol = batched_rhs;
+            batched_sol.values = d_solB.get();
+            require_success(solver.set_data(batched_matrix), "set_data(batched)");
+            require_success(solver.set_rhs(batched_rhs), "set_rhs(batched)");
+            require_success(solver.set_solution(batched_sol), "set_solution(batched)");
+
+            cudaDeviceSynchronize();
+            const auto t_setup0 = std::chrono::steady_clock::now();
+            {
+                NvtxRange r1("analyze");
+                require_success(solver.analyze(), "analyze(batched)");
+            }
+            {
+                NvtxRange r2("setup");
+                require_success(solver.setup(B), "setup(batched)");
+            }
+            cudaDeviceSynchronize();
+            const double setup_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_setup0).count();
+            std::cout << "setup_ms=" << setup_ms << " (one-time, outside Newton loop)\n";
+
+            // Warmup (untimed): same purpose as the single-system path — drop graph-instantiation
+            // and lazy-alloc cost from the first measured iteration.
+            for (int r = 0; r < options.warmup; ++r) {
+                require_success(solver.factorize(), "factorize(batched warmup)");
+                require_success(solver.solve(), "solve(batched warmup)");
+            }
+            cudaDeviceSynchronize();
+
             std::vector<double> bf, bs;
-            if (std::getenv("MF_EXT_CAPTURE") != nullptr) {
-                // External/capturable path (lib built with CLS_INTERNAL_GRAPH=OFF): capture the
-                // batched factorize+solve into ONE graph on our own stream and replay it -- the
-                // same way cuPF folds the solve into its whole-iteration graph. Verifies the OFF
-                // mode issues a capturable kernel sequence and replays to the right answer.
-                cudaStream_t cap_stream;
-                cuda_check(cudaStreamCreate(&cap_stream), "capture stream create");
-                require_success(solver.batched_set_stream(cap_stream), "batched_set_stream");
-                cudaGraph_t cg;
-                cudaGraphExec_t cge;
-                cuda_check(cudaStreamBeginCapture(cap_stream, cudaStreamCaptureModeGlobal),
-                           "begin capture");
-                require_success(solver.batched_factorize(d_valB.get()), "batched_factorize(capture)");
-                require_success(solver.batched_solve(d_rhsB.get(), d_solB.get()), "batched_solve(capture)");
-                cuda_check(cudaStreamEndCapture(cap_stream, &cg), "end capture");
-                cuda_check(cudaGraphInstantiate(&cge, cg, nullptr, nullptr, 0), "graph instantiate");
-                for (int r = 0; r < options.repeat; ++r)
-                    cuda_check(cudaGraphLaunch(cge, cap_stream), "graph launch");
-                cuda_check(cudaStreamSynchronize(cap_stream), "graph sync");
-                cudaGraphExecDestroy(cge);
-                cudaGraphDestroy(cg);
-                cudaStreamDestroy(cap_stream);
-                bf.push_back(0.0);
-                bs.push_back(0.0);  // per-op timing is unavailable under capture
-            } else {
-                for (int r = 0; r < options.repeat; ++r) {
-                    double kf = 0, ks = 0;
-                    require_success(solver.batched_factorize(d_valB.get(), &kf), "batched_factorize");
-                    require_success(solver.batched_solve(d_rhsB.get(), d_solB.get(), &ks), "batched_solve");
-                    bf.push_back(kf);
-                    bs.push_back(ks);
+            for (int r = 0; r < options.repeat; ++r) {
+                const std::string fname = "factorize/iter=" + std::to_string(r);
+                const std::string sname = "solve/iter=" + std::to_string(r);
+                const auto sf = std::chrono::steady_clock::now();
+                {
+                    NvtxRange rf(fname.c_str());
+                    require_success(solver.factorize(), "factorize(batched)");
+                    cudaDeviceSynchronize();
                 }
+                const auto ef = std::chrono::steady_clock::now();
+                {
+                    NvtxRange rs(sname.c_str());
+                    require_success(solver.solve(), "solve(batched)");
+                    cudaDeviceSynchronize();
+                }
+                const auto es = std::chrono::steady_clock::now();
+                bf.push_back(std::chrono::duration<double, std::milli>(ef - sf).count());
+                bs.push_back(std::chrono::duration<double, std::milli>(es - ef).count());
             }
             batch_factor_per_ms = median(bf) / B;
             batch_solve_per_ms = median(bs) / B;
@@ -423,17 +527,15 @@ int main(int argc, char** argv)
         std::cout << "matrix=" << options.matrix_path << '\n'
                   << "rhs=" << options.rhs_path << '\n'
                   << "n=" << matrix.rows << " nnz=" << matrix.nnz() << '\n'
-                  << "repeat=" << options.repeat << '\n'
+                  << "parallel_nd=" << (options.use_parallel_nested_dissection ? 1 : 0) << '\n'
+                  << "metis_seed=" << options.metis_seed << '\n'
+                  << "repeat=" << options.repeat << " warmup=" << options.warmup << '\n'
                   << "read_ms=" << ms(t0, t_read) << '\n'
                   << "upload_ms=" << ms(t_read, t_upload) << '\n'
                   << "set_ms=" << ms(t_upload, t_set) << '\n'
                   << "analyze_ms=" << ms(t_set, t_analyze) << '\n'
                   << "factorize_ms=" << median(factor_ms) << '\n'
                   << "solve_ms=" << median(solve_ms) << '\n';
-        if (kernel_time) {
-            std::cout << "factorize_kernel_ms=" << median(factor_kms) << '\n'
-                      << "solve_kernel_ms=" << median(solve_kms) << '\n';
-        }
         if (options.batch > 0) {
             std::cout << "batch=" << options.batch << '\n'
                       << "batch_factor_per_sys_ms=" << batch_factor_per_ms << '\n'

@@ -1,52 +1,70 @@
-# custom_linear_solver — Documentation Index
+# `custom_linear_solver` 문서 색인
 
-GPU-resident sparse direct solver (multifrontal LU) specialized for power-flow
-Newton–Raphson Jacobians, with a cuDSS-style `analyze → factorize → solve` API.
+> **상태**: canonical   **갱신**: 2026-06-10
+> **한 줄**: tiny-front 전력망 Jacobian 용 배치 GPU multifrontal 솔버 문서의 진입점.
 
-**Start here:** [`main-report.md`](main-report.md) — overview, pipeline, measured
-performance, and the techniques behind them.
+## 먼저 읽기
 
-## Current reference
+1. [`storyline.md`](storyline.md) — 연구 서사. tiny-front regime 근원에서 내려오는 **연구 기여 4개**
+   (tier routing / dispatch scheduling / TC trailing / front coarsening)와 ablation 토글 매핑, 그리고
+   텐서코어 기여의 정직한 분해(+6~9%).
+2. [`optimal-configuration.md`](optimal-configuration.md) — 현재 최적 경로의 빌드/런타임 설정과
+   토글↔메소드 매핑표, 검증 수치.
 
-| document | what it covers |
+## 폴더 구조
+
+| 폴더 | 역할 |
 |---|---|
-| [`main-report.md`](main-report.md) | **The report.** What the solver is, how it works, results, key techniques, limitations. |
-| [`api-and-build-design.md`](api-and-build-design.md) | Public API shape, phase responsibilities, build targets/flags, cuPF integration points. |
-| [`related-work-and-contribution.md`](related-work-and-contribution.md) | GPU sparse-solver landscape, why general solvers are slow on power-grid Jacobians, and an honest novelty assessment. |
+| [`01-orientation/`](01-orientation/) | API·빌드, 연구 포지셔닝, 코드 lineage, 코드 구조/관례. |
+| [`02-design-analysis/`](02-design-analysis/) | 왜 빠른지, no-pivot 안전성, STRUMPACK 과의 설계 차이, GEMM/TC ceiling 근거. |
+| [`03-optimization-notes/`](03-optimization-notes/) | kernel-engineering 종합, TF32/FP16 trailing GEMM, 텐서코어 조사. dead-end 는 `archive/`. |
+| [`04-benchmarks-profiling/`](04-benchmarks-profiling/) | 논문 재현, STRUMPACK 대비, GEMM/front 분포, 멀티스트림 영향. |
+| [`05-reports/`](05-reports/) | canonical 최종 보고서·comprehensive sweep, cuDSS 비교, factorize 진행. |
+| `2606012_lab_meeting/` | lab meeting 용 case/level front-size 분포 CSV·요약 (별도 관리, 미수정). |
 
-## History (per-cycle reports & design deep-dives)
+## 문서 목록
 
-Chronological records of how the optimizations were found and measured. Kept for
-provenance; the conclusions are folded into `main-report.md`.
+### 01. Orientation
+- [`01-api-and-build-design.md`](01-orientation/01-api-and-build-design.md) — cuDSS-like phase API, 빌드 옵션, 소스 인벤토리.
+- [`02-related-work-and-novelty.md`](01-orientation/02-related-work-and-novelty.md) — GPU sparse direct solver landscape 와 novelty/한계.
+- [`03-lineage-strumpack.md`](01-orientation/03-lineage-strumpack.md) — 코드 lineage 정정, STRUMPACK 한계 L1–L9 대응 매핑.
+- [`04-code-structure.md`](01-orientation/04-code-structure.md) — `src/factorize/`·`src/solve/` 파일 레이아웃(old→new 매핑) + 네이밍/스타일/SRP 관례.
 
-| document | what it covers |
-|---|---|
-| [`history/fsa-optimization-report.md`](history/fsa-optimization-report.md) | factorize/solve/analyze optimization frontier: GPU symbolic build, parallel ND, partitioned-inverse solve, batching, where 30 % is and isn't reachable. |
-| [`history/analyze-bottleneck-and-optimization.md`](history/analyze-bottleneck-and-optimization.md) | Analyze-phase bottleneck breakdown (METIS separator dominance) and what moved the needle. |
-| [`history/fp32-batched-factor-solve-optimization.md`](history/fp32-batched-factor-solve-optimization.md) | FP32-native batched factor+solve; tensor cores vs. the real (latency) bottleneck. |
-| [`history/tensor-core-factorize-design.md`](history/tensor-core-factorize-design.md) | Tensor-core batched multifrontal factorize design; amalgamation to grow fronts past the thin-K limit. |
-| [`history/b1-single-system-optimization.md`](history/b1-single-system-optimization.md) | B=1 single-system fp32/fp64 study: the critical-path floor, what was tried, and the precision lever. |
-| [`history/warm-cache-stack-port-expectations.md`](history/warm-cache-stack-port-expectations.md) | Expectations when porting `perf/warm-cache-stack` (mysolver) techniques into this solver / cuPF. |
+### 02. Design Analysis
+- [`01-why-custom-fast.md`](02-design-analysis/01-why-custom-fast.md) — D1–D8 설계 분해 + 실제 성능 기여 순위(CUDA Graph·alloc ~80%).
+- [`02-no-pivoting-proof.md`](02-design-analysis/02-no-pivoting-proof.md) — power-grid NR Jacobian 에서 pivoting 없이 정확한 이유와 실패 경계.
+- [`03-multifrontal-vs-strumpack.md`](02-design-analysis/03-multifrontal-vs-strumpack.md) — front layout·level batching·extend-add·solve 경로의 소스 레벨 비교.
+- [`04-gemm-fraction-tc-ceiling.md`](02-design-analysis/04-gemm-fraction-tc-ceiling.md) — **canonical TC ceiling**: 이론 FLOP vs 실측 wall 비중, TC 가속 상한(~15% wall).
+- [`05-tier-thresholds.md`](02-design-analysis/05-tier-thresholds.md) — SMALL=32 / MID=128 임계값의 HW 근거, sm_90 여지.
 
-## Reproducing the numbers
+### 03. Optimization Notes
+- [`01-kernel-engineering.md`](03-optimization-notes/01-kernel-engineering.md) — substrate 미세최적화·병목진단·결정로그(3단 tier 커널, 동기화, 디스패치, staging, "sync≠wall").
+- [`02-tf32-trailing-gemm.md`](03-optimization-notes/02-tf32-trailing-gemm.md) — V9h PTX trailing GEMM 스택, 폐기 매크로, 영구 교훈, FP16 PTX default.
+- [`03-tensor-core-investigation.md`](03-optimization-notes/03-tensor-core-investigation.md) — 텐서코어 조사 통합: large-case 성공, 8387/13K dead-end 매트릭스, Ozaki 정확도, **honest ~1.1× 정정**.
+- [`04-solve-optimization-2026-06-10.md`](03-optimization-notes/04-solve-optimization-2026-06-10.md) — **solve 경로 ~1.5× 가속** (small-tier nc-packing, spine fusion, full solve graph, inverse scatter, B=1 fixed-nc 라우팅). 통합 완료 + 기각 가설 기록.
+- [`05-tc-eligibility-relaxation-2026-06-11.md`](03-optimization-notes/05-tc-eligibility-relaxation-2026-06-11.md) — TF32 적격 gate(`uc≤256`/mid 조건) 완화 → **거의 모든 mid/big 이 TC**. `max_uc` 클램프–cap 연동 버그 수정, **uc>256 spine(70K L25 spike 10→5.6%) 제거**, factorize ~1.02–1.06×. **기본값으로 승격**(cap 256→512, mid 하한 풀음).
+- [`06-b1-factorize-regime-2026-06-13.md`](03-optimization-notes/06-b1-factorize-regime-2026-06-13.md) — **B=1 = under-fill(occupancy) 바운드**. scheduling/tiling/sync/amalgamation 무효, 두 레버뿐: ordering + **B=1 텐서코어(Ozaki-TC, fp32 정확도, USA −17%)**. B=64 와 정반대 체제. (exp_260612 01·03·04·05·11 압축)
+- [`07-batch-factorize-structural-2026-06-13.md`](03-optimization-notes/07-batch-factorize-structural-2026-06-13.md) — **STRUCTURAL: panel-resident mid 커널**(L/U 패널만 shared → DRAM 2–32%→55–65%, **USA B=64 −9.3%**, default-on). register-block(+4%)·scatter 미세최적화(+2–3%). gather/tiled/fewsync/sysblk/small-band-TC 회귀 → `deprecated/`. (exp_260612 06·09·10 압축)
+- [`08-ordering-best-of-k-2026-06-13.md`](03-optimization-notes/08-ordering-best-of-k-2026-06-13.md) — **tailored ND 반증**(custom GPU-ND·전기적-weighted ≈/악화 vs METIS), 실익은 **measured best-of-k**(`CLS_ORDER_MEASURE_K`, B=1 −6~13% + 결정성). (exp_260612 12·13·14·15 압축, 코드 `deprecated/gpu_nd/`)
+- [`archive/`](03-optimization-notes/archive/) — dead-end R&D 로그(TC dedicated, symbolic GEMM, tree restructuring, 폐기 실험). 재시도 시 회피용.
 
-Build (METIS + CUDA required; build out-of-tree):
+### 04. Benchmarks and Profiling
+- [`01-strumpack-paper-reproduction.md`](04-benchmarks-profiling/01-strumpack-paper-reproduction.md) — STRUMPACK 논문 행렬 RTX 3090 재현 + 도메인 검증.
+- [`02-strumpack-vs-custom-case8387.md`](04-benchmarks-profiling/02-strumpack-vs-custom-case8387.md) — 같은 multifrontal 인데 custom 이 빠른 이유(ncu/front-size).
+- [`03-gemm-fraction-front-distribution.md`](04-benchmarks-profiling/03-gemm-fraction-front-distribution.md) — GEMM wall 비중 + front fsz/nc/uc 분포 + WMMA padding.
+- [`04-multistream-impact.md`](04-benchmarks-profiling/04-multistream-impact.md) — subtree 멀티스트림 A/B(Hyper-Q) 영향.
 
-```bash
-cmake -S custom_linear_solver -B /tmp/clsbuild \
-  -DCLS_BUILD_CUDA_OPS=ON -DCLS_BUILD_SCRIPTS=ON -DCLS_CUDA_ARCHITECTURES=86
-cmake --build /tmp/clsbuild -j
-```
+### 05. Reports
+- [`01-final-report.md`](05-reports/01-final-report.md) — **canonical** 최종 요약, 최적 dispatch, 권장 mode, 코드 변경.
+- [`02-comprehensive-sweep.md`](05-reports/02-comprehensive-sweep.md) — **canonical** 5 cases × 3 modes × 5 batch sizes full table.
+- [`03-bench-vs-cudss.md`](05-reports/03-bench-vs-cudss.md) — cuDSS 대비(raw + ubatch+mt-auto) sweep, 정확도, analyze.
+- [`04-factorize-progress.md`](05-reports/04-factorize-progress.md) — B=1/non-GEMM factorize 가속 진행·채택 변경·tier-split gate·구조적 한계.
+- [`05-tf32-reproduction-2026-06-10.md`](05-reports/05-tf32-reproduction-2026-06-10.md) — 대표 5케이스 fp32 vs tf32 **정확도-매칭 best-vs-best 재현** (honest ~1.1× 확증).
+- [`06-cudss-vs-custom-sweep-2026-06-10.md`](05-reports/06-cudss-vs-custom-sweep-2026-06-10.md) — **선형계 단독** cuDSS vs custom **6 케이스 × 배치 5단계 전체 스윕**, analyze/factorize/solve (solve 최적화 반영 재측정).
+- [`07-cupf-backend-comparison-2026-06-11.md`](05-reports/07-cupf-backend-comparison-2026-06-11.md) — **cuPF(graph off) 전체 조류계산** 백엔드 비교(**결정적**: Ozaki TF32 + serial-ND seed 1588 + 클럭 고정), **6 case(13K 포함) × B=1/16/64/256**: fp64/mixed 에서 cuDSS vs custom. **결론: custom-mixed 가 배치서 cuDSS 대비 4–6×; tf32(Ozaki) 가 fp32 보다 근소 우위(factorize 1.05–1.2× 가 NR 에선 희석).** 교훈: parallel-ND(기본)는 비결정적이라 fp32↔tf32 비교 무효 → serial-ND 고정 필수.
 
-Run one Newton linear system (kernel timing on, median of repeats):
+## 정직성 노트
 
-```bash
-CLS_KERNEL_TIME=1 /tmp/clsbuild/custom_linear_solver_run \
-  /workspace/cls_linsys/case9241pegase --repeat 80 --single-precision fp64
-# --single-precision fp64 | fp32 | mixed     --batch B   (uniform-batch experiment)
-```
-
-Research knobs: `CLS_KERNEL_TIME`, `CLS_DUMP` (front/level structure),
-`CLS_CAP` (amalgamation cap), `CLS_SHCNT` (FP32 shared-front level-count gate),
-`CLS_COOP_SOLVE` (cooperative solve — documented negative result), `CLS_FT`
-(mid-spine factor threads).
+TC(텐서코어) 가속의 헤드라인 수치(1.2~1.3×)는 일부 **baseline cap inflation** 을 포함한다. best-vs-best
+공정 통제 시 정직한 천장은 large-case +6~16%, low-fill net≈0 이다(`storyline.md` §5,
+`03-optimization-notes/03-tensor-core-investigation.md` §7).

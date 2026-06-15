@@ -4,7 +4,7 @@
 // with CUDA-graph capture); it just times the whole solve_batch with warmup + averaging. solve_batch
 // is synchronous on return (it downloads results), so chrono captures the full GPU time.
 //
-//   usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats]
+//   usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats] [max_iter] [scale_step] [tol]
 //
 // backend:
 //   cudss        - cuda_linear_solver=CuDSS
@@ -12,6 +12,7 @@
 //   custom_graph - cuda_linear_solver=Custom, use_cuda_graph=true (needs a CUPF_ENABLE_CUDA_GRAPH build)
 #include "dump_case_loader.hpp"
 #include "newton_solver/core/newton_solver.hpp"
+#include "utils/timer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -24,7 +25,7 @@
 int main(int argc, char** argv)
 {
     if (argc < 4) {
-        std::cerr << "usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats]\n";
+        std::cerr << "usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats] [max_iter] [scale_step] [tol]\n";
         return 2;
     }
     const std::string case_dir = argv[1];
@@ -41,7 +42,10 @@ int main(int argc, char** argv)
             pos = comma + 1;
         }
     }
-    const int repeats = (argc > 4) ? std::stoi(argv[4]) : 10;
+    const int repeats              = (argc > 4) ? std::stoi(argv[4]) : 10;
+    const int max_iter             = (argc > 5) ? std::stoi(argv[5]) : 30;
+    const double load_scale_step   = (argc > 6) ? std::stod(argv[6]) : 0.001;
+    const double tolerance         = (argc > 7) ? std::stod(argv[7]) : 1e-8;
 
     NewtonOptions opts;
     opts.backend = BackendKind::CUDA;
@@ -62,9 +66,8 @@ int main(int argc, char** argv)
     const int32_t n = data.rows;
 
     NRConfig config;
-    config.tolerance = 1e-8;  // project default; override with CUPF_BENCH_TOL
-    if (const char* t = std::getenv("CUPF_BENCH_TOL")) config.tolerance = std::stod(t);
-    config.max_iter = 30;
+    config.tolerance = tolerance;
+    config.max_iter  = max_iter;
     SolveOptions solve_options;
 
     std::cout << "case=" << data.case_name << " n_bus=" << n
@@ -76,7 +79,7 @@ int main(int argc, char** argv)
         std::vector<std::complex<double>> sbus(static_cast<size_t>(B) * n);
         std::vector<std::complex<double>> v0(static_cast<size_t>(B) * n);
         for (int32_t b = 0; b < B; ++b) {
-            const double scale = 1.0 + 0.001 * b;  // distinct-yet-convergent per-case load
+            const double scale = 1.0 + load_scale_step * b;  // 0.0 repeats the same load.
             for (int32_t i = 0; i < n; ++i) {
                 sbus[static_cast<size_t>(b) * n + i] = data.sbus[i] * scale;
                 v0[static_cast<size_t>(b) * n + i] = data.v0[i];
@@ -127,6 +130,18 @@ int main(int argc, char** argv)
         std::cout << B << "," << init_ms << "," << warmup_ms << "," << avg_ms << ","
                   << (avg_ms / B) << "," << iters << "," << relmis
                   << "   (best_solve_ms=" << best_ms << ", setup~=" << (warmup_ms - avg_ms) << ")\n";
+
+#ifdef CUPF_ENABLE_TIMING
+        // Per-operation breakdown for one batch solve (ENABLE_TIMING build, non-capture modes only).
+        // The per-stage ScopedTimers inject device syncs, so this perturbs wall time — run it AFTER
+        // the timed loop, in its own solve. Emit "TIMING,<B>,<timer>,<count>,<total_us>" for parsing.
+        newton_solver::utils::resetTimingCollector();
+        run();
+        for (const auto& e : newton_solver::utils::timingSnapshot()) {
+            std::cout << "TIMING," << B << "," << (e.name ? e.name : "") << ","
+                      << e.count << "," << e.total_us << "\n";
+        }
+#endif
     }
     return 0;
 }

@@ -1,38 +1,68 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
-#include "matrix/view.hpp"
+#include "internal/matrix_view.hpp"
+#include "internal/runtime/state.hpp"   // Precision { FP64, FP32, TF32 }
 
 namespace custom_linear_solver {
 
-namespace batched { enum class BatchPrecision; }  // FP64 / FP32 / Mixed / TC (defined in batched hdr)
-
 enum class Status {
-    Success,
-    InvalidValue,
-    InvalidState,
-    AllocationFailed,
-    AnalysisFailed,
-    FactorizationFailed,
-    SolveFailed,
+    kSuccess,
+    kInvalidValue,
+    kInvalidState,
+    kAllocationFailed,
+    kAnalysisFailed,
+    kFactorizationFailed,
+    kSolveFailed,
 };
 
-enum class SinglePrecision {
-    FP64,
-    FP32,
-    Mixed,
-};
-
+// User-configurable knobs. Set on the SolverConfig passed to Solver(). Tunables not listed
+// here (kernel-tier threshold kSmallFrontMax, the TF32 PTX trailing stack, the
+// cp.async stage-in, the per-front kernel routing) are baked into the build because every
+// measured off-default regressed at least one case.
 struct SolverConfig {
-    bool use_matching = false;
-    bool use_parallel_nested_dissection = true;
-    bool enable_shift_retry = true;
-    double shift_retry_epsilon = 1.0e-8;
-    int panel_cap = 8;
-    SinglePrecision single_precision = SinglePrecision::FP64;
+    // ---- Symbolic analysis ----
+    bool use_matching = false;                       // (reserved) row matching pre-permutation
+    bool use_parallel_nested_dissection = true;      // multi-threaded METIS-ND ordering
+    int  metis_seed = 42;                            // METIS ordering seed (diagnostic / A-B)
+    int  max_panel_width = 8;                        // max columns amalgamated into one supernode
+                                                     // panel (1..64). The analyzer sets the swept
+                                                     // optimum by size — 16 for n>=16k, else this
+                                                     // value (8) — unless CLS_RESPECT_PANEL_CAP.
+    // ---- Numeric factorization ----
+    bool enable_shift_retry = true;                  // (reserved) diagonal-shift fallback on
+                                                     // singular pivot
+    double shift_retry_epsilon = 1.0e-8;             // (reserved) shift magnitude
+    Precision precision = Precision::FP64;           // FP64 / FP32 / TF32 (TF32 PTX mma, recommended)
+    // ---- Runtime dispatch ----
+    bool tier_split = true;                          // occupancy-gated per-front tier split in the
+                                                     // factor/solve level dispatch. false = original
+                                                     // whole-level dispatch (small fronts promoted
+                                                     // to the larger tier's kernel).
+    bool use_multistream_subtrees = true;            // dispatch independent subtrees on
+                                                     // separate streams (capped at 8). Set
+                                                     // false for single-stream debugging.
+    // ---- Analyze-phase diagnostics (off by default) ----
+    std::string analyze_dump_fronts_path;            // non-empty → write per-front CSV here
+                                                     // after analyze() (replaces CLS_DUMP_FRONTS)
+    bool analyze_emit_info = false;                  // print front-size and subtree summary
+                                                     // to stderr (replaces CLS_DUMP / CLS_TREE_INFO)
 };
 
+// Phase API. Typical sequence:
+//
+//   set_data(...)        // register A (sparsity + values pointer)
+//   set_rhs(...)         // register b
+//   set_solution(...)    // register x
+//   analyze()            // one-time symbolic + plan build
+//   setup(B = 1)         // allocate per-system runtime state for B systems
+//   factorize()          // numeric factor using the registered values
+//   solve()              // y = A^{-1} * b using registered rhs / solution
+//
+// For B > 1 the registered buffers are batch-strided: values[b*nnz + ·], rhs[b*n + ·],
+// solution[b*n + ·]. Caller measures kernel time externally (cudaEvent or wall clock).
 class Solver {
 public:
     explicit Solver(const SolverConfig& config = {});
@@ -44,7 +74,7 @@ public:
     Solver& operator=(const Solver&) = delete;
 
     Status set_data(const CsrMatrixView& matrix);
-    Status set_values(const void* values, ValueType value_type = ValueType::Float64);
+    Status set_values(const void* values, ValueType value_type = ValueType::kFloat64);
     Status set_rhs(const DenseVectorView& rhs);
     Status set_solution(const DenseVectorView& solution);
 
@@ -53,28 +83,14 @@ public:
     Status get_solution(DenseVectorView* solution) const;
 
     Status analyze();
-    Status factorize(double* kernel_ms = nullptr);
-    Status solve(double* kernel_ms = nullptr);
+    Status setup(int batch_size = 1);
+    Status factorize();
+    Status solve();
+
+    // External / capturable mode (CLS_INTERNAL_GRAPH off in CMake): bind a caller-owned
+    // cudaStream_t (passed as void*) so factor / solve issue their kernels onto it for an
+    // outer stream capture. Call after setup(), before factorize() / solve().
     Status set_stream(void* stream);
-
-    // Uniform-batch path (research): B systems sharing this analyzed sparsity pattern.
-    // setup once after analyze(); then factorize/solve all B at once. Device buffers are
-    // batch-strided: valuesB[b*nnz + .], rhsB[b*n + .], solB[b*n + .].
-    Status batched_setup(int batch, batched::BatchPrecision prec);
-    // External/capturable mode (lib built with CLS_INTERNAL_GRAPH=OFF): bind a caller-owned CUDA
-    // stream (cudaStream_t passed as void*) so batched_factorize/solve issue their kernels onto it
-    // for an outer stream capture. Call after batched_setup, before batched_factorize/solve.
-    Status batched_set_stream(void* stream);
-    Status batched_factorize(const double* d_valuesB, double* kernel_ms = nullptr);
-    Status batched_solve(const double* d_rhsB, double* d_solB, double* kernel_ms = nullptr);
-
-    // FP32-input overloads for callers whose Jacobian/step buffers are single precision (e.g.
-    // cuPF's Mixed profile: float Jacobian, double RHS, float step). Values are scattered
-    // straight into the factor working buffers (no FP64 staging); the internal solve vector
-    // stays FP64 for accuracy.
-    Status batched_factorize(const float* d_valuesB, double* kernel_ms = nullptr);
-    Status batched_solve(const double* d_rhsB, float* d_solB, double* kernel_ms = nullptr);
-    Status batched_solve(const float* d_rhsB, float* d_solB, double* kernel_ms = nullptr);
 
 private:
     struct Impl;

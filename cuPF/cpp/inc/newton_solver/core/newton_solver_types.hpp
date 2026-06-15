@@ -125,6 +125,29 @@ struct CuDSSOptions {
 
 
 // ---------------------------------------------------------------------------
+// CustomSolverConfig: 자체 multifrontal direct solver(custom_linear_solver) 런타임 설정.
+//
+// cuda_linear_solver = Custom 일 때만 적용된다. 예전에는 솔버 내부에서 CUPF_CUSTOM_*
+// 환경변수로 읽던 것을, 이 구조체(NewtonOptions::custom)로 명시 설정하도록 대체했다.
+// ---------------------------------------------------------------------------
+enum class CustomPrecision {
+    FP64,   // 배정밀 factor (1e-8 수렴 보장)
+    FP32,   // 단정밀 factor
+    TF32,   // TensorCore TF32 factor (Ozaki) — FP32 storage(compute=FP32/Mixed) 위에서만
+};
+
+struct CustomSolverConfig {
+    CustomPrecision precision           = CustomPrecision::FP32;  // factor 정밀도
+    bool            serial_nd           = false;    // 결정적 serial METIS-ND (false = parallel-ND)
+    int             metis_seed          = 42;       // nested-dissection random seed
+    bool            tier_split          = true;     // occupancy tier-split 디스패치
+    int             max_panel_width     = 8;        // supernode amalgamation cap
+    bool            enable_shift_retry  = true;     // 특이 pivot 시 diagonal shift 재시도
+    double          shift_retry_epsilon = 1.0e-8;
+};
+
+
+// ---------------------------------------------------------------------------
 // NewtonOptions: 생성자에 전달하는 solver 설정.
 //
 // 사용자는 backend, compute policy와 CUDA direct solver 설정을 선택한다.
@@ -134,8 +157,8 @@ struct NewtonOptions {
 #ifdef CUPF_ENABLE_CUSTOM_SOLVER
     // Default GPU path (when backend = CUDA): custom direct solver on the Mixed profile — FP32
     // Jacobian/step, FP64 state — with edge Jacobian assembly. The custom solver reads the FP32
-    // Jacobian directly and factors in FP32 (CUPF_CUSTOM_PRECISION overrides). Any field below can
-    // still be set explicitly; the CPU backend ignores `compute` (always CPU FP64).
+    // Jacobian directly and factors at `custom.precision` (FP32 default; set TF32 for the tensor-core
+    // path). Any field below can still be set explicitly; the CPU backend ignores `compute`.
     ComputePolicy        compute = ComputePolicy::Mixed;
     CudaLinearSolverKind cuda_linear_solver = CudaLinearSolverKind::Custom;
 #else
@@ -145,6 +168,7 @@ struct NewtonOptions {
     CpuLinearSolverKind  cpu_linear_solver = CpuLinearSolverKind::KLU;
     CudaJacobianKind     cuda_jacobian = CudaJacobianKind::Edge;
     CuDSSOptions         cudss = {};
+    CustomSolverConfig   custom = {};   // cuda_linear_solver = Custom 일 때 적용
 
     // Capture the whole Newton iteration (ibus -> mismatch -> jacobian -> linear solve -> voltage
     // update) into a single CUDA graph and replay it per step, collapsing the per-iteration kernel

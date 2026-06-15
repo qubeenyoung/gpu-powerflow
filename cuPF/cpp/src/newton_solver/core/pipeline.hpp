@@ -345,7 +345,7 @@ struct CudaMixedPipeline {
 // ---------------------------------------------------------------------------
 // CudaMixedCustomPipeline — Mixed storage (FP32 Jacobian/step, FP64 state) driving the custom
 // direct solver instead of cuDSS. The custom solver consumes the FP32 Jacobian directly via its
-// float batched entry; factor precision defaults to FP32 (CUPF_CUSTOM_PRECISION overrides).
+// float batched entry; factor precision is forwarded through NewtonOptions::custom.
 // ---------------------------------------------------------------------------
 struct CudaMixedCustomPipeline {
     CudaMixedStorage             buf;

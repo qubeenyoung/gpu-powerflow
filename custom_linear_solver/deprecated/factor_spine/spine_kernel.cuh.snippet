@@ -1,0 +1,46 @@
+template <typename T>
+__global__ void factor_panel_chain_staged_single(int panel_count,
+                                                 const int* __restrict__ panels,
+                                                 const int* __restrict__ front_off,
+                                                 const int* __restrict__ front_ptr,
+                                                 const int* __restrict__ ncols,
+                                                 const int* __restrict__ panel_parent,
+                                                 const int* __restrict__ asm_ptr,
+                                                 const int* __restrict__ asm_local,
+                                                 T* front, int* sing, int do_extend,
+                                                 int fsz_cap, int level_max_nc,
+                                                 int level_max_uc)
+{
+    extern __shared__ char smem_mid[];
+    T* Fs   = reinterpret_cast<T*>(smem_mid);
+    T* sh_L = Fs + (long)fsz_cap * fsz_cap;
+    T* sh_U = sh_L + (long)level_max_uc * level_max_nc;
+    const int t = threadIdx.x, nt = blockDim.x;
+
+    for (int idx = 0; idx < panel_count; ++idx) {
+        const int p = panels[idx];
+        const int fsz = front_ptr[p + 1] - front_ptr[p];
+        const int nc = ncols[p];
+        const int uc = fsz - nc;
+        const int fsz2 = fsz * fsz;
+        T* F = front + front_off[p];
+
+        stage_in_async<T>(Fs, F, fsz2, t, nt);
+        __syncthreads();
+        factorize_front<T>(Fs, fsz, nc, uc, t, nt, sing,
+            [&] { trailing_update_staged<T>(Fs, fsz, nc, uc, t, nt, sh_L, sh_U); });
+        __syncthreads();
+        writeback_factored<T, T>(F, Fs, fsz, nc, uc, t, nt);
+
+        const int par = panel_parent[p];
+        if (par >= 0 && do_extend) {
+            __syncthreads();
+            T* Fp = front + front_off[par];
+            const int pfsz = front_ptr[par + 1] - front_ptr[par];
+            const int abase = asm_ptr[p];
+            extend_add<T, T>(Fp, pfsz, Fs, fsz, nc, uc, asm_local, abase, t, nt,
+                             (do_extend & 2) == 0);
+        }
+        __syncthreads();
+    }
+}

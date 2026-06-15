@@ -1,0 +1,84 @@
+// =======================================================================================
+//  SPINE tier — one persistent block per batch walks the cnt=1 chain end-to-end
+// =======================================================================================
+//
+// The top of the etree is a contiguous chain of single-panel levels ("spine"). In the
+// per-level dispatch each spine level launches a kernel with grid=(1, B): one block does
+// real work, the other 81 SMs sit idle. ncu shows those launches running at 0.05-0.11%
+// SM throughput — wall is dominated by launch + scheduling, not by per-panel work.
+//
+// solve_*_spine fuses the entire spine into a SINGLE kernel launch. One block per batch
+// walks `spine_panels[]` in device-side loop (fwd: bottom→top, bwd: top→bottom). Per-panel
+// dependencies are honored by __syncthreads between panels — within a block atomicAdd's
+// from one panel's CB update are visible to the next panel's load after a sync.
+//
+// We tried extending to cnt ≤ 8 ("narrow band") via warp-per-panel inside the block:
+// regressed on every case (70k +38%) because cnt=2..8 top levels have large panels that
+// benefited from cross-SM parallelism in the per-level dispatch; the persistent kernel
+// serialized them onto one SM and lost more than it saved on launch overhead. cnt=1 is
+// the sweet spot — per-level dispatch was already 1 block there.
+
+template <typename T>
+__global__ void solve_fwd_spine(int n_spine,
+                                const int* __restrict__ spine_panels,
+                                const int* __restrict__ front_off,
+                                const int* __restrict__ front_ptr,
+                                const int* __restrict__ ncols,
+                                const int* __restrict__ front_rows,
+                                const T* frontB, T* yB, long front_total, int n)
+{
+    if (blockIdx.x != 0) return;
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int t = threadIdx.x, nt = blockDim.x;
+    __shared__ T sh_piv[MF_MAX_NC];
+
+    for (int idx = 0; idx < n_spine; ++idx) {
+        const int p = spine_panels[idx];
+        const int s = front_ptr[p];
+        const int fsz = front_ptr[p + 1] - s;
+        const int nc = ncols[p];
+        const T* F = front + front_off[p];
+        const int* fr = front_rows + s;
+
+        if (t < 32) fwd_substitute<T>(F, fsz, nc, fr, y, sh_piv, /*lane=*/t);
+        __syncthreads();
+        fwd_cb_update<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, t, nt);
+        __syncthreads();
+    }
+}
+
+template <typename T>
+__global__ void solve_bwd_spine(int n_spine,
+                                const int* __restrict__ spine_panels,
+                                const int* __restrict__ front_off,
+                                const int* __restrict__ front_ptr,
+                                const int* __restrict__ ncols,
+                                const int* __restrict__ front_rows,
+                                const T* frontB, T* yB, long front_total, int n)
+{
+    if (blockIdx.x != 0) return;
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int t = threadIdx.x, nt = blockDim.x;
+    __shared__ T rhs[MF_MAX_NC];
+    extern __shared__ unsigned char xsh_spine_raw[];
+    T* xsh = reinterpret_cast<T*>(xsh_spine_raw);
+
+    for (int idx = n_spine - 1; idx >= 0; --idx) {
+        const int p = spine_panels[idx];
+        const int s = front_ptr[p];
+        const int fsz = front_ptr[p + 1] - s;
+        const int nc = ncols[p];
+        const int cb = fsz - nc;
+        const T* F = front + front_off[p];
+        const int* fr = front_rows + s;
+
+        bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, t, nt);
+        __syncthreads();
+        bwd_cb_subtract<T>(F, fsz, nc, cb, xsh, rhs, t, /*width=*/nt);
+        __syncthreads();
+        if (t < 32) bwd_substitute<T>(F, fsz, nc, fr, y, rhs, /*lane=*/t);
+        __syncthreads();
+    }
+}

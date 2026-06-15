@@ -1,0 +1,19 @@
+# mid -> factor_big_shared_tf32_blocked, tf32 factor_per_sys_ms (serial-nd seed1588, base=factor_mid)
+# section A: thread-count sweep, % = faster vs base factor_mid
+case	B	base	thr512	thr256	thr128
+case8387pegase	1	0.330498	0.315500	0.319818	0.361606
+case8387pegase	256	0.0213085	0.0282558	0.0238141	0.0219312
+case_ACTIVSg25k	1	0.725607	0.601906	0.604300	0.687405
+case_ACTIVSg25k	256	0.0836381	0.101516	0.0843625	0.0813956
+# section B: TC vs scalar trailing, SAME structure SAME threads (case_ACTIVSg25k)
+B	thr	TC	scalar
+1	512	0.600775	0.723024
+1	128	0.688308	0.940831
+256	512	0.101514	0.0873261
+256	128	0.0813745	0.0885412
+# section C: PURE mma isolation — blocked-MMA vs blocked-SCALAR (same blocked structure, same threads, case_ACTIVSg25k)
+B	thr	blocked_mma	blocked_scalar
+1	512	0.600383	0.727240
+1	128	0.688267	1.029140
+256	512	0.101518	0.087230
+256	128	0.081399	0.090339

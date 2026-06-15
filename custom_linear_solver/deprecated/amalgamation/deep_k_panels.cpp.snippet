@@ -1,0 +1,97 @@
+// deep_k_panels — supernode.cpp + .hpp decl (added lines, snapshot 7fe15a7).
+#include <algorithm>
+
+PanelPartition deep_k_panels(int n, const std::vector<int>& parent,
+                             const std::vector<int>& colcount, int cap_nc)
+{
+    if (cap_nc < 1) cap_nc = 1;
+    if (cap_nc > 32) cap_nc = 32;  // TC pivot cap + single-warp solve substitution limit
+
+    // Base chain partition (already valid, nc <= cap_nc). We coarsen it by absorbing whole child
+    // subtrees into the parent, bottom-up, while contiguity + the nc cap hold.
+    const PanelPartition base = relaxed_panels(n, parent, colcount, cap_nc);
+    PanelPartition pp;
+    pp.panel_of.assign(n < 0 ? 0 : n, -1);
+    if (n <= 0) return pp;
+    const int Pb = base.num_panels;
+
+    std::vector<int> bfirst(Pb), blast(Pb);
+    for (int p = 0; p < Pb; ++p) {
+        bfirst[p] = base.first[p];
+        blast[p] = base.first[p] + base.ncols[p] - 1;
+    }
+    // Base panel-tree parent: the panel owning the etree-exit of the chain's last column.
+    std::vector<int> ppar(Pb, -1);
+    for (int p = 0; p < Pb; ++p) {
+        const int e = parent[blast[p]];           // parent[j] > j in postorder space (or -1 at root)
+        ppar[p] = (e < 0) ? -1 : base.panel_of[e];
+    }
+    std::vector<std::vector<int>> children(Pb);
+    for (int p = 0; p < Pb; ++p)
+        if (ppar[p] != -1) children[ppar[p]].push_back(p);
+    // Sort each child list ascending by last column; we absorb closest-to-parent first (descending).
+    for (int p = 0; p < Pb; ++p)
+        std::sort(children[p].begin(), children[p].end(),
+                  [&](int a, int b) { return blast[a] < blast[b]; });
+
+    // Grown state per base panel. A panel only ever grows DOWNWARD (cur_first shrinks); cur_last
+    // stays blast. cur_nc == cur_last - cur_first + 1 (contiguous, no gaps).
+    std::vector<int> cur_first = bfirst;
+    std::vector<int> cur_nc = base.ncols;
+    std::vector<int> cur_width = base.width;
+    std::vector<char> absorbed(Pb, 0);
+
+    // Process children before parents: increasing last column.
+    std::vector<int> order(Pb);
+    for (int p = 0; p < Pb; ++p) order[p] = p;
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return blast[a] < blast[b]; });
+
+    for (int oi = 0; oi < Pb; ++oi) {
+        const int P = order[oi];
+        // Absorb children closest-first; stop at the first non-adjacent / over-cap child so the
+        // merged column range stays contiguous and pivot-count stays within cap.
+        for (int ci = static_cast<int>(children[P].size()) - 1; ci >= 0; --ci) {
+            const int C = children[P][ci];
+            if (blast[C] != cur_first[P] - 1) break;            // contiguity: C must sit right below
+            if (cur_nc[P] + cur_nc[C] > cap_nc) break;          // pivot-column cap
+            cur_first[P] = cur_first[C];
+            cur_nc[P] += cur_nc[C];
+            cur_width[P] = std::max(cur_width[P], cur_width[C]);
+            absorbed[C] = 1;
+        }
+    }
+
+    // Emit survivors in column order. Their extended ranges re-partition [0, n) with no overlap.
+    for (int p = 0; p < Pb; ++p) {
+        if (absorbed[p]) continue;
+        const int id = pp.num_panels++;
+        pp.first.push_back(cur_first[p]);
+        pp.ncols.push_back(cur_nc[p]);
+        pp.width.push_back(cur_width[p]);
+        pp.padded_fill += static_cast<long>(cur_nc[p]) * cur_width[p];
+        for (int c = cur_first[p]; c <= blast[p]; ++c) pp.panel_of[c] = id;
+    }
+    return pp;
+}
+
+// --- supernode.hpp ---
+// Deep-K amalgamation (exp_260612 compute-bound experiment, CLS_AMALG_K). relaxed_panels only
+// merges single-child etree CHAINS, so power-grid leaf regions stay thin (nc ~ colcount ~ 2-3);
+// the batched trailing GEMM is then thin-K (K=nc) and memory-bound. deep_k_panels additionally
+// absorbs whole child SUBTREES into a parent panel to thicken nc toward `cap_nc` (capped at 32 by
+// the kTensorCorePivotColumnCap + single-warp solve substitution limits), raising arithmetic
+// intensity so tensor cores can fire.
+//
+// Validity (the nesting invariant relaxed_panels guards against): a panel must be a postorder-
+// CONTIGUOUS column range so its member columns sort to the leading nc front rows, and each
+// merged child's contribution block must nest in the single parent front. Both hold here because
+// (a) we only ever absorb a child whose grown range is immediately adjacent below the parent's
+// current first column (contiguity preserved), and (b) by the elimination-tree theorem a column's
+// CB nests in its parent's structure, so absorbing it leaves the parent's CB unchanged -> a single
+// parent front. multifrontal_symbolic still re-validates via asm_idx==-1.
+//
+// `cap_nc` bounds pivot columns per panel (clamped to [1,32]). Built on top of relaxed_panels(cap_nc)
+// so chain merges are retained; only the extra sibling/subtree absorption is new.
+PanelPartition deep_k_panels(int n, const std::vector<int>& parent,
+                             const std::vector<int>& colcount, int cap_nc);
+

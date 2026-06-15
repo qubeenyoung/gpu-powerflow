@@ -36,6 +36,9 @@ struct Args {
     std::string cpu_linear_solver = "klu";
     std::string cuda_jacobian = "edge";
     std::string cuda_linear_solver = "cudss";
+    std::string custom_precision = "fp32";   // custom 백엔드 factor 정밀도: fp64|fp32|tf32
+    bool custom_serial_nd = false;           // custom 결정적 serial METIS-ND
+    int32_t custom_seed = 42;                // custom nested-dissection seed
     double tolerance = 1e-8;
     int32_t max_iter = 50;
     int32_t warmup = 1;
@@ -62,6 +65,9 @@ Args parse_args(int argc, char** argv)
         else if (key == "--cpu-linear-solver") args.cpu_linear_solver = require_value(i, argc, argv, key);
         else if (key == "--cuda-jacobian") args.cuda_jacobian = require_value(i, argc, argv, key);
         else if (key == "--cuda-linear-solver") args.cuda_linear_solver = require_value(i, argc, argv, key);
+        else if (key == "--custom-precision") args.custom_precision = require_value(i, argc, argv, key);
+        else if (key == "--custom-serial-nd") args.custom_serial_nd = (std::stoi(require_value(i, argc, argv, key)) != 0);
+        else if (key == "--custom-seed") args.custom_seed = std::stoi(require_value(i, argc, argv, key));
         else if (key == "--tolerance") args.tolerance = std::stod(require_value(i, argc, argv, key));
         else if (key == "--max-iter") args.max_iter = std::stoi(require_value(i, argc, argv, key));
         else if (key == "--warmup") args.warmup = std::stoi(require_value(i, argc, argv, key));
@@ -196,6 +202,13 @@ NewtonOptions make_options(const Args& args)
     if (args.cuda_linear_solver == "cudss") options.cuda_linear_solver = CudaLinearSolverKind::CuDSS;
     else if (args.cuda_linear_solver == "custom") options.cuda_linear_solver = CudaLinearSolverKind::Custom;
     else throw std::invalid_argument("cuda-linear-solver must be cudss or custom");
+
+    if (args.custom_precision == "fp64") options.custom.precision = CustomPrecision::FP64;
+    else if (args.custom_precision == "fp32") options.custom.precision = CustomPrecision::FP32;
+    else if (args.custom_precision == "tf32") options.custom.precision = CustomPrecision::TF32;
+    else throw std::invalid_argument("custom-precision must be fp64, fp32, or tf32");
+    options.custom.serial_nd  = args.custom_serial_nd;
+    options.custom.metis_seed = args.custom_seed;
     return options;
 }
 

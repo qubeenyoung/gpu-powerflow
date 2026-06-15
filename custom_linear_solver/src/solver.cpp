@@ -1,83 +1,23 @@
 #include "solver.hpp"
 
 #include <algorithm>
-#include <cstdint>
-#include <exception>
-#include <thread>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
 
-#include "factorize/multifrontal.hpp"
-#include "batched/multifrontal_batched.hpp"
-#include "matrix/pattern_kernels.hpp"
-#include "symbolic/supernode.hpp"
-#include "reordering/metis_nd.hpp"
-#include "solve/multifrontal.hpp"
-#include "symbolic/elimination_tree.hpp"
-
-// ============================================================================
-// Public solver facade (cuDSS-style phase API). set_data/set_rhs/set_solution register
-// device buffers; analyze() does the one-time symbolic pipeline (ordering -> etree -> fill
-// -> multifrontal plan + CUDA graphs); factorize()/solve() run the numeric phases every
-// Newton iteration. The single-system path lives in factorize/ and solve/; the batched
-// (B systems) path in batched/. This file only validates inputs and dispatches by precision.
-// ============================================================================
+#include "analyze/pattern/pattern_kernels.hpp"  // IntDeviceBuffer
+#include "internal/runtime/state.hpp"   // State, Precision, setup, set_stream
+#include "factorize/factorize.hpp"      // factorize
+#include "solve/solve.hpp"              // solve
+#include "analyze/analyze.hpp"               // build_plan_from_csr
+#include "profile/profile.hpp"          // cls::profile::init / flush + CLS_PROFILE_* macros
 
 namespace custom_linear_solver {
-namespace {
-
-// Simple parallel-for over [lo,hi): runs serially below a threshold, else splits across up
-// to 12 threads. Used for the host-side pattern permutation in analyze().
-template <typename Fn>
-void par_for(int lo, int hi, Fn&& fn)
-{
-    unsigned hw = std::thread::hardware_concurrency();
-    const int nth = static_cast<int>(std::max(1u, std::min(hw ? hw : 1u, 12u)));
-    if (hi - lo < 32768 || nth <= 1) {
-        fn(lo, hi);
-        return;
-    }
-    std::vector<std::thread> th;
-    const int chunk = (hi - lo + nth - 1) / nth;
-    for (int t = 0; t < nth; ++t) {
-        const int a = lo + t * chunk;
-        const int b = std::min(hi, a + chunk);
-        if (a < b) th.emplace_back([&fn, a, b] { fn(a, b); });
-    }
-    for (auto& x : th) x.join();
-}
-
-// Relabel a symmetric CSC pattern into the fill-reducing order: out column new_col is old
-// column perm[new_col], with each row index mapped through iperm. (Postorder reorder ->
-// fill-neutral, so the etree/fill built on this match the device-permuted matrix.)
-void permute_symmetric_pattern(int n, const std::vector<int>& col_ptr,
-                               const std::vector<int>& row_idx,
-                               const std::vector<int>& perm,
-                               const std::vector<int>& iperm,
-                               std::vector<int>& out_col_ptr,
-                               std::vector<int>& out_row_idx)
-{
-    out_col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
-    for (int new_col = 0; new_col < n; ++new_col) {
-        const int old_col = perm[new_col];
-        out_col_ptr[new_col + 1] =
-            out_col_ptr[new_col] + (col_ptr[old_col + 1] - col_ptr[old_col]);
-    }
-    out_row_idx.resize(static_cast<std::size_t>(out_col_ptr[n]));
-    par_for(0, n, [&](int lo, int hi) {
-        for (int new_col = lo; new_col < hi; ++new_col) {
-            const int old_col = perm[new_col];
-            int w = out_col_ptr[new_col];
-            for (int p = col_ptr[old_col]; p < col_ptr[old_col + 1]; ++p) {
-                out_row_idx[w++] = iperm[row_idx[p]];
-            }
-        }
-    });
-}
-
-}  // namespace
 
 struct Solver::Impl {
     SolverConfig config;
@@ -95,325 +35,293 @@ struct Solver::Impl {
     custom_linear_solver::matrix::IntDeviceBuffer d_perm;
     custom_linear_solver::matrix::IntDeviceBuffer d_iperm;
     custom_linear_solver::plan::MultifrontalPlan plan;
-    custom_linear_solver::batched::BatchedState batched;
+    custom_linear_solver::State state;
 };
 
-Solver::Solver(const SolverConfig& config) : impl_(new Impl{config}) {}
-Solver::~Solver() = default;
+Solver::Solver(const SolverConfig& config) : impl_(new Impl{config}) {
+    cls::profile::init();
+}
+Solver::~Solver() { cls::profile::flush(); }
 Solver::Solver(Solver&&) noexcept = default;
 Solver& Solver::operator=(Solver&&) noexcept = default;
 
 Status Solver::set_data(const CsrMatrixView& matrix)
 {
-    if (!impl_) return Status::InvalidState;
+    if (!impl_) return Status::kInvalidState;
     if (matrix.nrows <= 0 || matrix.nrows != matrix.ncols || matrix.nnz < 0)
-        return Status::InvalidValue;
-    if (matrix.index_type != IndexType::Int32 || matrix.location != DataLocation::Device)
-        return Status::InvalidValue;
-    // values may be null: the batched float-input path (set via batched_factorize(const float*))
+        return Status::kInvalidValue;
+    if (matrix.index_type != IndexType::kInt32 || matrix.location != DataLocation::kDevice)
+        return Status::kInvalidValue;
+    // values may be null: the float-input path (set via factorize(const float*))
     // supplies numeric values separately and only needs the pattern here. The single-case
     // factorize() rechecks values != nullptr at the point it actually reads them.
     if (matrix.row_offsets == nullptr || matrix.col_indices == nullptr)
-        return Status::InvalidValue;
+        return Status::kInvalidValue;
     impl_->matrix = matrix;
     impl_->has_matrix = true;
     impl_->analyzed = false;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::set_values(const void* values, ValueType value_type)
 {
-    if (!impl_) return Status::InvalidState;
-    if (!impl_->has_matrix || values == nullptr) return Status::InvalidState;
+    if (!impl_) return Status::kInvalidState;
+    if (!impl_->has_matrix || values == nullptr) return Status::kInvalidState;
     impl_->matrix.values = values;
     impl_->matrix.value_type = value_type;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::set_rhs(const DenseVectorView& rhs)
 {
-    if (!impl_) return Status::InvalidState;
-    if (rhs.size <= 0 || rhs.values == nullptr || rhs.location != DataLocation::Device)
-        return Status::InvalidValue;
+    if (!impl_) return Status::kInvalidState;
+    if (rhs.size <= 0 || rhs.values == nullptr || rhs.location != DataLocation::kDevice)
+        return Status::kInvalidValue;
     impl_->rhs = rhs;
     impl_->has_rhs = true;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::set_solution(const DenseVectorView& solution)
 {
-    if (!impl_) return Status::InvalidState;
+    if (!impl_) return Status::kInvalidState;
     if (solution.size <= 0 || solution.values == nullptr ||
-        solution.location != DataLocation::Device)
-        return Status::InvalidValue;
+        solution.location != DataLocation::kDevice)
+        return Status::kInvalidValue;
     impl_->solution = solution;
     impl_->has_solution = true;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::get_data(CsrMatrixView* matrix) const
 {
-    if (!impl_ || !matrix) return Status::InvalidValue;
-    if (!impl_->has_matrix) return Status::InvalidState;
+    if (!impl_ || !matrix) return Status::kInvalidValue;
+    if (!impl_->has_matrix) return Status::kInvalidState;
     *matrix = impl_->matrix;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::get_rhs(DenseVectorView* rhs) const
 {
-    if (!impl_ || !rhs) return Status::InvalidValue;
-    if (!impl_->has_rhs) return Status::InvalidState;
+    if (!impl_ || !rhs) return Status::kInvalidValue;
+    if (!impl_->has_rhs) return Status::kInvalidState;
     *rhs = impl_->rhs;
-    return Status::Success;
+    return Status::kSuccess;
 }
 
 Status Solver::get_solution(DenseVectorView* solution) const
 {
-    if (!impl_ || !solution) return Status::InvalidValue;
-    if (!impl_->has_solution) return Status::InvalidState;
+    if (!impl_ || !solution) return Status::kInvalidValue;
+    if (!impl_->has_solution) return Status::kInvalidState;
     *solution = impl_->solution;
-    return Status::Success;
+    return Status::kSuccess;
 }
+
+namespace {
+
+double median_ms(std::vector<double>& v)
+{
+    if (v.empty()) return std::numeric_limits<double>::infinity();
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    return (n & 1u) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+// Time a real single-system factorize for one candidate plan (median of `reps`, after `warmup`
+// untimed iters). Uses a private RAII State so the caller's solver state is untouched; the State
+// frees its device arenas on scope exit. Returns +inf on any setup/factorize failure so the
+// candidate is rejected by the min-search. Mirrors Solver::factorize's value-type dispatch exactly.
+double measure_candidate_factor_ms(const plan::MultifrontalPlan& plan, const int* o2c,
+                                   const CsrMatrixView& matrix, const SolverConfig& cfg,
+                                   int warmup, int reps)
+{
+    const double kFail = std::numeric_limits<double>::infinity();
+    State st;
+    if (!setup(plan, /*B=*/1, cfg.precision, st,
+               cfg.use_multistream_subtrees, cfg.tier_split))
+        return kFail;
+    auto run_once = [&]() -> bool {
+        if (matrix.value_type == ValueType::kFloat64)
+            return factorize(plan, st, static_cast<const double*>(matrix.values), o2c);
+        return factorize(plan, st, static_cast<const float*>(matrix.values), o2c);
+    };
+    for (int w = 0; w < warmup; ++w)
+        if (!run_once()) return kFail;
+    if (cudaDeviceSynchronize() != cudaSuccess) return kFail;
+    std::vector<double> t;
+    t.reserve(static_cast<std::size_t>(reps));
+    for (int r = 0; r < reps; ++r) {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!run_once()) return kFail;
+        if (cudaDeviceSynchronize() != cudaSuccess) return kFail;
+        t.push_back(std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count());
+    }
+    return median_ms(t);
+}
+
+}  // namespace
 
 Status Solver::analyze()
 {
-    if (!impl_ || !impl_->has_matrix) return Status::InvalidState;
-    try {
-        auto lap = [](const char*) {};
+    CLS_PROFILE_NVTX("Solver::analyze");
+    CLS_PROFILE_CPU("Solver::analyze");
+    if (!impl_ || !impl_->has_matrix) return Status::kInvalidState;
+    plan::PlanBuildOptions opts;
+    opts.use_parallel_nested_dissection = impl_->config.use_parallel_nested_dissection;
+    opts.metis_seed = impl_->config.metis_seed;
+    opts.max_panel_width = impl_->config.max_panel_width;
+    opts.float_front = is_fp32_front(impl_->config.precision);
+    opts.dump_fronts_csv_path = impl_->config.analyze_dump_fronts_path;
+    opts.emit_analyze_info = impl_->config.analyze_emit_info;
 
-        const int n = static_cast<int>(impl_->matrix.nrows);
-        const int nnz = static_cast<int>(impl_->matrix.nnz);
-        const auto* d_csr_row_ptr = static_cast<const int*>(impl_->matrix.row_offsets);
-        const auto* d_csr_col_idx = static_cast<const int*>(impl_->matrix.col_indices);
-
-        // --- Ordering: device CSC -> symmetric (A+Aᵀ) graph -> METIS nested dissection -> perm/iperm.
-        custom_linear_solver::matrix::DeviceCscPattern csc_device;
-        Status st = custom_linear_solver::matrix::build_csc_from_csr_device(
-            n, nnz, d_csr_row_ptr, d_csr_col_idx, csc_device);
-        if (st != Status::Success) return st;
-        lap("build_csc_device");
-
-        // GPU-built symmetric adjacency graph (replaces the host CSC download + CPU
-        // build_symmetric_adjacency). Also reused below for permute_metis_graph.
-        std::vector<int> metis_sym_col_ptr, metis_sym_row_idx;
-        st = custom_linear_solver::matrix::build_symmetric_graph_device(
-            csc_device, metis_sym_col_ptr, metis_sym_row_idx);
-        if (st != Status::Success) return st;
-        lap("build_symmetric_graph_device");
-        impl_->perm.assign(static_cast<std::size_t>(n), 0);
-        std::vector<int> nd_xadj = metis_sym_col_ptr;     // consumed (moved-from) by the ND call
-        std::vector<int> nd_adjncy = metis_sym_row_idx;
-        if (!custom_linear_solver::reordering::metis_nd_from_graph(
-                n, nd_xadj, nd_adjncy, impl_->perm,
-                impl_->config.use_parallel_nested_dissection))
-            return Status::AnalysisFailed;
-        lap("metis_nd");
-        impl_->iperm.assign(static_cast<std::size_t>(n), 0);
-        for (int k = 0; k < n; ++k) impl_->iperm[impl_->perm[k]] = k;
-        lap("build_iperm");
-        st = impl_->d_perm.upload(impl_->perm);
-        if (st != Status::Success) return st;
-        st = impl_->d_iperm.upload(impl_->iperm);
-        if (st != Status::Success) return st;
-        lap("upload_perm_iperm");
-
-        // --- Symbolic (in fill-reducing order): permute the matrix, build etree + fill pattern.
-        custom_linear_solver::matrix::DeviceCscPattern ordered_device;
-        st = custom_linear_solver::matrix::permute_csc_device(
-            csc_device, impl_->d_iperm.ptr, ordered_device);
-        if (st != Status::Success) return st;
-        lap("permute_csc_device");
-        impl_->d_ordered_value_to_csr = std::move(ordered_device.source_pos);
-
-        std::vector<int> sym_col_ptr, sym_row_idx;
-        permute_symmetric_pattern(n, metis_sym_col_ptr, metis_sym_row_idx, impl_->perm,
-                                  impl_->iperm, sym_col_ptr, sym_row_idx);
-        lap("permute_metis_graph");
-        std::vector<int> parent = custom_linear_solver::symbolic::etree(
-            n, sym_col_ptr.data(), sym_row_idx.data());
-        lap("etree");
-
-        // Fill pattern in METIS order. When amalgamating, the per-column counts come from here for
-        // free (no separate cs_counts) and the pattern is relabeled to the reordered space below
-        // (the reorder is a postorder -> fill-neutral), avoiding a second fill_pattern.
-        std::vector<int> Lp, Li;
-        custom_linear_solver::symbolic::fill_pattern(n, sym_col_ptr.data(), sym_row_idx.data(),
-                                                     parent, Lp, Li);
-        lap("fill_pattern");
-
-        // --- Plan: relaxed panels (amalgamation) + multifrontal symbolic + arena + CUDA graphs.
-        impl_->plan = custom_linear_solver::factorize::analyze_multifrontal(
-            n, nnz, ordered_device.col_ptr.ptr, ordered_device.row_idx.ptr, Lp, Li, parent,
-            impl_->config.panel_cap,
-            impl_->config.single_precision == SinglePrecision::Mixed,
-            nullptr,
-            impl_->config.single_precision == SinglePrecision::FP32);
-        lap("analyze_multifrontal");
-        if (impl_->plan.num_panels == 0) return Status::AnalysisFailed;
+    // Measured best-of-k ordering selection (CLS_ORDER_MEASURE_K, default off). The B=1 factor time
+    // is set by deep-etree tree *shape*, which the static tail-cube proxy (CLS_ORDER_K) ranks
+    // anti-informatively — it picks a seed up to ~8% SLOWER than the trivial default, and its top
+    // picks are among the worst measured (exp_260612 doc 15). The only reliable selector is to
+    // *time a real factorize* per candidate seed and keep the fastest. Cost = K factorizations at
+    // analyze time, amortized over the Newton loop's many same-pattern factorizations. Measures at
+    // B=1 (the target regime); requires numeric values to be present. Win: 6-13% B=1 on 13K/25K/70K.
+    const char* mks = std::getenv("CLS_ORDER_MEASURE_K");
+    const int measure_k = mks ? std::atoi(mks) : 0;
+    if (measure_k > 1 && impl_->matrix.values != nullptr) {
+        const char* ws = std::getenv("CLS_ORDER_MEASURE_WARMUP");
+        const char* rs = std::getenv("CLS_ORDER_MEASURE_REPS");
+        const int warmup = ws ? std::atoi(ws) : 3;
+        const int reps   = rs ? std::atoi(rs) : 5;
+        plan::PlanBuildResult best;
+        double best_ms = std::numeric_limits<double>::infinity();
+        int best_seed = -1;
+        for (int i = 0; i < measure_k; ++i) {
+            plan::PlanBuildOptions o = opts;
+            o.single_seed_only = true;
+            o.metis_seed = impl_->config.metis_seed + i;
+            plan::PlanBuildResult cand;
+            if (!plan::build_plan_from_csr(impl_->matrix, o, cand)) continue;
+            const double ms = measure_candidate_factor_ms(
+                cand.plan, cand.d_ordered_value_to_csr.ptr, impl_->matrix, impl_->config,
+                warmup, reps);
+            if (impl_->config.analyze_emit_info)
+                std::fprintf(stderr, "[analyze] measure-cand seed=%d factor_ms=%.5f\n",
+                             o.metis_seed, ms);
+            if (ms < best_ms) { best_ms = ms; best_seed = o.metis_seed; best = std::move(cand); }
+        }
+        if (best_seed < 0) return Status::kAnalysisFailed;
+        std::fprintf(stderr, "[analyze] measure-select K=%d -> seed=%d factor_ms=%.5f\n",
+                     measure_k, best_seed, best_ms);
+        impl_->perm                    = std::move(best.perm);
+        impl_->iperm                   = std::move(best.iperm);
+        impl_->d_perm                  = std::move(best.d_perm);
+        impl_->d_iperm                 = std::move(best.d_iperm);
+        impl_->d_ordered_value_to_csr  = std::move(best.d_ordered_value_to_csr);
+        impl_->plan                    = std::move(best.plan);
         impl_->analyzed = true;
-        return Status::Success;
-    } catch (const std::bad_alloc&) {
-        return Status::AllocationFailed;
-    } catch (const std::exception&) {
-        return Status::AnalysisFailed;
+        return Status::kSuccess;
     }
+
+    plan::PlanBuildResult result;
+    if (!plan::build_plan_from_csr(impl_->matrix, opts, result))
+        return Status::kAnalysisFailed;
+    impl_->perm                    = std::move(result.perm);
+    impl_->iperm                   = std::move(result.iperm);
+    impl_->d_perm                  = std::move(result.d_perm);
+    impl_->d_iperm                 = std::move(result.d_iperm);
+    impl_->d_ordered_value_to_csr  = std::move(result.d_ordered_value_to_csr);
+    impl_->plan                    = std::move(result.plan);
+    impl_->analyzed = true;
+    return Status::kSuccess;
 }
 
-// Numeric factorization of the registered values; dispatches to the FP32 or FP64 single-system
-// path. kernel_ms (optional) receives the GPU graph time. Replayable every Newton iteration.
-Status Solver::factorize(double* kernel_ms)
+Status Solver::setup(int batch_size)
 {
-    if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::InvalidState;
-    if (impl_->matrix.values == nullptr) return Status::InvalidState;  // single-case needs values
-    try {
-        bool ok = false;
-        if (impl_->config.single_precision == SinglePrecision::FP32) {
-            if (impl_->matrix.value_type != ValueType::Float32) return Status::InvalidValue;
-            ok = custom_linear_solver::factorize::factorize_multifrontal_device(
-                impl_->plan, static_cast<const float*>(impl_->matrix.values),
-                impl_->d_ordered_value_to_csr.ptr, kernel_ms);
-        } else {
-            if (impl_->matrix.value_type != ValueType::Float64) return Status::InvalidValue;
-            ok = custom_linear_solver::factorize::factorize_multifrontal_device(
-                impl_->plan, static_cast<const double*>(impl_->matrix.values),
-                impl_->d_ordered_value_to_csr.ptr, kernel_ms);
-        }
-        if (!ok) return Status::FactorizationFailed;
-        return Status::Success;
-    } catch (const std::bad_alloc&) {
-        return Status::AllocationFailed;
-    } catch (const std::exception&) {
-        return Status::FactorizationFailed;
-    }
-}
-
-// Triangular solve against the registered RHS into the solution buffer; dispatches by the
-// rhs/solution value types (FP32 path allows FP64-rhs -> FP32-solution for cuPF's Mixed step).
-Status Solver::solve(double* kernel_ms)
-{
-    if (!impl_ || !impl_->has_rhs || !impl_->has_solution || !impl_->analyzed)
-        return Status::InvalidState;
-    const int n = static_cast<int>(impl_->matrix.nrows);
-    if (impl_->rhs.size != n || impl_->solution.size != n) return Status::InvalidValue;
-    try {
-        bool ok = false;
-        if (impl_->config.single_precision == SinglePrecision::FP32) {
-            if (impl_->rhs.value_type == ValueType::Float32 &&
-                impl_->solution.value_type == ValueType::Float32) {
-                ok = custom_linear_solver::solve::solve_multifrontal_device(
-                    impl_->plan, static_cast<const float*>(impl_->rhs.values),
-                    static_cast<float*>(impl_->solution.values), impl_->d_perm.ptr, kernel_ms);
-            } else if (impl_->rhs.value_type == ValueType::Float64 &&
-                       impl_->solution.value_type == ValueType::Float32) {
-                ok = custom_linear_solver::solve::solve_multifrontal_device(
-                    impl_->plan, static_cast<const double*>(impl_->rhs.values),
-                    static_cast<float*>(impl_->solution.values), impl_->d_perm.ptr, kernel_ms);
-            } else {
-                return Status::InvalidValue;
-            }
-        } else {
-            if (impl_->rhs.value_type != ValueType::Float64 ||
-                impl_->solution.value_type != ValueType::Float64) {
-                return Status::InvalidValue;
-            }
-            ok = custom_linear_solver::solve::solve_multifrontal_device(
-                impl_->plan, static_cast<const double*>(impl_->rhs.values),
-                static_cast<double*>(impl_->solution.values), impl_->d_perm.ptr, kernel_ms);
-        }
-        if (!ok) return Status::SolveFailed;
-        return Status::Success;
-    } catch (const std::bad_alloc&) {
-        return Status::AllocationFailed;
-    } catch (const std::exception&) {
-        return Status::SolveFailed;
-    }
+    if (!impl_ || !impl_->analyzed) return Status::kInvalidState;
+    if (batch_size <= 0) return Status::kInvalidValue;
+    return custom_linear_solver::setup(impl_->plan, batch_size, impl_->config.precision,
+                                       impl_->state, impl_->config.use_multistream_subtrees,
+                                       impl_->config.tier_split)
+               ? Status::kSuccess
+               : Status::kAllocationFailed;
 }
 
 Status Solver::set_stream(void* stream)
 {
-    if (!impl_ || !impl_->analyzed) return Status::InvalidState;
-    impl_->plan.stream = stream;
-    impl_->plan.owns_stream = false;
-    return Status::Success;
+    if (!impl_ || !impl_->analyzed || impl_->state.batch_count == 0) return Status::kInvalidState;
+    custom_linear_solver::set_stream(impl_->state, stream);
+    return Status::kSuccess;
 }
 
-Status Solver::batched_setup(int batch, custom_linear_solver::batched::BatchPrecision prec)
+Status Solver::factorize()
 {
-    if (!impl_ || !impl_->analyzed) return Status::InvalidState;
-    if (batch <= 0) return Status::InvalidValue;
-    return custom_linear_solver::batched::batched_setup(impl_->plan, batch, prec, impl_->batched)
-               ? Status::Success
-               : Status::AllocationFailed;
+    CLS_PROFILE_NVTX("Solver::factorize");
+    CLS_PROFILE_GPU("Solver::factorize",
+                    static_cast<cudaStream_t>(impl_ ? impl_->state.stream : nullptr));
+    if (!impl_ || !impl_->has_matrix || !impl_->analyzed) return Status::kInvalidState;
+    if (impl_->matrix.values == nullptr) return Status::kInvalidState;
+    // Auto-setup with batch size 1 if the caller skipped setup().
+    if (impl_->state.batch_count == 0) {
+        if (auto st = setup(1); st != Status::kSuccess) return st;
+    }
+    const int* o2c = impl_->d_ordered_value_to_csr.ptr;
+    bool ok = false;
+    if (impl_->matrix.value_type == ValueType::kFloat64) {
+        ok = custom_linear_solver::factorize(impl_->plan, impl_->state,
+                                             static_cast<const double*>(impl_->matrix.values), o2c);
+    } else if (impl_->matrix.value_type == ValueType::kFloat32) {
+        ok = custom_linear_solver::factorize(impl_->plan, impl_->state,
+                                             static_cast<const float*>(impl_->matrix.values), o2c);
+    } else {
+        return Status::kInvalidValue;
+    }
+    return ok ? Status::kSuccess : Status::kFactorizationFailed;
 }
 
-Status Solver::batched_set_stream(void* stream)
+Status Solver::solve()
 {
-    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    custom_linear_solver::batched::batched_set_stream(impl_->batched, stream);
-    return Status::Success;
-}
-
-Status Solver::batched_factorize(const double* d_valuesB, double* kernel_ms)
-{
-    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    return custom_linear_solver::batched::batched_factorize(
-               impl_->plan, impl_->batched, d_valuesB, impl_->d_ordered_value_to_csr.ptr, kernel_ms)
-               ? Status::Success
-               : Status::FactorizationFailed;
-}
-
-Status Solver::batched_solve(const double* d_rhsB, double* d_solB, double* kernel_ms)
-{
-    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    return custom_linear_solver::batched::batched_solve(impl_->plan, impl_->batched, d_rhsB,
-                                                          d_solB, impl_->d_perm.ptr, kernel_ms)
-               ? Status::Success
-               : Status::SolveFailed;
-}
-
-Status Solver::batched_factorize(const float* d_valuesB, double* kernel_ms)
-{
-    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    return custom_linear_solver::batched::batched_factorize(
-               impl_->plan, impl_->batched, d_valuesB, impl_->d_ordered_value_to_csr.ptr, kernel_ms)
-               ? Status::Success
-               : Status::FactorizationFailed;
-}
-
-Status Solver::batched_solve(const double* d_rhsB, float* d_solB, double* kernel_ms)
-{
-    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    return custom_linear_solver::batched::batched_solve(impl_->plan, impl_->batched, d_rhsB,
-                                                          d_solB, impl_->d_perm.ptr, kernel_ms)
-               ? Status::Success
-               : Status::SolveFailed;
-}
-
-Status Solver::batched_solve(const float* d_rhsB, float* d_solB, double* kernel_ms)
-{
-    if (!impl_ || !impl_->analyzed || impl_->batched.B == 0) return Status::InvalidState;
-    return custom_linear_solver::batched::batched_solve(impl_->plan, impl_->batched, d_rhsB,
-                                                          d_solB, impl_->d_perm.ptr, kernel_ms)
-               ? Status::Success
-               : Status::SolveFailed;
+    CLS_PROFILE_NVTX("Solver::solve");
+    CLS_PROFILE_GPU("Solver::solve",
+                    static_cast<cudaStream_t>(impl_ ? impl_->state.stream : nullptr));
+    if (!impl_ || !impl_->has_rhs || !impl_->has_solution || !impl_->analyzed)
+        return Status::kInvalidState;
+    if (impl_->state.batch_count == 0) return Status::kInvalidState;
+    const int* perm = impl_->d_perm.ptr;
+    const int* iperm = impl_->d_iperm.ptr;
+    bool ok = false;
+    const auto rt = impl_->rhs.value_type;
+    const auto st = impl_->solution.value_type;
+    if (rt == ValueType::kFloat64 && st == ValueType::kFloat64) {
+        ok = custom_linear_solver::solve(impl_->plan, impl_->state,
+                                         static_cast<const double*>(impl_->rhs.values),
+                                         static_cast<double*>(impl_->solution.values), perm, iperm);
+    } else if (rt == ValueType::kFloat64 && st == ValueType::kFloat32) {
+        ok = custom_linear_solver::solve(impl_->plan, impl_->state,
+                                         static_cast<const double*>(impl_->rhs.values),
+                                         static_cast<float*>(impl_->solution.values), perm, iperm);
+    } else if (rt == ValueType::kFloat32 && st == ValueType::kFloat32) {
+        ok = custom_linear_solver::solve(impl_->plan, impl_->state,
+                                         static_cast<const float*>(impl_->rhs.values),
+                                         static_cast<float*>(impl_->solution.values), perm, iperm);
+    } else {
+        return Status::kInvalidValue;
+    }
+    return ok ? Status::kSuccess : Status::kSolveFailed;
 }
 
 const char* status_string(Status status)
 {
     switch (status) {
-        case Status::Success:
+        case Status::kSuccess:
             return "success";
-        case Status::InvalidValue:
+        case Status::kInvalidValue:
             return "invalid value";
-        case Status::InvalidState:
+        case Status::kInvalidState:
             return "invalid state";
-        case Status::AllocationFailed:
+        case Status::kAllocationFailed:
             return "allocation failed";
-        case Status::AnalysisFailed:
+        case Status::kAnalysisFailed:
             return "analysis failed";
-        case Status::FactorizationFailed:
+        case Status::kFactorizationFailed:
             return "factorization failed";
-        case Status::SolveFailed:
+        case Status::kSolveFailed:
             return "solve failed";
     }
     return "unknown";

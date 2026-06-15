@@ -1,0 +1,88 @@
+// pipelined systems-per-block mid kernel (CLS_MID_SYSBLK) — mid.cuh (snapshot 7fe15a7).
+// Pipelined systems-per-block mid kernel (exp_260612, fp32). The baseline mid kernel is
+// global-memory-LATENCY bound at batch (ncu: long_scoreboard ~40, FMA ~5%, DRAM ~6% — it stalls
+// waiting for each front's global load, not on bandwidth or compute). Here ONE block processes G
+// systems of the same front and double-buffers the cp.async front load, so system (g+1)'s load
+// overlaps system g's factorization → the load latency is hidden behind useful work. grid.y =
+// ceil(B/G); shared = 2 fronts (so fsz_cap <= 111 for fp32). Env CLS_MID_SYSBLK=G (0 = off).
+template <typename T>
+__global__ void factor_mid_blocked_sysblk(int lbegin, int lend,
+                                          const int* __restrict__ plcols,
+                                          const int* __restrict__ front_off,
+                                          const int* __restrict__ front_ptr,
+                                          const int* __restrict__ ncols,
+                                          const int* __restrict__ panel_parent,
+                                          const int* __restrict__ asm_ptr,
+                                          const int* __restrict__ asm_local,
+                                          T* frontB, long front_total, int* sing,
+                                          int do_extend, int rb_width, int G, int B)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const int sys0 = blockIdx.y * G;
+    if (sys0 >= B) return;
+    const int sys1 = min(B, sys0 + G);
+
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    const int uc = fsz - nc;
+    const int fsz2 = fsz * fsz;
+    const int foff = front_off[p];
+    const int par = panel_parent[p];
+    const int pfsz = (par >= 0) ? front_ptr[par + 1] - front_ptr[par] : 0;
+    const int poff = (par >= 0) ? front_off[par] : 0;
+    const int abase = asm_ptr[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+
+    extern __shared__ char smem_sysblk[];
+    T* buf = reinterpret_cast<T*>(smem_sysblk);
+    T* cur = buf;
+    T* nxt = buf + fsz2;
+
+    auto issue_load = [&](T* dst, int sys) {
+        const T* __restrict__ src = frontB + (long)sys * front_total + foff;
+#if __CUDA_ARCH__ >= 800
+        for (int e = t; e < fsz2; e += nt) __pipeline_memcpy_async(&dst[e], &src[e], sizeof(T));
+        __pipeline_commit();
+#else
+        for (int e = t; e < fsz2; e += nt) dst[e] = src[e];
+#endif
+    };
+
+    issue_load(cur, sys0);                         // prologue
+    for (int sys = sys0; sys < sys1; ++sys) {
+        const bool has_next = (sys + 1) < sys1;
+        if (has_next) issue_load(nxt, sys + 1);     // overlap next load with this factorization
+#if __CUDA_ARCH__ >= 800
+        __pipeline_wait_prior(has_next ? 1 : 0);    // wait only for `cur`; keep `nxt` in flight
+#endif
+        __syncthreads();
+
+        if (fsz <= kFusedSmallFrontMax) {
+            lu_small_front<T>(cur, fsz, nc, t, nt, sing);
+        } else {
+            lu_panel_factor<T>(cur, fsz, nc, t, nt, sing);
+            u_panel_solve<T>(cur, fsz, nc, uc, t, nt);
+            trailing_update<T>(cur, fsz, nc, uc, t, nt, rb_width);
+        }
+        T* front = frontB + (long)sys * front_total + foff;
+        writeback_factored<T, T>(front, cur, fsz, nc, uc, t, nt);
+        if (par >= 0 && do_extend) {
+            __syncthreads();
+            T* Fp = frontB + (long)sys * front_total + poff;
+            extend_add<T, T>(Fp, pfsz, cur, fsz, nc, uc, asm_local, abase, t, nt);
+        }
+        __syncthreads();                            // finish using `cur` before it is reloaded
+        T* tmp = cur; cur = nxt; nxt = tmp;         // rotate buffers
+    }
+}
+
+static int mid_sysblk_g()
+{
+    static const int v = [] {
+        const char* s = std::getenv("CLS_MID_SYSBLK");
+        return s ? std::atoi(s) : 0;
+    }();
+    return v;
+}
