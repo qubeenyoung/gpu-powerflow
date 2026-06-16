@@ -5,10 +5,12 @@
 
 ## 먼저 읽기
 
-1. [`storyline.md`](storyline.md) — 연구 서사. tiny-front regime 근원에서 내려오는 **연구 기여 4개**
-   (tier routing / dispatch scheduling / TC trailing / front coarsening)와 ablation 토글 매핑, 그리고
-   텐서코어 기여의 정직한 분해(+6~9%).
-2. [`optimal-configuration.md`](optimal-configuration.md) — 현재 최적 경로의 빌드/런타임 설정과
+1. [`storyline.md`](storyline.md) — 연구 서사(추상화). 문제(전력망 NR 배치 선형계) → 근원 진단
+   (tiny-front) → 기여 5갈래(실행 매핑 / 텐서코어+정확도 / 구조적 점유 회복 / all-float NR / 전체 NR
+   반복 그래프)와 텐서코어 기여의 정직한 분해(+6~9%). 코드·토글 매핑은 optimal-configuration 참조.
+2. [`contribution-analysis.md`](contribution-analysis.md) — 위 서사의 각 주장을 falsifiable 하게
+   공격·판정(claim-based). 외부 솔버 없이 검증되는 기여 vs head-to-head 가 필요한 경쟁력 주장 분리.
+3. [`optimal-configuration.md`](optimal-configuration.md) — 현재 최적 경로의 빌드/런타임 설정과
    토글↔메소드 매핑표, 검증 수치.
 
 ## 폴더 구조
@@ -41,11 +43,11 @@
 - [`01-kernel-engineering.md`](03-optimization-notes/01-kernel-engineering.md) — substrate 미세최적화·병목진단·결정로그(3단 tier 커널, 동기화, 디스패치, staging, "sync≠wall").
 - [`02-tf32-trailing-gemm.md`](03-optimization-notes/02-tf32-trailing-gemm.md) — V9h PTX trailing GEMM 스택, 폐기 매크로, 영구 교훈, FP16 PTX default.
 - [`03-tensor-core-investigation.md`](03-optimization-notes/03-tensor-core-investigation.md) — 텐서코어 조사 통합: large-case 성공, 8387/13K dead-end 매트릭스, Ozaki 정확도, **honest ~1.1× 정정**.
-- [`04-solve-optimization-2026-06-10.md`](03-optimization-notes/04-solve-optimization-2026-06-10.md) — **solve 경로 ~1.5× 가속** (small-tier nc-packing, spine fusion, full solve graph, inverse scatter, B=1 fixed-nc 라우팅). 통합 완료 + 기각 가설 기록.
-- [`05-tc-eligibility-relaxation-2026-06-11.md`](03-optimization-notes/05-tc-eligibility-relaxation-2026-06-11.md) — TF32 적격 gate(`uc≤256`/mid 조건) 완화 → **거의 모든 mid/big 이 TC**. `max_uc` 클램프–cap 연동 버그 수정, **uc>256 spine(70K L25 spike 10→5.6%) 제거**, factorize ~1.02–1.06×. **기본값으로 승격**(cap 256→512, mid 하한 풀음).
-- [`06-b1-factorize-regime-2026-06-13.md`](03-optimization-notes/06-b1-factorize-regime-2026-06-13.md) — **B=1 = under-fill(occupancy) 바운드**. scheduling/tiling/sync/amalgamation 무효, 두 레버뿐: ordering + **B=1 텐서코어(Ozaki-TC, fp32 정확도, USA −17%)**. B=64 와 정반대 체제. (exp_260612 01·03·04·05·11 압축)
-- [`07-batch-factorize-structural-2026-06-13.md`](03-optimization-notes/07-batch-factorize-structural-2026-06-13.md) — **STRUCTURAL: panel-resident mid 커널**(L/U 패널만 shared → DRAM 2–32%→55–65%, **USA B=64 −9.3%**, default-on). register-block(+4%)·scatter 미세최적화(+2–3%). gather/tiled/fewsync/sysblk/small-band-TC 회귀 → `deprecated/`. (exp_260612 06·09·10 압축)
-- [`08-ordering-best-of-k-2026-06-13.md`](03-optimization-notes/08-ordering-best-of-k-2026-06-13.md) — **tailored ND 반증**(custom GPU-ND·전기적-weighted ≈/악화 vs METIS), 실익은 **measured best-of-k**(`CLS_ORDER_MEASURE_K`, B=1 −6~13% + 결정성). (exp_260612 12·13·14·15 압축, 코드 `deprecated/gpu_nd/`)
+- [`04-solve-optimization-2026-06-10.md`](03-optimization-notes/04-solve-optimization-2026-06-10.md) — **solve 경로 ~1.5× 가속** (tiny-tier nc-packing, spine fusion, full solve graph, inverse scatter, B=1 fixed-nc 라우팅). 통합 완료 + 기각 가설 기록.
+- [`05-tc-eligibility-relaxation-2026-06-11.md`](03-optimization-notes/05-tc-eligibility-relaxation-2026-06-11.md) — TF32 적격 gate(`uc≤256`/small 조건) 완화 → **거의 모든 small/big/large 가 TC**. `max_uc` 클램프–cap 연동 버그 수정, **uc>256 spine(70K L25 spike 10→5.6%) 제거**, factorize ~1.02–1.06×. **기본값으로 승격**(cap 256→512, small 하한 풀음).
+- [`06-b1-factorize-regime-2026-06-13.md`](03-optimization-notes/06-b1-factorize-regime-2026-06-13.md) — **B=1 = under-fill(occupancy) 바운드**. scheduling/tiling/sync/amalgamation 무효. 작동하는 레버는 **B=1 텐서코어(Ozaki-TC, fp32 정확도, USA −17%)** 하나(ordering 선택은 §08, 이후 제거). B=64 와 정반대 체제. (exp_260612 01·03·04·05·11 압축)
+- [`07-batch-factorize-structural-2026-06-13.md`](03-optimization-notes/07-batch-factorize-structural-2026-06-13.md) — **STRUCTURAL: panel-resident big 커널**(L/U 패널만 shared → DRAM 2–32%→55–65%, **USA B=64 −9.3%**, default-on). register-block(+4%)·scatter 미세최적화(+2–3%). gather/tiled/fewsync/sysblk/small-band-TC 회귀 → `deprecated/`. (exp_260612 06·09·10 압축)
+- [`08-ordering-best-of-k-2026-06-13.md`](03-optimization-notes/08-ordering-best-of-k-2026-06-13.md) — *(역사적 기록; best-of-k 는 2026-06-15 제거 → `deprecated/best_of_k/`)* **tailored ND 반증**(custom GPU-ND·전기적-weighted ≈/악화 vs METIS), 한때 실익이던 measured best-of-k 도 ROI 부족으로 제거(기본 단일 parallel-ND). (exp_260612 12·13·14·15 압축, 코드 `deprecated/gpu_nd/`)
 - [`archive/`](03-optimization-notes/archive/) — dead-end R&D 로그(TC dedicated, symbolic GEMM, tree restructuring, 폐기 실험). 재시도 시 회피용.
 
 ### 04. Benchmarks and Profiling
