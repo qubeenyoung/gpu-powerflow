@@ -348,6 +348,98 @@ __global__ void factor_large(int lbegin, int lend, const int* __restrict__ plcol
     extend_add<T, T>(Fp, pfsz, F, fsz, nc, uc, asm_local, abase, t, nt);
 }
 
+// ---------------------------------------------------------------------------------------
+//  Multi-block LARGE tier (FP64) — one front spread across many blocks.
+//
+//  The single-block factor_large is under-fill bound on big-front matrices: a level can hold only
+//  a few large separator fronts (ncu: grid=2 on parabolic_fem), so one block per front leaves the
+//  GPU >99% idle while each block grinds a uc²·nc trailing serially. Split the large-tier FP64 work
+//  into two launches so the embarrassingly-parallel trailing fans out across the whole GPU:
+//    (1) factor_large_panel : one block per front, does Phase-1 panel LU + Phase-2 U-solve only.
+//    (2) factor_large_trail : a 3D grid (tile, front, batch) — each block owns one TM×TN tile of the
+//        front's uc×uc trailing, reads L/U from global (written by kernel 1, ordered by the graph
+//        edge between the two launches), and fuses the contribution straight into the parent.
+//  Power-grid fronts never reach this tier, so this path is exercised only by circuit/2D-FEM-like
+//  matrices with large separators.
+// ---------------------------------------------------------------------------------------
+template <typename T>
+__global__ void factor_large_panel(int lbegin, int lend, const int* __restrict__ plcols,
+                                   const int* __restrict__ front_off,
+                                   const int* __restrict__ front_ptr,
+                                   const int* __restrict__ ncols, T* frontB, long front_total,
+                                   int* sing, bool static_pivoting, double pivot_threshold,
+                                   double pivot_shift)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    T* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    T* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int uc = fsz - nc;
+    lu_panel_factor<T>(F, fsz, nc, t, nt, sing, static_pivoting, pivot_threshold, pivot_shift);
+    u_panel_solve_fewsync<T>(F, fsz, nc, uc, t, nt);
+}
+
+template <typename T, int TM, int TN>
+__global__ void factor_large_trail(int lbegin, int lend, const int* __restrict__ plcols,
+                                   const int* __restrict__ front_off,
+                                   const int* __restrict__ front_ptr,
+                                   const int* __restrict__ ncols,
+                                   const int* __restrict__ panel_parent,
+                                   const int* __restrict__ asm_ptr,
+                                   const int* __restrict__ asm_local, T* frontB, long front_total,
+                                   int do_extend, int level_max_nc)
+{
+    const int fi = lbegin + blockIdx.y;
+    if (fi >= lend) return;
+    T* front = frontB + (long)blockIdx.z * front_total;
+    const int p = plcols[fi];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    const int uc = fsz - nc;
+    const int ntx = (uc + TM - 1) / TM, nty = (uc + TN - 1) / TN;
+    if (blockIdx.x >= ntx * nty) return;                 // extra tiles for smaller fronts: drop
+    const int ti = blockIdx.x / nty, tj = blockIdx.x % nty;
+    const int i0 = ti * TM, j0 = tj * TN;
+    T* F = front + front_off[p];
+    const int par = panel_parent[p];
+    const bool fused = (par >= 0 && do_extend && fsz > kFusedSmallFrontMax);
+    T* Fp = (par >= 0) ? (front + front_off[par]) : nullptr;
+    const int pfsz = (par >= 0) ? (front_ptr[par + 1] - front_ptr[par]) : 0;
+    const int abase = asm_ptr[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+
+    // Stage this tile's L rows (TM×nc) and U cols (nc×TN) into shared for reuse across the nc dot.
+    extern __shared__ char smem_trail[];
+    T* sL = reinterpret_cast<T*>(smem_trail);            // TM × nc
+    T* sU = sL + (long)TM * level_max_nc;                // nc × TN
+    for (int e = t; e < TM * nc; e += nt) {
+        const int i = e / nc, k = e % nc, gi = i0 + i;
+        sL[i * nc + k] = (gi < uc) ? F[(long)(nc + gi) * fsz + k] : T(0);
+    }
+    for (int e = t; e < nc * TN; e += nt) {
+        const int k = e / TN, j = e % TN, gj = j0 + j;
+        sU[k * TN + j] = (gj < uc) ? F[(long)k * fsz + (nc + gj)] : T(0);
+    }
+    __syncthreads();
+    for (int e = t; e < TM * TN; e += nt) {
+        const int i = e / TN, j = e % TN, gi = i0 + i, gj = j0 + j;
+        if (gi >= uc || gj >= uc) continue;
+        T acc = T(0);
+        for (int k = 0; k < nc; ++k) acc += sL[i * nc + k] * sU[k * TN + j];
+        const long off = (long)(nc + gi) * fsz + (nc + gj);
+        if (fused) {
+            atomicAdd(&Fp[(long)asm_local[abase + gi] * pfsz + asm_local[abase + gj]],
+                      F[off] - acc);
+        } else {
+            F[off] -= acc;
+        }
+    }
+}
+
 // LARGE tier — the single global-resident kernel for every precision (fronts too large to be
 // shared-resident at all: fsz > whole_front_shared_max). factor_large keeps the front in global memory,
 // stages only the L/U panels into shared, runs the trailing (TF32 mma for UseTC / staged scalar for
@@ -365,23 +457,21 @@ static void dispatch_factor_large(const MultifrontalPlan& plan, State& st, cudaS
     dim3 grid(e - b, st.batch_count);
 
     if (precision == Precision::FP64) {
-        constexpr int T = 512;  // block size: the uc² trailing of large fronts is embarrassingly
-                                // parallel and occupancy-starved at 128 (4 warps, ncu 8% occ); 512
-                                // (16 warps) gives ~1.8× on big-front matrices (parabolic_fem) with
-                                // no register-spill regression. Power-grid never enters this tier.
-        size_t sh = (size_t)2 * level_max_nc * level_max_uc * sizeof(double);
-        int trail_jt = 0;  // 0 = full staging (power-grid common path)
-        if (sh > kDynamicSharedMemoryOptInBytes) {
-            // Oversized separator front: tile the trailing so shared = nc·jt ≤ budget (uc-independent).
-            trail_jt = (int)(kDynamicSharedMemoryOptInBytes / ((size_t)level_max_nc * sizeof(double)));
-            if (trail_jt < 1) trail_jt = 1;
-            sh = (size_t)level_max_nc * trail_jt * sizeof(double);
-        }
-        factor_large<double, false><<<grid, T, sh, stream>>>(
+        // Two-launch multi-block path (kills the grid≈few under-fill on big-front matrices). The
+        // graph edge between the two launches orders kernel-2's L/U reads after kernel-1's writes.
+        factor_large_panel<double><<<grid, 256, 0, stream>>>(   // Phase 1+2: one block per front
+            b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols, st.d_front_batch,
+            plan.front_total, st.d_sing, st.static_pivoting, st.pivot_threshold, st.pivot_shift);
+        constexpr int TM = 32, TN = 32;                          // Phase 3: TM×TN trailing tiles
+        // grid.x must cover the LARGEST front's uc² (level_max_uc is unclamped; max_uc is clamped to
+        // the TF32 tile cap and would silently drop tiles beyond it → wrong result).
+        const int ntx = (level_max_uc + TM - 1) / TM, nty = (level_max_uc + TN - 1) / TN;
+        const dim3 tgrid(ntx * nty > 0 ? ntx * nty : 1, e - b, st.batch_count);
+        const size_t sh = (size_t)(TM + TN) * level_max_nc * sizeof(double);  // ≤ 48KB (nc≤64)
+        factor_large_trail<double, TM, TN><<<tgrid, 256, sh, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
-            plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, trail_jt, 0,
-            st.static_pivoting, st.pivot_threshold, st.pivot_shift);
+            plan.front_total, do_extend, level_max_nc);
         return;
     }
     if (precision == Precision::TF32) {
