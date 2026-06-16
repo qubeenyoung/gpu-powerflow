@@ -63,5 +63,12 @@ v2/
 
 
 exp/
+!paper/exp/
+!paper/exp/plan.md
+# root exp/: track head-to-head sources+cases, but not built binaries/logs
+!/exp/
+/exp/harness/strumpack_bench
+/exp/harness/strumpack_bench_magma
+/exp/harness/*.log
 
 refactor_docs/
