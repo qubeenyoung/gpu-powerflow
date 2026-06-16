@@ -80,12 +80,46 @@ contribution 은 부모로 fused). grid 가 GPU 를 채움. (`dd6f0f3`→`7678a6
 **무회귀**: power-flow 25k FP64 factor 1.09 / solve 0.60 / relres 2.4e-14(불변), B=64 per-sys 0.074/0.032,
 scircuit 불변. power-grid/scircuit 은 large-tier 미사용 → 위 변경 전부 byte-identical. TF32/FP32 large 경로 미변경.
 
+## 4b. B=1 FP64 3-way (front 크기 스펙트럼) + 추가 최적화 반영
+
+FP32/TF32 large-tier 도 multi-block 으로 통일(`1e78c7b`), batched 큰-front solve 크래시도 non-staged
+fallback 으로 수정(`01d9d4d`). 최신 B=1 FP64(단일 시스템, warmed) 3-way:
+
+| 행렬 | 레짐 | custom f/s | cuDSS f/s | STRUMPACK f/s | STR/cuDSS factor |
+|---|---|---|---|---|---|
+| scircuit | tiny-front | **4.39** / 2.18 | 4.98 / **1.53** | 77.9 / 87.3 | STR **15.6× 느림** |
+| parabolic_fem | 2D-FEM | **65.4** / 7.15 | 78.6 / **5.65** | 227 / 125 | STR 2.9× 느림 |
+| cant | 3D FEM | **59.4** / 4.29 | 63.2 / **3.02** | 150 / 17.7 | STR 2.4× 느림 |
+| bmwcra_1 | 3D 구조 | (arena 캡) | 520 / 9.95 | 617 / 49 | STR 1.2× 느림 |
+| Transport | 3D (논문 Table-2) | (arena 캡) | 26083 / 0.10 | 23416 / 1.18 | STR **0.90× 빠름** |
+
+- custom vs cuDSS: scircuit·parabolic·cant 모두 **factor 에서 custom 우위**(1.1–1.2×), solve 는 cuDSS 근소 우위.
+- front 가 커질수록 STR/cuDSS 비가 **15.6→2.9→2.4→1.2→0.90×** 단조 이동 — 큰 3D 에선 STRUMPACK 이 cuDSS 를 이김.
+
+## 4c. STRUMPACK 논문 재현 검증 (baseline 공정성)
+
+우리 STRUMPACK harness 가 sandbagging 인지 확인하기 위해 논문(Claus·Ghysels·Boukaram·Li, IJHPCA 2025)
+Table-2 행렬 **Transport** 에서 우리 harness 를 직접 측정:
+
+| | STRUMPACK factor | cuDSS factor | STR/cuDSS |
+|---|---|---|---|
+| 논문 (A100) | 3.2 s | 8.8 s | STR **2.75× 빠름** |
+| 기존 3090 재현(v8.0, [§04-01](../04-benchmarks-profiling/01-strumpack-paper-reproduction.md)) | 20.4 s | 23.0 s | STR 1.13× 빠름 |
+| **우리 harness (3090)** | **23.4 s** | **26.1 s** | STR **1.11× 빠름** |
+
+→ **우리 harness 가 논문을 재현한다**: Transport(3D)에서 STRUMPACK 이 cuDSS 보다 빠르고(1.11×), 기존 3090
+재현(1.13×)과 거의 일치, 논문 A100(2.75×)과 방향 일치(3090 FP64=1/64 라 배율만 축소). residual 5e-15(full pivot).
+**즉 STRUMPACK baseline 은 공정**하다 — 설계 타깃(큰 3D)에선 논문대로 빠르고, tiny-front(scircuit 15×)에서 느린
+건 진짜 약점이지 측정 오류가 아니다. custom 이 tiny-front 에서 STRUMPACK 을 압도하는 결과는 정당하다.
+
 ## 5. 한계 / 남은 일
 
-- **G3_circuit**: analyze 의 8GB front-arena 상한(`total > 1G doubles`)에 걸림 — all-fronts-GPU-resident 설계의
-  메모리 스케일링 한계. 큰 2D end-to-end 는 front 스트리밍 재설계 필요.
-- **cuDSS UBATCH 미측정**: scircuit/parabolic 의 *배치 대 배치* 공정 비교는 cuDSS UBATCH 하니스 확장 후 가능.
-- **TF32/FP32 large-tier multi-block 미적용**: 본 작업은 FP64 large-tier 만(우리 주 정밀도). 필요시 동형 적용 가능.
+- **G3_circuit / Transport / bmwcra_1**: custom analyze 의 8GB front-arena 상한(`total > 1G doubles`)에 걸림 —
+  all-fronts-GPU-resident 설계의 메모리 스케일링 한계(기존 §04-01 에도 기록된 동작). 큰 3D/2D end-to-end 는
+  front 스트리밍 재설계 필요. (custom 은 power-grid 및 작은 tiny-front 타깃.)
+- **batched 큰-front FP32/TF32 정밀도**: parabolic 같은 stiff 2D-FEM 에선 FP32/TF32 가 부정확(조건수) — FP64 가
+  정답 모드. FP32/TF32 는 well-conditioned power-flow(cuPF) 타깃이므로 무관.
+- **cuDSS UBATCH 미측정**: *배치 대 배치* 공정 비교는 cuDSS UBATCH 하니스 확장 후 가능.
 
 ## 재현
 ```bash
