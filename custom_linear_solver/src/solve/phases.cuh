@@ -73,6 +73,39 @@ __device__ __forceinline__ void fwd_substitute_fixed(const T* F, int fsz, const 
     }
 }
 
+// ── Shared-staged (compact leading-dim) variants ──────────────────────────────────────
+// P3: the regular block-per-front kernels stage the touched panel into shared with a coalesced
+// load, then run the phases reading the compact panel (leading dim `ld`, not the front's `fsz`).
+// ncu showed the direct global access at ~7-13% load-coalescing (bytes/sector); staging converts
+// the strided gathers into one coalesced load + bank-friendly shared reads. The math is identical
+// to the non-staged helpers above; only the operand source (Lsh/Ush, stride ld) changes.
+
+// Forward panel substitution reading the compact L panel Lsh (row-major, leading dim ld = nc).
+template <typename T>
+__device__ __forceinline__ void fwd_substitute_sh(const T* Lsh, int ld, int nc, const int* fr,
+                                                  T* y_global, T* sh_piv, int lane)
+{
+    T part = T(0), sk = T(0);
+    for (int k = 0; k < nc; ++k) {
+        if (lane == k) { sk = y_global[fr[k]] + part; sh_piv[k] = sk; y_global[fr[k]] = sk; }
+        sk = __shfl_sync(0xffffffffu, sk, k);
+        if (lane > k && lane < nc) part -= Lsh[(long)lane * ld + k] * sk;
+    }
+}
+
+// Forward CB row update reading the compact L panel Lsh (leading dim ld = nc), rows [nc, fsz).
+template <typename T>
+__device__ __forceinline__ void fwd_cb_update_sh(const T* Lsh, int ld, int fsz, int nc, int cb,
+                                                 const int* fr, T* y_global, const T* sh_piv,
+                                                 int t, int nt)
+{
+    for (int i = nc + t; i < fsz; i += nt) {
+        T upd = T(0);
+        for (int k = 0; k < nc; ++k) upd += Lsh[(long)i * ld + k] * sh_piv[k];
+        atomicAdd(&y_global[fr[i]], -upd);
+    }
+}
+
 // CB row update: y[fr[nc + i]] -= sum_k L[i, k] sh_piv[k], for i in [0, cb) distributed
 // across `nt` threads starting at offset `t`. atomicAdd because sibling fronts scatter
 // into the same parent rows.

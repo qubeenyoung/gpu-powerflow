@@ -126,11 +126,12 @@ static inline void launch_solve_tiny_t(bool fwd, int sub_group_size, int num_blo
 }
 
 template <typename FrontType>
-static inline void launch_solve_fwd_dynamic(dim3 grid, int threads_per_block, cudaStream_t ks,
+static inline void launch_solve_fwd_dynamic(dim3 grid, int threads_per_block, size_t shared_bytes,
+                                            cudaStream_t ks,
                                             int b, int e, const MultifrontalPlan& plan, const int* d_plc,
                                             FrontType* frontB, FrontType* yB)
 {
-    solve_fwd<FrontType><<<grid, threads_per_block, 0, ks>>>(
+    solve_fwd<FrontType><<<grid, threads_per_block, shared_bytes, ks>>>(
         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
         plan.d_front_rows, frontB, yB, plan.front_total, plan.num_rows);
 }
@@ -181,6 +182,8 @@ static void fwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
     // Larger levels: one block per (front, batch), thread count tuned to max_fsz.
     const int threads_per_block = solve_regular_threads(max_front_size, e - b, metrics.level_max_nc, B);
     const dim3 fg(e - b, B);
+    // P3: dynamic shared for the staged L panel (rows × cols[0,nc), upper-bounded by level maxes).
+    const size_t fwd_panel_shared = (size_t)max_front_size * metrics.level_max_nc * element_bytes;
     const int fixed_nc = solve_regular_fixed_nc_choice(plan, h_plc, b, e, metrics.level_max_nc, B);
     const bool use_nc8 = fixed_nc == 8;
     const bool use_nc10 = fixed_nc == 10;
@@ -209,7 +212,7 @@ static void fwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
             launch_solve_fwd_fixed<float, 20>(exact_nc20, fg, threads_per_block, ks, b, e, plan, d_plc,
                                               st.d_front_batch_f, st.d_y_batch_f);
         else
-            launch_solve_fwd_dynamic<float>(fg, threads_per_block, ks, b, e, plan, d_plc,
+            launch_solve_fwd_dynamic<float>(fg, threads_per_block, fwd_panel_shared, ks, b, e, plan, d_plc,
                                             st.d_front_batch_f, st.d_y_batch_f);
     } else {
         if (use_nc8)
@@ -228,7 +231,7 @@ static void fwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
             launch_solve_fwd_fixed<double, 20>(exact_nc20, fg, threads_per_block, ks, b, e, plan, d_plc,
                                                st.d_front_batch, st.d_y_batch);
         else
-            launch_solve_fwd_dynamic<double>(fg, threads_per_block, ks, b, e, plan, d_plc,
+            launch_solve_fwd_dynamic<double>(fg, threads_per_block, fwd_panel_shared, ks, b, e, plan, d_plc,
                                              st.d_front_batch, st.d_y_batch);
     }
 }
@@ -244,6 +247,8 @@ static void bwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
     const FrontRangeCaps metrics = scan_front_range(plan, h_plc, b, e);
     const int max_front_size = metrics.max_fsz;
     const int max_contribution = metrics.level_max_uc;
+    // P3: regular solve_bwd<T> stages the top-nc U rows (≤ max_fsz·level_max_nc) plus the x cache.
+    const size_t bwd_panel_shared = (size_t)(max_front_size * metrics.level_max_nc + max_contribution) * element_bytes;
 
     // Tiny tier: sub-group-packed warp kernel. slab = kMaxPivotColumns (rhs) + max_contribution (x cache).
     if (classify_front_tier(max_front_size, !float_front) == FrontTier::kTiny) {
@@ -324,7 +329,7 @@ static void bwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
                     plan.d_front_rows, st.d_front_batch_f, st.d_y_batch_f, plan.front_total, plan.num_rows);
         }
         else
-            solve_bwd<float><<<bg, threads_per_block, (size_t)max_contribution * sizeof(float), ks>>>(
+            solve_bwd<float><<<bg, threads_per_block, bwd_panel_shared, ks>>>(
                 b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_front_batch_f, st.d_y_batch_f, plan.front_total, plan.num_rows);
     } else {
@@ -375,7 +380,7 @@ static void bwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
                     plan.d_front_rows, st.d_front_batch, st.d_y_batch, plan.front_total, plan.num_rows);
         }
         else
-            solve_bwd<double><<<bg, threads_per_block, (size_t)max_contribution * sizeof(double), ks>>>(
+            solve_bwd<double><<<bg, threads_per_block, bwd_panel_shared, ks>>>(
                 b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                 plan.d_front_rows, st.d_front_batch, st.d_y_batch, plan.front_total, plan.num_rows);
     }

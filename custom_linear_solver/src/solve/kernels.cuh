@@ -168,11 +168,18 @@ __global__ void solve_fwd(int lbegin, int lend, const int* __restrict__ plcols,
     const int t = threadIdx.x, nt = blockDim.x;
     __shared__ T sh_piv[kMaxPivotColumns];
 
+    // P3: stage the L panel (rows [0,fsz) × cols [0,nc), compact stride nc) into shared with a
+    // coalesced load, then run both phases from shared. ncu showed the direct F[lane*fsz+k] access
+    // at ~12% load-coalescing; the compact load packs nc-contiguous runs and the phases read shared.
+    extern __shared__ unsigned char fwd_smem_raw[];
+    T* Lsh = reinterpret_cast<T*>(fwd_smem_raw);
+    for (int e = t; e < fsz * nc; e += nt) Lsh[e] = F[(long)(e / nc) * fsz + (e % nc)];
+    __syncthreads();
     // Phase 1 — panel substitution (one warp).
-    if (t < 32) fwd_substitute<T>(F, fsz, nc, fr, y, sh_piv, /*lane=*/t);
+    if (t < 32) fwd_substitute_sh<T>(Lsh, /*ld=*/nc, nc, fr, y, sh_piv, /*lane=*/t);
     __syncthreads();
     // Phase 2 — CB rows update across all threads.
-    fwd_cb_update<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, t, nt);
+    fwd_cb_update_sh<T>(Lsh, /*ld=*/nc, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, t, nt);
 }
 
 template <typename T>
@@ -194,19 +201,23 @@ __global__ void solve_bwd(int lbegin, int lend, const int* __restrict__ plcols,
     const int t = threadIdx.x, nt = blockDim.x;
     const int cb = fsz - nc;
 
-    // Caller-provided dynamic shared holds the x cache (cb entries); rhs is a static shared.
-    extern __shared__ unsigned char xsh_raw[];
-    T* xsh = reinterpret_cast<T*>(xsh_raw);
+    // P3: stage the top nc rows of F (the U pivot block + U panel — F[0, nc*fsz) is contiguous, so
+    // the load is fully coalesced) into shared, then run both U-using phases from shared. xsh (x
+    // cache, cb entries) follows it in dynamic shared; rhs is a static shared.
+    extern __shared__ unsigned char bwd_smem_raw[];
+    T* Ush = reinterpret_cast<T*>(bwd_smem_raw);     // nc rows × fsz, stride fsz
+    T* xsh = Ush + (long)nc * fsz;                    // x cache (cb)
     __shared__ T rhs[kMaxPivotColumns];
 
-    // Phase 1 — load rhs[] and x cache from y.
+    // Phase 1 — stage U rows (coalesced) + load rhs[] and x cache from y.
+    for (int e = t; e < nc * fsz; e += nt) Ush[e] = F[e];
     bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, t, nt);
     __syncthreads();
     // Phase 2 — CB contribution to rhs. Threads with t < nc each compute one rhs entry.
-    bwd_cb_subtract<T>(F, fsz, nc, cb, xsh, rhs, t, /*width=*/nt);
+    bwd_cb_subtract<T>(Ush, fsz, nc, cb, xsh, rhs, t, /*width=*/nt);
     __syncthreads();
     // Phase 3 — panel substitution (one warp), writes x back to y[fr[0..nc)].
-    if (t < 32) bwd_substitute<T>(F, fsz, nc, fr, y, rhs, /*lane=*/t);
+    if (t < 32) bwd_substitute<T>(Ush, fsz, nc, fr, y, rhs, /*lane=*/t);
 }
 
 template <typename T, int NC>
