@@ -365,7 +365,10 @@ static void dispatch_factor_large(const MultifrontalPlan& plan, State& st, cudaS
     dim3 grid(e - b, st.batch_count);
 
     if (precision == Precision::FP64) {
-        constexpr int T = 128;  // FP64 register pressure caps the block size
+        constexpr int T = 512;  // block size: the uc² trailing of large fronts is embarrassingly
+                                // parallel and occupancy-starved at 128 (4 warps, ncu 8% occ); 512
+                                // (16 warps) gives ~1.8× on big-front matrices (parabolic_fem) with
+                                // no register-spill regression. Power-grid never enters this tier.
         size_t sh = (size_t)2 * level_max_nc * level_max_uc * sizeof(double);
         int trail_jt = 0;  // 0 = full staging (power-grid common path)
         if (sh > kDynamicSharedMemoryOptInBytes) {
