@@ -1,6 +1,10 @@
 # B=1 factorize 체제 — under-fill 천장, 그리고 두 개의 레버(ordering · 텐서코어)
 
-> **상태**: reference   **갱신**: 2026-06-13
+> ⚠️ **갱신 (2026-06-15)**: 아래 두 레버 중 **ND ordering 선택(best-of-k)은 코드에서 제거**됐다
+> (ROI 부족, → `deprecated/best_of_k/`, §08 배너 참조). 현재 B=1 에서 살아있는 레버는 **B=1 텐서코어
+> trailing(§4)** 하나다. 진단(B=1 = under-fill 천장)과 ordering 관련 측정은 역사적 기록으로 유효하다.
+
+> **상태**: reference (ordering 레버는 historical)   **갱신**: 2026-06-13
 > **한 줄**: B=1(단일 시스템) fp32 factorize 는 **소거트리 깊은 레벨의 under-fill(occupancy) 바운드**다 — scheduling/tiling/sync/amalgamation/thread-width 는 모두 1 block/SM·per-front latency 벽에 막힌다. 천장을 회수하는 레버는 단 둘: **ND ordering 선택**(→ [`08-ordering-best-of-k`](08-ordering-best-of-k-2026-06-13.md)) 과 **B=1 텐서코어 trailing**(Ozaki 로 fp32 정확도 유지). B=64 와는 정반대 체제.
 
 exp_260612 (RTX 3090, sm_86, 82 SM) 의 B=1 분석을 압축한 노트. 원자료: `../exp_260612/` (notes 01·03·04·05·09·11),

@@ -1,6 +1,12 @@
 # Ordering — tailored ND 반증, 그리고 measured best-of-k 가 유일한 실익
 
-> **상태**: reference   **갱신**: 2026-06-13
+> ⚠️ **REMOVED (2026-06-15)**: 이 노트가 권하는 best-of-k ordering 선택(measured `CLS_ORDER_MEASURE_K`,
+> static proxy `CLS_ORDER_K`)은 **코드에서 제거**됐다(→ `deprecated/best_of_k/`). measured 변형은 작동했으나
+> (B=1 −6~13%) analyze 시점 K 회 factorize 비용 대비 default-off opt-in 으로 유지할 가치가 낮았다. 기본
+> analyze 경로는 **단일 parallel-ND**. 아래 내용은 *역사적 기록*이며, tailored-ND 반증 결론(METIS 가
+> near-optimal)은 유효하다.
+
+> **상태**: reference (historical)   **갱신**: 2026-06-13
 > **한 줄**: 전력망+ND 에서 **METIS fill 목적은 near-optimal** — custom GPU-objective ND·전기적-weighted bisection 은 best-of-k METIS envelope 를 못 이긴다(gpu_nd ≈ METIS 시드노이즈 내, EW +9~73% 악화). 유일한 ordering 실익은 **깨진 best-of-k 선택을 고치는 것**: tail-cube proxy(`CLS_ORDER_K`)는 anti-informative 라, 시드별 **실제 factorize 시간을 측정**해 고르는 `CLS_ORDER_MEASURE_K` 가 B=1 **−6~13%** + parallel-ND 비결정성 제거 + 정밀도 적응.
 
 exp_260612 ordering 트랙. 원자료: `../exp_260612/`(notes 12·13·14·15), B=1 체제 맥락은 [`06-b1-factorize-regime`](06-b1-factorize-regime-2026-06-13.md) §3. 폐기 코드: `deprecated/gpu_nd/`.
