@@ -136,6 +136,32 @@ static inline void launch_solve_fwd_dynamic(dim3 grid, int threads_per_block, si
         plan.d_front_rows, frontB, yB, plan.front_total, plan.num_rows);
 }
 
+// Non-staged fwd/bwd launches for large fronts (staged shared would exceed the default cap).
+template <typename FrontType>
+static inline void launch_solve_fwd_nostage(dim3 grid, int threads_per_block, cudaStream_t ks,
+                                            int b, int e, const MultifrontalPlan& plan, const int* d_plc,
+                                            FrontType* frontB, FrontType* yB)
+{
+    solve_fwd_nostage<FrontType><<<grid, threads_per_block, 0, ks>>>(
+        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+        plan.d_front_rows, frontB, yB, plan.front_total, plan.num_rows);
+}
+
+template <typename FrontType>
+static inline void launch_solve_bwd_nostage(dim3 grid, int threads_per_block, size_t shared_bytes,
+                                            cudaStream_t ks,
+                                            int b, int e, const MultifrontalPlan& plan, const int* d_plc,
+                                            FrontType* frontB, FrontType* yB)
+{
+    solve_bwd_nostage<FrontType><<<grid, threads_per_block, shared_bytes, ks>>>(
+        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
+        plan.d_front_rows, frontB, yB, plan.front_total, plan.num_rows);
+}
+
+// Largest staged-panel shared we allow under the default (non-opt-in) cap; above this the dynamic
+// solve falls back to the non-staged kernel (reads F directly). Leaves room for the static sh_piv.
+static constexpr size_t kSolveStageSharedCap = 46u * 1024u;
+
 template <typename FrontType, int NC>
 static inline void launch_solve_fwd_fixed(bool exact, dim3 grid, int threads_per_block, cudaStream_t ks,
                                           int b, int e, const MultifrontalPlan& plan, const int* d_plc,
@@ -211,6 +237,9 @@ static void fwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
         else if (use_nc20)
             launch_solve_fwd_fixed<float, 20>(exact_nc20, fg, threads_per_block, ks, b, e, plan, d_plc,
                                               st.d_front_batch_f, st.d_y_batch_f);
+        else if (fwd_panel_shared > kSolveStageSharedCap)
+            launch_solve_fwd_nostage<float>(fg, threads_per_block, ks, b, e, plan, d_plc,
+                                            st.d_front_batch_f, st.d_y_batch_f);
         else
             launch_solve_fwd_dynamic<float>(fg, threads_per_block, fwd_panel_shared, ks, b, e, plan, d_plc,
                                             st.d_front_batch_f, st.d_y_batch_f);
@@ -230,6 +259,9 @@ static void fwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
         else if (use_nc20)
             launch_solve_fwd_fixed<double, 20>(exact_nc20, fg, threads_per_block, ks, b, e, plan, d_plc,
                                                st.d_front_batch, st.d_y_batch);
+        else if (fwd_panel_shared > kSolveStageSharedCap)
+            launch_solve_fwd_nostage<double>(fg, threads_per_block, ks, b, e, plan, d_plc,
+                                             st.d_front_batch, st.d_y_batch);
         else
             launch_solve_fwd_dynamic<double>(fg, threads_per_block, fwd_panel_shared, ks, b, e, plan, d_plc,
                                              st.d_front_batch, st.d_y_batch);
@@ -328,6 +360,9 @@ static void bwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
                     b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                     plan.d_front_rows, st.d_front_batch_f, st.d_y_batch_f, plan.front_total, plan.num_rows);
         }
+        else if (bwd_panel_shared > kSolveStageSharedCap)
+            launch_solve_bwd_nostage<float>(bg, threads_per_block, (size_t)max_contribution * sizeof(float),
+                                            ks, b, e, plan, d_plc, st.d_front_batch_f, st.d_y_batch_f);
         else
             solve_bwd<float><<<bg, threads_per_block, bwd_panel_shared, ks>>>(
                 b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
@@ -379,6 +414,9 @@ static void bwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
                     b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
                     plan.d_front_rows, st.d_front_batch, st.d_y_batch, plan.front_total, plan.num_rows);
         }
+        else if (bwd_panel_shared > kSolveStageSharedCap)
+            launch_solve_bwd_nostage<double>(bg, threads_per_block, (size_t)max_contribution * sizeof(double),
+                                             ks, b, e, plan, d_plc, st.d_front_batch, st.d_y_batch);
         else
             solve_bwd<double><<<bg, threads_per_block, bwd_panel_shared, ks>>>(
                 b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,

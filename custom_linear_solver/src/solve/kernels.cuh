@@ -220,6 +220,61 @@ __global__ void solve_bwd(int lbegin, int lend, const int* __restrict__ plcols,
     if (t < 32) bwd_substitute<T>(Ush, fsz, nc, fr, y, rhs, /*lane=*/t);
 }
 
+// Non-staged fwd for large fronts whose L panel (fsz×nc) would exceed the default shared cap if
+// staged. Reads F directly (the staging is only a small-front coalescing win; large fronts have
+// enough work to coalesce anyway). Same math as solve_fwd, only without the Lsh copy. sh = 0.
+template <typename T>
+__global__ void solve_fwd_nostage(int lbegin, int lend, const int* __restrict__ plcols,
+                                  const int* __restrict__ front_off, const int* __restrict__ front_ptr,
+                                  const int* __restrict__ ncols, const int* __restrict__ front_rows,
+                                  const T* frontB, T* yB, long front_total, int n)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int p = plcols[idx];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const int nc = ncols[p];
+    const T* F = front + front_off[p];
+    const int* fr = front_rows + s;
+    const int t = threadIdx.x, nt = blockDim.x;
+    __shared__ T sh_piv[kMaxPivotColumns];
+    if (t < 32) fwd_substitute<T>(F, fsz, nc, fr, y, sh_piv, /*lane=*/t);
+    __syncthreads();
+    fwd_cb_update<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, t, nt);
+}
+
+// Non-staged bwd counterpart (shared = x cache only, bounded by cb — the U-panel stays in global).
+template <typename T>
+__global__ void solve_bwd_nostage(int lbegin, int lend, const int* __restrict__ plcols,
+                                  const int* __restrict__ front_off, const int* __restrict__ front_ptr,
+                                  const int* __restrict__ ncols, const int* __restrict__ front_rows,
+                                  const T* frontB, T* yB, long front_total, int n)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    const T* front = frontB + (long)blockIdx.y * front_total;
+    T* y = yB + (long)blockIdx.y * n;
+    const int p = plcols[idx];
+    const int s = front_ptr[p];
+    const int fsz = front_ptr[p + 1] - s;
+    const int nc = ncols[p];
+    const T* F = front + front_off[p];
+    const int* fr = front_rows + s;
+    const int t = threadIdx.x, nt = blockDim.x;
+    const int cb = fsz - nc;
+    extern __shared__ unsigned char bwd_nostage_raw[];
+    T* xsh = reinterpret_cast<T*>(bwd_nostage_raw);   // cb entries
+    __shared__ T rhs[kMaxPivotColumns];
+    bwd_load_rhs_and_x<T>(y, fr, nc, cb, rhs, xsh, t, nt);
+    __syncthreads();
+    bwd_cb_subtract<T>(F, fsz, nc, cb, xsh, rhs, t, /*width=*/nt);
+    __syncthreads();
+    if (t < 32) bwd_substitute<T>(F, fsz, nc, fr, y, rhs, /*lane=*/t);
+}
+
 template <typename T, int NC>
 __global__ void solve_fwd_fixed_nc(int lbegin, int lend, const int* __restrict__ plcols,
                                    const int* __restrict__ front_off, const int* __restrict__ front_ptr,
