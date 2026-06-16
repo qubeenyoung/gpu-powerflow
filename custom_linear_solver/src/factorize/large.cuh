@@ -383,6 +383,82 @@ __global__ void factor_large_panel(int lbegin, int lend, const int* __restrict__
     u_panel_solve_fewsync<T>(F, fsz, nc, uc, t, nt);
 }
 
+// Blocked-LU panel split (replaces the one-block-per-front factor_large_panel, which became the
+// bottleneck once the trailing was multi-blocked: it did ~1/20 of the trailing's FLOPs but took
+// more time — under-fill + serial nc-loop, ncu grid 18-32 / occ 17% / SM 5-12%). The L21/U12 panel
+// solves are parallel over the uc rows/cols, so split into:
+//   factor_large_pivot  : factor the nc×nc A11 block only (one block/front, tiny, serial nc).
+//   factor_large_panels : multi-block over uc — L21 = A21·U11⁻¹ (per row) and U12 = L11⁻¹·A12 (per
+//                         col), forward-substitution against the staged pivot block. Fills the GPU.
+template <typename T>
+__global__ void factor_large_pivot(int lbegin, int lend, const int* __restrict__ plcols,
+                                   const int* __restrict__ front_off,
+                                   const int* __restrict__ front_ptr,
+                                   const int* __restrict__ ncols, T* frontB, long front_total,
+                                   int* sing, bool static_pivoting, double pivot_threshold,
+                                   double pivot_shift)
+{
+    const int idx = lbegin + blockIdx.x;
+    if (idx >= lend) return;
+    T* front = frontB + (long)blockIdx.y * front_total;
+    const int p = plcols[idx];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    T* F = front + front_off[p];
+    const int t = threadIdx.x, nt = blockDim.x;
+    // No-pivot (or static-shift) LU of the nc×nc top-left block only (rows/cols < nc).
+    for (int k = 0; k < nc; ++k) {
+        const long diag = (long)k * fsz + k;
+        T piv = guarded_pivot(F[diag], static_pivoting, pivot_threshold, pivot_shift, sing, t == 0);
+        if (t == 0) F[diag] = piv;
+        const T inv = T(1) / piv;
+        for (int i = k + 1 + t; i < nc; i += nt) {
+            const T lik = F[(long)i * fsz + k] * inv;
+            F[(long)i * fsz + k] = lik;
+            for (int jj = k + 1; jj < nc; ++jj) F[(long)i * fsz + jj] -= lik * F[(long)k * fsz + jj];
+        }
+        __syncthreads();
+    }
+}
+
+template <typename T, int TILE>
+__global__ void factor_large_panels(int lbegin, int lend, const int* __restrict__ plcols,
+                                    const int* __restrict__ front_off,
+                                    const int* __restrict__ front_ptr,
+                                    const int* __restrict__ ncols, T* frontB, long front_total,
+                                    int level_max_nc)
+{
+    const int fi = lbegin + blockIdx.y;
+    if (fi >= lend) return;
+    T* front = frontB + (long)blockIdx.z * front_total;
+    const int p = plcols[fi];
+    const int fsz = front_ptr[p + 1] - front_ptr[p];
+    const int nc = ncols[p];
+    const int uc = fsz - nc;
+    const int g = blockIdx.x * TILE + threadIdx.x;     // uc index this thread owns (row & col)
+    T* F = front + front_off[p];
+    // Stage the factored nc×nc pivot block (L11 unit-lower + U11 upper) into shared.
+    extern __shared__ char smem_panels[];
+    T* P = reinterpret_cast<T*>(smem_panels);          // nc × nc, row-major
+    for (int e = threadIdx.x; e < nc * nc; e += TILE) P[e] = F[(long)(e / nc) * fsz + (e % nc)];
+    __syncthreads();
+    if (g >= uc) return;
+    // L21 row g: forward-subst against U11 (cols), in place. L[k] = (A21[k]-Σ_{j<k}L[j]·U11[j][k])/U11[k][k]
+    T* Lrow = F + (long)(nc + g) * fsz;                // F[(nc+g), 0..nc)
+    for (int k = 0; k < nc; ++k) {
+        T s = Lrow[k];
+        for (int j = 0; j < k; ++j) s -= Lrow[j] * P[(long)j * nc + k];
+        Lrow[k] = s / P[(long)k * nc + k];
+    }
+    // U12 col g: forward-subst against L11 (unit lower), in place. U[k] = A12[k]-Σ_{i<k}L11[k][i]·U[i]
+    for (int k = 0; k < nc; ++k) {
+        T s = F[(long)k * fsz + (nc + g)];
+        for (int i = 0; i < k; ++i) s -= P[(long)k * nc + i] * F[(long)i * fsz + (nc + g)];
+        F[(long)k * fsz + (nc + g)] = s;
+    }
+    (void)level_max_nc;
+}
+
 template <typename T, int TM, int TN>
 __global__ void factor_large_trail(int lbegin, int lend, const int* __restrict__ plcols,
                                    const int* __restrict__ front_off,
@@ -456,12 +532,19 @@ static void dispatch_factor_large(const MultifrontalPlan& plan, State& st, cudaS
     (void)max_fsz; (void)h_plc;
     dim3 grid(e - b, st.batch_count);
 
+    // Blocked-LU large tier (all precisions): pivot(nc×nc, per-front) → L21/U12 panels(multi-block)
+    // → trailing(multi-block). Graph edges order the three launches. Only the tiny pivot block is
+    // per-front; everything else fills the GPU. (uc index space uses level_max_uc, unclamped.)
+    constexpr int PT = 256;  // panel-solve tile width
+    const int p_ntx = (level_max_uc + PT - 1) / PT;
+    const dim3 pgrid(p_ntx > 0 ? p_ntx : 1, e - b, st.batch_count);
     if (precision == Precision::FP64) {
-        // Two-launch multi-block path (kills the grid≈few under-fill on big-front matrices). The
-        // graph edge between the two launches orders kernel-2's L/U reads after kernel-1's writes.
-        factor_large_panel<double><<<grid, 256, 0, stream>>>(   // Phase 1+2: one block per front
+        factor_large_pivot<double><<<grid, 64, 0, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols, st.d_front_batch,
             plan.front_total, st.d_sing, st.static_pivoting, st.pivot_threshold, st.pivot_shift);
+        factor_large_panels<double, PT><<<pgrid, PT, (size_t)level_max_nc * level_max_nc * sizeof(double), stream>>>(
+            b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols, st.d_front_batch,
+            plan.front_total, level_max_nc);
         constexpr int TM = 32, TN = 32;                          // Phase 3: TM×TN trailing tiles
         // grid.x must cover the LARGEST front's uc² (level_max_uc is unclamped; max_uc is clamped to
         // the TF32 tile cap and would silently drop tiles beyond it → wrong result).
@@ -480,9 +563,12 @@ static void dispatch_factor_large(const MultifrontalPlan& plan, State& st, cudaS
     // shared-budget faults on big fronts (FP32 fit the full 2·nc·uc staging only by the luck of
     // 4-byte elements; TF32 staged the per-front uc into max_uc-clamped shared and crashed).
     (void)max_uc;
-    factor_large_panel<float><<<grid, 256, 0, stream>>>(   // Phase 1+2
+    factor_large_pivot<float><<<grid, 64, 0, stream>>>(
         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols, st.d_front_batch_f,
         plan.front_total, st.d_sing, st.static_pivoting, st.pivot_threshold, st.pivot_shift);
+    factor_large_panels<float, PT><<<pgrid, PT, (size_t)level_max_nc * level_max_nc * sizeof(float), stream>>>(
+        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols, st.d_front_batch_f,
+        plan.front_total, level_max_nc);
     constexpr int TM = 32, TN = 32;                        // Phase 3: TM×TN trailing tiles
     const int ntx = (level_max_uc + TM - 1) / TM, nty = (level_max_uc + TN - 1) / TN;
     const dim3 tgrid(ntx * nty > 0 ? ntx * nty : 1, e - b, st.batch_count);
