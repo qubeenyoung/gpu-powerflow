@@ -62,6 +62,17 @@ __global__ void count_permuted_columns(int n, const int* __restrict__ col_ptr,
     shifted_counts[new_col + 1] = col_ptr[old_col + 1] - col_ptr[old_col];
 }
 
+// Per-column size for a row/column permutation: the new column is d_col_iperm[old_col].
+__global__ void count_permuted_columns_rc(int n, const int* __restrict__ col_ptr,
+                                          const int* __restrict__ col_iperm,
+                                          int* __restrict__ shifted_counts)
+{
+    const int old_col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (old_col >= n) return;
+    const int new_col = col_iperm[old_col];
+    shifted_counts[new_col + 1] = col_ptr[old_col + 1] - col_ptr[old_col];
+}
+
 // Copy old column old_col into new column iperm[old_col], remapping row indices through iperm and
 // carrying source_pos along. One block per column.
 __global__ void fill_permuted_csc(int n, const int* __restrict__ in_col_ptr,
@@ -82,6 +93,31 @@ __global__ void fill_permuted_csc(int n, const int* __restrict__ in_col_ptr,
         const int in_pos = in_begin + offset;
         const int out_pos = out_begin + offset;
         out_row_idx[out_pos] = iperm[in_row_idx[in_pos]];
+        out_source_pos[out_pos] = in_source_pos[in_pos];
+    }
+}
+
+// Copy old column old_col into new column col_iperm[old_col], remapping rows through row_iperm.
+// This supports static structural matching where row and column permutations differ.
+__global__ void fill_permuted_csc_rc(int n, const int* __restrict__ in_col_ptr,
+                                     const int* __restrict__ in_row_idx,
+                                     const int* __restrict__ in_source_pos,
+                                     const int* __restrict__ row_iperm,
+                                     const int* __restrict__ col_iperm,
+                                     const int* __restrict__ out_col_ptr,
+                                     int* __restrict__ out_row_idx,
+                                     int* __restrict__ out_source_pos)
+{
+    const int old_col = blockIdx.x;
+    if (old_col >= n) return;
+    const int new_col = col_iperm[old_col];
+    const int in_begin = in_col_ptr[old_col];
+    const int in_end = in_col_ptr[old_col + 1];
+    const int out_begin = out_col_ptr[new_col];
+    for (int offset = threadIdx.x; offset < in_end - in_begin; offset += blockDim.x) {
+        const int in_pos = in_begin + offset;
+        const int out_pos = out_begin + offset;
+        out_row_idx[out_pos] = row_iperm[in_row_idx[in_pos]];
         out_source_pos[out_pos] = in_source_pos[in_pos];
     }
 }
@@ -336,6 +372,48 @@ Status permute_csc_device(const DeviceCscPattern& csc, const int* d_iperm,
     fill_permuted_csc<<<csc.n, 128>>>(csc.n, csc.col_ptr.ptr, csc.row_idx.ptr,
                                       csc.source_pos.ptr, d_iperm, ordered.col_ptr.ptr,
                                       ordered.row_idx.ptr, ordered.source_pos.ptr);
+    return cuda_status(cudaGetLastError());
+}
+
+Status permute_csc_device_rc(const DeviceCscPattern& csc, const int* d_row_iperm,
+                             const int* d_col_iperm, DeviceCscPattern& ordered)
+{
+    if (csc.n <= 0 || csc.nnz < 0 || csc.col_ptr.ptr == nullptr || csc.row_idx.ptr == nullptr ||
+        csc.source_pos.ptr == nullptr || d_row_iperm == nullptr || d_col_iperm == nullptr)
+        return Status::kInvalidValue;
+
+    ordered.col_ptr.reset();
+    ordered.row_idx.reset();
+    ordered.source_pos.reset();
+    ordered.n = csc.n;
+    ordered.nnz = csc.nnz;
+
+    Status st = ordered.col_ptr.allocate(static_cast<std::size_t>(csc.n) + 1);
+    if (st != Status::kSuccess) return st;
+    st = ordered.row_idx.allocate(static_cast<std::size_t>(csc.nnz));
+    if (st != Status::kSuccess) return st;
+    st = ordered.source_pos.allocate(static_cast<std::size_t>(csc.nnz));
+    if (st != Status::kSuccess) return st;
+
+    IntDeviceBuffer counts;
+    st = counts.allocate(static_cast<std::size_t>(csc.n) + 1);
+    if (st != Status::kSuccess) return st;
+    if (cudaMemset(counts.ptr, 0, (static_cast<std::size_t>(csc.n) + 1) * sizeof(int)) !=
+        cudaSuccess)
+        return Status::kAnalysisFailed;
+
+    constexpr int threads = 256;
+    count_permuted_columns_rc<<<(csc.n + threads - 1) / threads, threads>>>(
+        csc.n, csc.col_ptr.ptr, d_col_iperm, counts.ptr);
+    if (cudaGetLastError() != cudaSuccess) return Status::kAnalysisFailed;
+
+    thrust::inclusive_scan(thrust::device, counts.ptr, counts.ptr + csc.n + 1,
+                           ordered.col_ptr.ptr);
+
+    fill_permuted_csc_rc<<<csc.n, 128>>>(csc.n, csc.col_ptr.ptr, csc.row_idx.ptr,
+                                         csc.source_pos.ptr, d_row_iperm, d_col_iperm,
+                                         ordered.col_ptr.ptr, ordered.row_idx.ptr,
+                                         ordered.source_pos.ptr);
     return cuda_status(cudaGetLastError());
 }
 

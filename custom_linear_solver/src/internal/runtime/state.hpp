@@ -21,9 +21,9 @@ namespace custom_linear_solver {
 //
 //   FP64       – everything double. Reference accuracy (~1e-13), slowest factor.
 //   FP32       – the whole front is float. ~1e-4 accurate, ~2x faster than FP64 on RTX 3090.
-//   TF32       – FP32 front + TF32 mma.m16n8k8 trailing GEMM. Mid fronts use the shared-resident
-//                blocked Tensor-Core kernel (factor_mid_blocked); big fronts use the global
-//                factor_big_tf32_ptx. Recommended path on power-grid Jacobians.
+//   TF32       – FP32 front + TF32 mma.m16n8k8 trailing GEMM. Small/big fronts use the shared-resident
+//                blocked / panel-resident Tensor-Core kernels (factor_small / factor_big); large
+//                fronts use the global-resident factor_large. Recommended path on power-grid Jacobians.
 //
 // TF32 requires Ampere (sm80+).
 enum class Precision { FP64, FP32, TF32 };
@@ -48,6 +48,9 @@ struct State {
     int num_rows = 0;
     Precision precision = Precision::FP64;
     bool tier_split = true;  // occupancy-gated per-front tier split in factor/solve dispatch
+    bool static_pivoting = false;
+    double pivot_threshold = 0.0;
+    double pivot_shift = 0.0;
     double* d_front_batch = nullptr;    // batch_count * front_total FP64 front (FP64 mode only)
     float*  d_front_batch_f = nullptr;  // batch_count * front_total FP32 front (FP32 / TF32)
     double* d_y_batch = nullptr;        // batch_count * num_rows FP64 solve vector (FP64 mode)
@@ -107,7 +110,9 @@ struct State {
 // dispatch each on its own CUDA stream. Set false to force single-stream dispatch (debugging /
 // reproducibility); when there is only one subtree the flag has no effect.
 bool setup(const plan::MultifrontalPlan& plan, int B, Precision precision, State& state,
-           bool use_multistream_subtrees = true, bool tier_split = true);
+           bool use_multistream_subtrees = true, bool tier_split = true,
+           bool static_pivoting = false, double pivot_threshold = 0.0,
+           double pivot_shift = 0.0);
 
 // Bind a caller-owned cudaStream_t (passed as void*). External / capturable mode only.
 void set_stream(State& state, void* stream);

@@ -37,6 +37,9 @@ Status build_csc_from_csr_device(int n, int nnz, const int* d_csr_row_ptr,
 Status permute_csc_device(const DeviceCscPattern& csc, const int* d_iperm,
                           DeviceCscPattern& ordered);
 
+Status permute_csc_device_rc(const DeviceCscPattern& csc, const int* d_row_iperm,
+                             const int* d_col_iperm, DeviceCscPattern& ordered);
+
 Status download_csc_structure(const DeviceCscPattern& csc, std::vector<int>& col_ptr,
                               std::vector<int>& row_idx);
 

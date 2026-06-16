@@ -1,10 +1,5 @@
 #include "solver.hpp"
 
-#include <algorithm>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
-#include <limits>
 #include <utility>
 #include <vector>
 
@@ -117,107 +112,22 @@ Status Solver::get_solution(DenseVectorView* solution) const
     return Status::kSuccess;
 }
 
-namespace {
-
-double median_ms(std::vector<double>& v)
-{
-    if (v.empty()) return std::numeric_limits<double>::infinity();
-    std::sort(v.begin(), v.end());
-    const std::size_t n = v.size();
-    return (n & 1u) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
-}
-
-// Time a real single-system factorize for one candidate plan (median of `reps`, after `warmup`
-// untimed iters). Uses a private RAII State so the caller's solver state is untouched; the State
-// frees its device arenas on scope exit. Returns +inf on any setup/factorize failure so the
-// candidate is rejected by the min-search. Mirrors Solver::factorize's value-type dispatch exactly.
-double measure_candidate_factor_ms(const plan::MultifrontalPlan& plan, const int* o2c,
-                                   const CsrMatrixView& matrix, const SolverConfig& cfg,
-                                   int warmup, int reps)
-{
-    const double kFail = std::numeric_limits<double>::infinity();
-    State st;
-    if (!setup(plan, /*B=*/1, cfg.precision, st,
-               cfg.use_multistream_subtrees, cfg.tier_split))
-        return kFail;
-    auto run_once = [&]() -> bool {
-        if (matrix.value_type == ValueType::kFloat64)
-            return factorize(plan, st, static_cast<const double*>(matrix.values), o2c);
-        return factorize(plan, st, static_cast<const float*>(matrix.values), o2c);
-    };
-    for (int w = 0; w < warmup; ++w)
-        if (!run_once()) return kFail;
-    if (cudaDeviceSynchronize() != cudaSuccess) return kFail;
-    std::vector<double> t;
-    t.reserve(static_cast<std::size_t>(reps));
-    for (int r = 0; r < reps; ++r) {
-        const auto t0 = std::chrono::steady_clock::now();
-        if (!run_once()) return kFail;
-        if (cudaDeviceSynchronize() != cudaSuccess) return kFail;
-        t.push_back(std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - t0).count());
-    }
-    return median_ms(t);
-}
-
-}  // namespace
-
 Status Solver::analyze()
 {
     CLS_PROFILE_NVTX("Solver::analyze");
     CLS_PROFILE_CPU("Solver::analyze");
     if (!impl_ || !impl_->has_matrix) return Status::kInvalidState;
+    if (impl_->config.pivot_strategy == PivotStrategy::DynamicPartial)
+        return Status::kInvalidValue;
     plan::PlanBuildOptions opts;
+    opts.use_matching = impl_->config.use_matching ||
+                        impl_->config.matching == MatchingMode::Structural;
     opts.use_parallel_nested_dissection = impl_->config.use_parallel_nested_dissection;
     opts.metis_seed = impl_->config.metis_seed;
     opts.max_panel_width = impl_->config.max_panel_width;
     opts.float_front = is_fp32_front(impl_->config.precision);
     opts.dump_fronts_csv_path = impl_->config.analyze_dump_fronts_path;
     opts.emit_analyze_info = impl_->config.analyze_emit_info;
-
-    // Measured best-of-k ordering selection (CLS_ORDER_MEASURE_K, default off). The B=1 factor time
-    // is set by deep-etree tree *shape*, which the static tail-cube proxy (CLS_ORDER_K) ranks
-    // anti-informatively — it picks a seed up to ~8% SLOWER than the trivial default, and its top
-    // picks are among the worst measured (exp_260612 doc 15). The only reliable selector is to
-    // *time a real factorize* per candidate seed and keep the fastest. Cost = K factorizations at
-    // analyze time, amortized over the Newton loop's many same-pattern factorizations. Measures at
-    // B=1 (the target regime); requires numeric values to be present. Win: 6-13% B=1 on 13K/25K/70K.
-    const char* mks = std::getenv("CLS_ORDER_MEASURE_K");
-    const int measure_k = mks ? std::atoi(mks) : 0;
-    if (measure_k > 1 && impl_->matrix.values != nullptr) {
-        const char* ws = std::getenv("CLS_ORDER_MEASURE_WARMUP");
-        const char* rs = std::getenv("CLS_ORDER_MEASURE_REPS");
-        const int warmup = ws ? std::atoi(ws) : 3;
-        const int reps   = rs ? std::atoi(rs) : 5;
-        plan::PlanBuildResult best;
-        double best_ms = std::numeric_limits<double>::infinity();
-        int best_seed = -1;
-        for (int i = 0; i < measure_k; ++i) {
-            plan::PlanBuildOptions o = opts;
-            o.single_seed_only = true;
-            o.metis_seed = impl_->config.metis_seed + i;
-            plan::PlanBuildResult cand;
-            if (!plan::build_plan_from_csr(impl_->matrix, o, cand)) continue;
-            const double ms = measure_candidate_factor_ms(
-                cand.plan, cand.d_ordered_value_to_csr.ptr, impl_->matrix, impl_->config,
-                warmup, reps);
-            if (impl_->config.analyze_emit_info)
-                std::fprintf(stderr, "[analyze] measure-cand seed=%d factor_ms=%.5f\n",
-                             o.metis_seed, ms);
-            if (ms < best_ms) { best_ms = ms; best_seed = o.metis_seed; best = std::move(cand); }
-        }
-        if (best_seed < 0) return Status::kAnalysisFailed;
-        std::fprintf(stderr, "[analyze] measure-select K=%d -> seed=%d factor_ms=%.5f\n",
-                     measure_k, best_seed, best_ms);
-        impl_->perm                    = std::move(best.perm);
-        impl_->iperm                   = std::move(best.iperm);
-        impl_->d_perm                  = std::move(best.d_perm);
-        impl_->d_iperm                 = std::move(best.d_iperm);
-        impl_->d_ordered_value_to_csr  = std::move(best.d_ordered_value_to_csr);
-        impl_->plan                    = std::move(best.plan);
-        impl_->analyzed = true;
-        return Status::kSuccess;
-    }
 
     plan::PlanBuildResult result;
     if (!plan::build_plan_from_csr(impl_->matrix, opts, result))
@@ -236,9 +146,14 @@ Status Solver::setup(int batch_size)
 {
     if (!impl_ || !impl_->analyzed) return Status::kInvalidState;
     if (batch_size <= 0) return Status::kInvalidValue;
+    const bool static_pivoting =
+        impl_->config.pivot_strategy == PivotStrategy::StaticDiagonalShift &&
+        impl_->config.enable_shift_retry && impl_->config.shift_retry_epsilon > 0.0;
     return custom_linear_solver::setup(impl_->plan, batch_size, impl_->config.precision,
                                        impl_->state, impl_->config.use_multistream_subtrees,
-                                       impl_->config.tier_split)
+                                       impl_->config.tier_split, static_pivoting,
+                                       impl_->config.shift_retry_epsilon,
+                                       impl_->config.shift_retry_epsilon)
                ? Status::kSuccess
                : Status::kAllocationFailed;
 }

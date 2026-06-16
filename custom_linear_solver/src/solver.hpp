@@ -8,6 +8,17 @@
 
 namespace custom_linear_solver {
 
+enum class MatchingMode {
+    None,
+    Structural,
+};
+
+enum class PivotStrategy {
+    None,
+    StaticDiagonalShift,
+    DynamicPartial,
+};
+
 enum class Status {
     kSuccess,
     kInvalidValue,
@@ -19,12 +30,13 @@ enum class Status {
 };
 
 // User-configurable knobs. Set on the SolverConfig passed to Solver(). Tunables not listed
-// here (kernel-tier threshold kSmallFrontMax, the TF32 PTX trailing stack, the
-// cp.async stage-in, the per-front kernel routing) are baked into the build because every
-// measured off-default regressed at least one case.
+// here (the four front-size tier boundaries, the TF32 PTX trailing stack, the cp.async stage-in,
+// the per-front kernel routing) are baked into the build because every measured off-default
+// regressed at least one case.
 struct SolverConfig {
     // ---- Symbolic analysis ----
-    bool use_matching = false;                       // (reserved) row matching pre-permutation
+    bool use_matching = false;                       // compatibility alias for Structural matching
+    MatchingMode matching = MatchingMode::None;      // optional row/column structural matching
     bool use_parallel_nested_dissection = true;      // multi-threaded METIS-ND ordering
     int  metis_seed = 42;                            // METIS ordering seed (diagnostic / A-B)
     int  max_panel_width = 8;                        // max columns amalgamated into one supernode
@@ -32,15 +44,16 @@ struct SolverConfig {
                                                      // optimum by size — 16 for n>=16k, else this
                                                      // value (8) — unless CLS_RESPECT_PANEL_CAP.
     // ---- Numeric factorization ----
-    bool enable_shift_retry = true;                  // (reserved) diagonal-shift fallback on
-                                                     // singular pivot
-    double shift_retry_epsilon = 1.0e-8;             // (reserved) shift magnitude
+    bool enable_shift_retry = true;                  // enables StaticDiagonalShift compatibility path
+    double shift_retry_epsilon = 1.0e-8;             // pivot threshold and replacement magnitude
+    PivotStrategy pivot_strategy = PivotStrategy::StaticDiagonalShift;
     Precision precision = Precision::FP64;           // FP64 / FP32 / TF32 (TF32 PTX mma, recommended)
     // ---- Runtime dispatch ----
-    bool tier_split = true;                          // occupancy-gated per-front tier split in the
-                                                     // factor/solve level dispatch. false = original
-                                                     // whole-level dispatch (small fronts promoted
-                                                     // to the larger tier's kernel).
+    bool tier_split = true;                          // deterministic per-tier dispatch in the
+                                                     // factor/solve level walk (each front -> its
+                                                     // tier's dedicated kernel). false = debug
+                                                     // whole-level dispatch (every front promoted to
+                                                     // the level's largest-tier kernel).
     bool use_multistream_subtrees = true;            // dispatch independent subtrees on
                                                      // separate streams (capped at 8). Set
                                                      // false for single-stream debugging.

@@ -11,13 +11,17 @@ using custom_linear_solver::plan::MultifrontalPlan;
 // Set the per-batch scalar state and allocate the front + solve-vector arenas. Float-front modes
 // (FP32 / TF32) use the f32 arena; FP64 uses the double arena.
 static bool allocate_state(const MultifrontalPlan& plan, int B, Precision precision, State& st,
-                           bool tier_split)
+                           bool tier_split, bool static_pivoting, double pivot_threshold,
+                           double pivot_shift)
 {
     st.batch_count = B;
     st.front_total = plan.front_total;
     st.num_rows = plan.num_rows;
     st.precision = precision;
     st.tier_split = tier_split;
+    st.static_pivoting = static_pivoting;
+    st.pivot_threshold = pivot_threshold;
+    st.pivot_shift = pivot_shift;
     const bool float_front = is_fp32_front(precision);
     const long front_elements = (long)B * plan.front_total;
     if (float_front) {
@@ -74,10 +78,12 @@ static void capture_phase_graphs(const MultifrontalPlan& plan, State& st, cudaSt
 #endif
 
 bool setup(const MultifrontalPlan& plan, int B, Precision precision, State& st,
-           bool use_multistream_subtrees, bool tier_split)
+           bool use_multistream_subtrees, bool tier_split, bool static_pivoting,
+           double pivot_threshold, double pivot_shift)
 {
     if (plan.num_panels == 0 || B <= 0) return false;
-    if (!allocate_state(plan, B, precision, st, tier_split)) return false;
+    if (!allocate_state(plan, B, precision, st, tier_split, static_pivoting,
+                        pivot_threshold, pivot_shift)) return false;
     register_factor_attributes(precision);
 
 #ifdef CLS_INTERNAL_GRAPH

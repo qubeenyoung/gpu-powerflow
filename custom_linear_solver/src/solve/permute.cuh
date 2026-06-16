@@ -72,7 +72,8 @@ __global__ void scatter_sol_inverse(int n, const YT* __restrict__ yB,
 {
     const int orig = blockIdx.x * blockDim.x + threadIdx.x;
     if (orig >= n) return;
-    solB[orig] = static_cast<ST>(yB[iperm[orig]]);
+    const long b = blockIdx.y;
+    solB[b * (long)n + orig] = static_cast<ST>(yB[b * (long)n + iperm[orig]]);
 }
 
 template <typename YT, typename ST>

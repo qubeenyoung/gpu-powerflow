@@ -232,7 +232,7 @@ static void dump_front_distribution(const symbolic::MultifrontalSymbolic& symbol
 // kept, the rest merged into one spillover subtree), then plcols is re-sorted so each level groups
 // panels subtree-major and tier-major within each subtree (spine last).
 static void partition_subtrees(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& symbolic_factor,
-                               std::vector<int>& plcols, int P, int num_plevels, bool emit_info)
+                               std::vector<int>& plcols, int P, int num_plevels, bool fp64, bool emit_info)
 {
     auto level_cnt = [&](int L) { return plan.panel_level_ptr[L + 1] - plan.panel_level_ptr[L]; };
 
@@ -320,7 +320,7 @@ static void partition_subtrees(MultifrontalPlan& plan, const symbolic::Multifron
         constexpr int NT = MultifrontalPlan::kNumTiers;
         auto tier_of = [&](int p) {
             const int fsz = symbolic_factor.front_ptr[p + 1] - symbolic_factor.front_ptr[p];
-            return front_bucket(fsz);
+            return front_bucket(fsz, fp64);
         };
         plan.h_subtree_level_off.assign((long)plan.num_subtrees * num_plevels, 0);
         plan.h_subtree_level_cnt.assign((long)plan.num_subtrees * num_plevels, 0);
@@ -381,12 +381,12 @@ static void partition_subtrees(MultifrontalPlan& plan, const symbolic::Multifron
 // (classify_front_tier) so the single-stream factor walk launches one right-sized kernel per
 // (level, tier) instead of promoting a whole mixed level to its largest front's tier.
 static void build_tier_order(MultifrontalPlan& plan, const symbolic::MultifrontalSymbolic& symbolic_factor,
-                             const std::vector<int>& plcols, int P, int num_plevels)
+                             const std::vector<int>& plcols, int P, int num_plevels, bool fp64)
 {
     constexpr int NT = MultifrontalPlan::kNumTiers;
     auto tier_of = [&](int p) {
         const int fsz = symbolic_factor.front_ptr[p + 1] - symbolic_factor.front_ptr[p];
-        return front_bucket(fsz);
+        return front_bucket(fsz, fp64);
     };
     plan.h_plcols_tier.assign(P, 0);
     plan.h_level_tier_off.assign((long)num_plevels * (NT + 1), 0);
@@ -552,8 +552,9 @@ MultifrontalPlan analyze_multifrontal(int n, int nnz_a, const int* d_Ap, const i
     }
     plan.h_plcols = plcols;
 
-    partition_subtrees(plan, symbolic_factor, plcols, P, num_plevels, emit_info);
-    build_tier_order(plan, symbolic_factor, plcols, P, num_plevels);
+    const bool fp64 = !float_front;
+    partition_subtrees(plan, symbolic_factor, plcols, P, num_plevels, fp64, emit_info);
+    build_tier_order(plan, symbolic_factor, plcols, P, num_plevels, fp64);
     const std::vector<int> asm_local = build_assembly_map(plan, symbolic_factor, P);
     if (!allocate_and_upload_plan(plan, symbolic_factor, panels, front_off, plcols, asm_local, d_Ap, d_Ai,
                                   n, P, total, float_front, emit_info))

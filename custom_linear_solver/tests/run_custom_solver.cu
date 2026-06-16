@@ -57,6 +57,9 @@ struct Options {
     bool no_multistream = false;     // disable subtree multi-stream dispatch
     bool no_tier_split = false;      // disable occupancy-gated per-front tier split
     bool analyze_info = false;       // print analyze-phase front/subtree summary
+    bool matching = false;
+    cls::PivotStrategy pivot_strategy = cls::PivotStrategy::StaticDiagonalShift;
+    double pivot_epsilon = 1.0e-8;
     // Numeric precision. See state.hpp for what each mode does.
     //   fp64 / fp32 / tf32 (V9h PTX, recommended).
     cls::Precision precision = cls::Precision::FP64;
@@ -150,6 +153,9 @@ void usage(const char* argv0)
         << "  --metis-seed N       METIS ordering seed for serial/parallel ND A/Bs\n"
         << "  --no-multistream      disable subtree multi-stream dispatch (single stream)\n"
         << "  --no-tier-split       disable occupancy-gated per-front tier split (whole-level)\n"
+        << "  --matching            enable structural row/column matching before factorization\n"
+        << "  --pivot-strategy MODE none|shift|partial (partial is rejected unless implemented)\n"
+        << "  --pivot-epsilon X     static shift pivot threshold/magnitude\n"
         << "  --analyze-info        print front-size and subtree summary after analyze\n"
         << "  --dump-fronts <path>  write per-front CSV after analyze\n"
         << "  --solution-out <path> write the recovered x as MatrixMarket\n";
@@ -203,6 +209,18 @@ Options parse_args(int argc, char** argv)
             options.no_multistream = true;
         } else if (arg == "--no-tier-split") {
             options.no_tier_split = true;
+        } else if (arg == "--matching") {
+            options.matching = true;
+        } else if (arg == "--pivot-strategy") {
+            if (++i >= argc) throw std::runtime_error("--pivot-strategy requires none|shift|partial");
+            const std::string value = argv[i];
+            if (value == "none") options.pivot_strategy = cls::PivotStrategy::None;
+            else if (value == "shift") options.pivot_strategy = cls::PivotStrategy::StaticDiagonalShift;
+            else if (value == "partial") options.pivot_strategy = cls::PivotStrategy::DynamicPartial;
+            else throw std::runtime_error("--pivot-strategy must be none|shift|partial");
+        } else if (arg == "--pivot-epsilon") {
+            if (++i >= argc) throw std::runtime_error("--pivot-epsilon requires a value");
+            options.pivot_epsilon = std::stod(argv[i]);
         } else if (arg == "--analyze-info") {
             options.analyze_info = true;
         } else if (arg == "--dump-fronts") {
@@ -342,6 +360,11 @@ int main(int argc, char** argv)
         if (options.max_panel_width > 0) solver_config.max_panel_width = options.max_panel_width;
         solver_config.use_multistream_subtrees = !options.no_multistream;
         solver_config.tier_split = !options.no_tier_split;
+        solver_config.matching = options.matching ? cls::MatchingMode::Structural
+                                                  : cls::MatchingMode::None;
+        solver_config.use_matching = options.matching;
+        solver_config.pivot_strategy = options.pivot_strategy;
+        solver_config.shift_retry_epsilon = options.pivot_epsilon;
         solver_config.analyze_emit_info = options.analyze_info;
         if (!options.dump_fronts_path.empty()) {
             solver_config.analyze_dump_fronts_path = options.dump_fronts_path.string();
