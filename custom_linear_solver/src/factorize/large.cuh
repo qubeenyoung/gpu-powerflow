@@ -474,33 +474,23 @@ static void dispatch_factor_large(const MultifrontalPlan& plan, State& st, cudaS
             plan.front_total, do_extend, level_max_nc);
         return;
     }
-    if (precision == Precision::TF32) {
-        constexpr int bigT = 512;
-        const int uc_pad_max = round_up_to_multiple(max_uc, 16);
-        const int nc_pad_max = round_up_to_multiple(std::min(level_max_nc, kTensorCorePivotColumnCap), 8);
-        const size_t sh = (size_t)(2 * uc_pad_max * nc_pad_max + 4 * nc_pad_max) * sizeof(float);  // +4*nc_pad_max: Utf LDB pad
-        factor_large<float, true><<<grid, bigT, sh, stream>>>(
-            b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
-            plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-            plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc,
-            uc_pad_max, nc_pad_max, st.static_pivoting, st.pivot_threshold,
-            st.pivot_shift);
-        return;
-    }
-    // FP32
-    constexpr int bigT = 1024;
-    size_t sh = (size_t)2 * level_max_nc * level_max_uc * sizeof(float);
-    int trail_jt = 0;
-    if (sh > kDynamicSharedMemoryOptInBytes) {
-        trail_jt = (int)(kDynamicSharedMemoryOptInBytes / ((size_t)level_max_nc * sizeof(float)));
-        if (trail_jt < 1) trail_jt = 1;
-        sh = (size_t)level_max_nc * trail_jt * sizeof(float);
-    }
-    factor_large<float, false><<<grid, bigT, sh, stream>>>(
+    // FP32 and TF32: float fronts → the same multi-block scalar-float large-tier path. The TF32 TC
+    // trailing lives in the big tier (fsz≤111, its real payoff); for genuinely large fronts the
+    // multi-block scalar path fills the GPU at full FP32 accuracy. This also fixes the prior
+    // shared-budget faults on big fronts (FP32 fit the full 2·nc·uc staging only by the luck of
+    // 4-byte elements; TF32 staged the per-front uc into max_uc-clamped shared and crashed).
+    (void)max_uc;
+    factor_large_panel<float><<<grid, 256, 0, stream>>>(   // Phase 1+2
+        b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols, st.d_front_batch_f,
+        plan.front_total, st.d_sing, st.static_pivoting, st.pivot_threshold, st.pivot_shift);
+    constexpr int TM = 32, TN = 32;                        // Phase 3: TM×TN trailing tiles
+    const int ntx = (level_max_uc + TM - 1) / TM, nty = (level_max_uc + TN - 1) / TN;
+    const dim3 tgrid(ntx * nty > 0 ? ntx * nty : 1, e - b, st.batch_count);
+    const size_t sh = (size_t)(TM + TN) * level_max_nc * sizeof(float);  // ≤ 24KB (nc≤64)
+    factor_large_trail<float, TM, TN><<<tgrid, 256, sh, stream>>>(
         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
         plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-        plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, trail_jt, 0,
-        st.static_pivoting, st.pivot_threshold, st.pivot_shift);
+        plan.front_total, do_extend, level_max_nc);
 }
 
 }  // namespace
