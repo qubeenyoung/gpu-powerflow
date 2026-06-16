@@ -65,10 +65,17 @@ v2/
 exp/
 !paper/exp/
 !paper/exp/plan.md
-# root exp/: track head-to-head sources+cases, but not built binaries/logs
+# root exp/: track head-to-head sources+cases, but not built binaries/logs/large data
 !/exp/
 /exp/harness/strumpack_bench
 /exp/harness/strumpack_bench_magma
+/exp/harness/cudss_bench
 /exp/harness/*.log
+# SuiteSparse downloads + extracted matrices (re-download from sparse.tamu.edu)
+/exp/cases_ss/
+# symmetric->full expansions (regenerate via exp/sym_to_full.py)
+/exp/cases_ss_full/
+# nsys/ncu profiling artifacts
+/exp/prof/
 
 refactor_docs/

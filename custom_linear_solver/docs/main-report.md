@@ -173,8 +173,13 @@ packing-only, STRUMPACK native 는 fusion-only 다.
 | **tiny** | ≤ 32 | **sub-group packing + full-fusion**(§3.4) | **워프 폭(32)** — packing 은 한 워프 안에서만 성립 |
 | **small** | 33–64 | front 전체를 shared 에 올려 제자리 분해 | **점유 교차점(64)** — whole-front staging 이 `fsz²` 라 넘으면 SM 당 블록 급감 |
 | **big** | 65–shared 한계 | L/U 패널만 shared, 기여블록은 global(배치) / whole-front(B=1) | small 의 `fsz²` 점유 천장을 깨 대역폭 회복(배치 최대 이득) |
-| **large** | 그 이상 | front 는 global 상주, 패널만 staging | **shared 용량 한계**(float 159 / double 111) |
+| **large** | 그 이상 | front 는 global 상주, 패널만 staging (FP64 는 multi-block) | **shared 용량 한계**(float 159 / double 111) |
 
+- **large 티어 일반화 (비-power-flow)**: power-grid 는 large 티어에 거의 안 들어가지만, circuit/2D-FEM 의 큰
+  separator(uc 수백)는 들어간다. 두 가지를 보강했다 — (a) L/U shared staging 이 한도(99KB)를 넘으면 U 를
+  j-타일로만 올리는 bounded fallback, (b) **FP64 large-tier multi-block**: panel(LU+U-solve)과 trailing 을
+  2-커널로 분리해 한 front 의 uc² trailing 을 32×32 타일로 GPU 전체에 분산. parabolic_fem factor 759→65.6ms
+  (11.5×, cuDSS 79.4ms 추월). power-grid 는 large 티어 미사용 → 무영향. 상세: [§07 일반화 리포트](05-reports/07-generalization-suitesparse-2026-06-16.md).
 - **big 티어의 구조적 점유 회복(배치)**: 큰 중간 front 를 통째로 shared 에 올리면 SM 당 블록이 1–2 개로 묶여
   대역폭을 굶는다. *분해에 필요한 L/U 패널만* shared 에 올리고 부피 큰 기여블록은 global 에 남기면 shared
   사용량이 ~3배 작아져 SM 당 블록이 3–4배 늘고 대역폭이 회복된다 — 배치에서 가장 큰 단일 이득.
