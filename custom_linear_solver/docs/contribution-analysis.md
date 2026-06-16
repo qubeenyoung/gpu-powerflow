@@ -4,8 +4,10 @@
 > **한 줄**: **신규성은 *조합·특화*에 있다 (개별 기법은 전부 prior art).** 문헌조사(18 1차 소스, [head-to-head
 > 리포트 §4d](05-reports/06-head-to-head-2026-06-16.md)) 결과: **(A) GPU 멀티프론탈 per-front 커널에 extend-add
 > (조립)까지 융합**한 사례는 survey 범위 내 없음 = 알고리즘적 신규(STRUMPACK·CHOLMOD·LBNL·SABLE 전부 조립
-> 분리). **(B) 전 과정 host-free CUDA-graph 배치**는 부분 신규. 실증: 동일 FP64·동일 GPU·깊이 매칭 후에도
-> STRUMPACK+MAGMA 대비 **factor 16–22×, solve 33–66×**(B=1), cuPF 통합 기준 ~3–4×. 단, 개별 조각
+> 분리). **(B) 전 과정 host-free CUDA-graph 배치**는 부분 신규. **20× 속도의 기전**: packing·fusion은 별개
+> 축인데 MAGMA는 packing-only, STRUMPACK native는 fusion-only(둘 다 occupancy 2%). 우리만 **sub-group에서
+> packing+full-fusion 동시** → occupancy 30–59%로 회복(§5b ncu)이 곧 측정값. 실증: 동일 FP64·동일 GPU·깊이
+> 매칭 후에도 STRUMPACK+MAGMA 대비 **factor 16–22×, solve 33–66×**(B=1), cuPF 통합 ~3–4×. 단, 개별 조각
 > (shared 융합·packing·tiering·cuDSS UBATCH·GPU-resident 개념)은 prior art임을 인정한 위에서의 신규성이다.
 
 선행연구 조사: [`01-orientation/02-related-work-and-novelty.md`](01-orientation/02-related-work-and-novelty.md).
@@ -113,17 +115,22 @@ partitioned-inverse GEMV solve(`deprecated/selinv/`), TC-routable front coarseni
 - **prior art로 항복하는 것** (차별점 아님): shared 단일 커널 factor+update 융합(STRUMPACK native, Ghysels &
   Synk §3.2), 작은 행렬 packing/vbatched(MAGMA), 크기별 tier, 단일-symbolic 배치(cuDSS UBATCH),
   power-flow GPU-resident *개념*(Swirydowicz). "자체 커널"·"단일 symbolic"은 신규성 아님.
-- **알고리즘적 신규 (A)**: per-front 커널에 **extend-add(조립)까지 융합**(atomicAdd로 부모 scatter) — 조사한
-  모든 GPU sparse direct solver(STRUMPACK/CHOLMOD/LBNL/SABLE)는 조립을 분리한다. survey 범위 내 일치 없음.
-- **부분 신규 (B)**: 전 과정 **host-free CUDA-graph 배치**(per-level host launch 제거) — STRUMPACK 논문에
-  "cudaGraph" 0회. GPU-resident·UBATCH 개념은 선행이나 이 결합은 미보고.
-- **실증 우위**: 동일 FP64·동일 GPU, **트리 깊이까지 매칭**한 뒤에도 STRUMPACK+MAGMA 대비 B=1 factor 16–22×,
-  solve 33–66×(깊이는 solve의 한 축임을 §5d로 확인, 그러나 잔차는 융합+graph). cuPF 통합 ~3–4×.
+- **20× 속도의 정체(기전)**: packing과 fusion은 *별개 축*인데 baseline은 각각 하나만 한다 — MAGMA는
+  packing-하되-융합-안-함(op별 vbatched), STRUMPACK native는 융합-하되-packing-안-함(one-front-per-block).
+  둘 다 *다른 이유로* occupancy 2%. 우리는 **sub-group 입도에서 packing+full-fusion 동시** → occupancy
+  30–59%·lane 45–70%(§5b ncu). 이 occupancy 회복(~12–20×)이 곧 측정된 20×다. extend-add/graph 단독으로는 20× 못 만듦.
+- **알고리즘적 신규 (A)**: 그 "packing된 채 full-front 융합" 구조의 핵심 = per-front 커널에 **extend-add(조립)까지
+  융합**(atomicAdd로 부모 scatter) — STRUMPACK/CHOLMOD/LBNL/SABLE 전부 조립 분리. survey 범위 내 일치 없음.
+- **부분 신규 (B)**: 전 과정 **host-free CUDA-graph 배치** — STRUMPACK 논문에 "cudaGraph" 0회. GPU-resident·
+  UBATCH 개념은 선행이나 이 결합은 미보고.
+- **실증 우위**: 동일 FP64·동일 GPU, **트리 깊이까지 매칭**한 뒤에도 STRUMPACK+MAGMA(두 경로 best) 대비 B=1
+  factor 16–22×, solve 33–66×. cuPF 통합 ~3–4×.
 - **정직한 한계**: cuDSS closed-source(내부 융합/graph 미검증), 특허·미공개 미조사 → "전 세계 최초"가 아니라
   "**survey 범위 내 처음인 조합·특화**". cuDSS보다 빠른 건 별도 증명됨(정황은 우리 편, 기전은 미확인).
 
-⇒ **방어 가능한 기여**: *"GPU 멀티프론탈에서 extend-add까지 per-front 융합 + host-free CUDA-graph 배치를,
-tiny-front 전력조류 Jacobian류에 특화"* 라는 **조합·특화 신규성 + 측정된 16–66× 우위와 그 기전**.
+⇒ **방어 가능한 기여**: 속도와 신규성이 같은 구조의 두 얼굴 — *"tiny front를 sub-group에 packing한 채 full-front
+파이프라인(extend-add 포함)을 한 커널에 융합 + host-free CUDA-graph 배치, 전력조류 Jacobian류 특화"*. 이 구조가
+occupancy를 12–20× 회복해 측정된 16–66× 우위를 만들고, 그 구조(특히 extend-add 융합)가 곧 문헌상 미보고 지점이다.
 
 ---
 
