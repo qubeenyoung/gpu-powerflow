@@ -1,17 +1,19 @@
 # `custom_linear_solver` 문서 색인
 
-> **상태**: canonical   **갱신**: 2026-06-10
+> **상태**: canonical   **갱신**: 2026-06-16
 > **한 줄**: tiny-front 전력망 Jacobian 용 배치 GPU multifrontal 솔버 문서의 진입점.
 
 ## 먼저 읽기
 
-1. [`storyline.md`](storyline.md) — 연구 서사(추상화). 문제(전력망 NR 배치 선형계) → 근원 진단
-   (tiny-front) → 기여 5갈래(실행 매핑 / 텐서코어+정확도 / 구조적 점유 회복 / all-float NR / 전체 NR
-   반복 그래프)와 텐서코어 기여의 정직한 분해(+6~9%). 코드·토글 매핑은 optimal-configuration 참조.
-2. [`contribution-analysis.md`](contribution-analysis.md) — 위 서사의 각 주장을 falsifiable 하게
-   공격·판정(claim-based). 외부 솔버 없이 검증되는 기여 vs head-to-head 가 필요한 경쟁력 주장 분리.
+1. [`main-report.md`](main-report.md) — **통합 캐논 리포트**(storyline·contribution-analysis 통합). 문제(근원
+   tiny-front) → 솔버 개요 → 핵심 기여 논리(개별 기법은 prior art → head-to-head 16–66× → packing/fusion 입도
+   배타성 → sub-group 분해로 해소 → occupancy 회복 = 기전 → 문헌 판정) → 4-tier 구현 → 성능 → 정직한 분해·한계.
+2. [`05-reports/06-head-to-head-2026-06-16.md`](05-reports/06-head-to-head-2026-06-16.md) — head-to-head 실험·
+   기전(ncu/nsys)·문헌 판정 상세.
 3. [`optimal-configuration.md`](optimal-configuration.md) — 현재 최적 경로의 빌드/런타임 설정과
    토글↔메소드 매핑표, 검증 수치.
+
+> `storyline.md`·`contribution-analysis.md` 는 `main-report.md` 로 통합됨(리다이렉트 스텁만 유지).
 
 ## 폴더 구조
 
@@ -68,5 +70,5 @@
 ## 정직성 노트
 
 TC(텐서코어) 가속의 헤드라인 수치(1.2~1.3×)는 일부 **baseline cap inflation** 을 포함한다. best-vs-best
-공정 통제 시 정직한 천장은 large-case +6~16%, low-fill net≈0 이다(`storyline.md` §5,
+공정 통제 시 정직한 천장은 large-case +6~16%, low-fill net≈0 이다(`main-report.md` §6,
 `03-optimization-notes/03-tensor-core-investigation.md` §7).
