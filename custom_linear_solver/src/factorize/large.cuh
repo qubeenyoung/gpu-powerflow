@@ -44,6 +44,44 @@ __device__ __forceinline__ void trailing_update_staged(T* F, int fsz, int nc, in
     }
 }
 
+// Bounded-shared trailing for the few oversized separator fronts whose full 2·nc·uc staging would
+// exceed the opt-in shared budget (large uc, e.g. circuit / 2D-FEM root separators). Stages only the
+// strided U panel in column-tiles of width `jt` (shared = nc·jt, independent of uc) and reads the
+// row-contiguous L panel straight from global (cheap, coalesced in k). The common power-grid path
+// keeps trailing_update_staged unchanged — this is selected only when full_sh > budget.
+template <typename T, bool FuseExtend = false>
+__device__ __forceinline__ void trailing_update_staged_tiled(T* F, int fsz, int nc, int uc, int t,
+                                                             int nt, T* sh_U, int jt,
+                                                             T* Fp = nullptr, int pfsz = 0,
+                                                             const int* asm_local = nullptr,
+                                                             int abase = 0)
+{
+    for (int j0 = 0; j0 < uc; j0 += jt) {
+        const int jw = (uc - j0 < jt) ? (uc - j0) : jt;
+        __syncthreads();  // protect sh_U from the previous tile's readers before restaging
+        // (a) Stage U columns [j0, j0+jw) into sh_U (stride jt). U is column-strided in global.
+        for (int e = t; e < nc * jw; e += nt) {
+            const int k = e / jw, jj = e % jw;
+            sh_U[k * jt + jj] = F[(long)k * fsz + (nc + j0 + jj)];
+        }
+        __syncthreads();
+        // (b) Each thread owns one (i, j) output. L[i][k] is read row-contiguous from global.
+        for (int e = t; e < uc * jw; e += nt) {
+            const int i = e / jw, jj = e % jw;
+            T acc = T(0);
+            for (int k = 0; k < nc; ++k) acc += F[(long)(nc + i) * fsz + k] * sh_U[k * jt + jj];
+            const int j = j0 + jj;
+            const long off = (long)(nc + i) * fsz + (nc + j);
+            if constexpr (FuseExtend) {
+                atomicAdd(&Fp[(long)asm_local[abase + i] * pfsz + asm_local[abase + j]],
+                          F[off] - acc);
+            } else {
+                F[off] -= acc;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 //  TF32 PTX K=8       (mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32)
 //
@@ -282,16 +320,27 @@ __global__ void factor_large(int lbegin, int lend, const int* __restrict__ plcol
                                                       Fp, pfsz, asm_local, abase);
         else            trailing_update_tf32_tc<false>(F, fsz, nc, uc, Ltf, Utf, t, nt);
     } else {
-        T* sh_L = reinterpret_cast<T*>(smem_large_unified);
-        T* sh_U = sh_L + (long)level_max_uc * level_max_nc;
+        // uc_pad_max carries the trailing column-tile width: 0 = full 2·nc·uc staging (the common
+        // power-grid path, unchanged); >0 = bounded-shared tiled staging for oversized fronts whose
+        // full staging would exceed the opt-in budget (large uc — circuit / 2D-FEM separators).
+        const int trail_jt = uc_pad_max;
+        (void)nc_pad_max;
         fused = (extend_ok && fsz > kFusedSmallFrontMax);
-        (void)uc_pad_max; (void)nc_pad_max;
         lu_panel_factor<T>(F, fsz, nc, t, nt, sing, static_pivoting,
                            pivot_threshold, pivot_shift);          // Phase 1
         u_panel_solve_fewsync<T>(F, fsz, nc, uc, t, nt);           // Phase 2 (barrier-cut)
-        if (fused) trailing_update_staged<T, true>(F, fsz, nc, uc, t, nt, sh_L, sh_U,   // Phase 3
-                                                   Fp, pfsz, asm_local, abase);
-        else       trailing_update_staged<T>(F, fsz, nc, uc, t, nt, sh_L, sh_U);
+        if (trail_jt > 0) {
+            T* sh_U = reinterpret_cast<T*>(smem_large_unified);    // nc·trail_jt only
+            if (fused) trailing_update_staged_tiled<T, true>(F, fsz, nc, uc, t, nt, sh_U, trail_jt,
+                                                             Fp, pfsz, asm_local, abase);
+            else       trailing_update_staged_tiled<T>(F, fsz, nc, uc, t, nt, sh_U, trail_jt);
+        } else {
+            T* sh_L = reinterpret_cast<T*>(smem_large_unified);
+            T* sh_U = sh_L + (long)level_max_uc * level_max_nc;
+            if (fused) trailing_update_staged<T, true>(F, fsz, nc, uc, t, nt, sh_L, sh_U,  // Phase 3
+                                                       Fp, pfsz, asm_local, abase);
+            else       trailing_update_staged<T>(F, fsz, nc, uc, t, nt, sh_L, sh_U);
+        }
     }
 
     if (fused || !extend_ok) return;
@@ -317,11 +366,18 @@ static void dispatch_factor_large(const MultifrontalPlan& plan, State& st, cudaS
 
     if (precision == Precision::FP64) {
         constexpr int T = 128;  // FP64 register pressure caps the block size
-        const size_t sh = (size_t)2 * level_max_nc * level_max_uc * sizeof(double);
+        size_t sh = (size_t)2 * level_max_nc * level_max_uc * sizeof(double);
+        int trail_jt = 0;  // 0 = full staging (power-grid common path)
+        if (sh > kDynamicSharedMemoryOptInBytes) {
+            // Oversized separator front: tile the trailing so shared = nc·jt ≤ budget (uc-independent).
+            trail_jt = (int)(kDynamicSharedMemoryOptInBytes / ((size_t)level_max_nc * sizeof(double)));
+            if (trail_jt < 1) trail_jt = 1;
+            sh = (size_t)level_max_nc * trail_jt * sizeof(double);
+        }
         factor_large<double, false><<<grid, T, sh, stream>>>(
             b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
             plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch,
-            plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, 0, 0,
+            plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, trail_jt, 0,
             st.static_pivoting, st.pivot_threshold, st.pivot_shift);
         return;
     }
@@ -340,11 +396,17 @@ static void dispatch_factor_large(const MultifrontalPlan& plan, State& st, cudaS
     }
     // FP32
     constexpr int bigT = 1024;
-    const size_t sh = (size_t)2 * level_max_nc * level_max_uc * sizeof(float);
+    size_t sh = (size_t)2 * level_max_nc * level_max_uc * sizeof(float);
+    int trail_jt = 0;
+    if (sh > kDynamicSharedMemoryOptInBytes) {
+        trail_jt = (int)(kDynamicSharedMemoryOptInBytes / ((size_t)level_max_nc * sizeof(float)));
+        if (trail_jt < 1) trail_jt = 1;
+        sh = (size_t)level_max_nc * trail_jt * sizeof(float);
+    }
     factor_large<float, false><<<grid, bigT, sh, stream>>>(
         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
         plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local, st.d_front_batch_f,
-        plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, 0, 0,
+        plan.front_total, st.d_sing, do_extend, level_max_nc, level_max_uc, trail_jt, 0,
         st.static_pivoting, st.pivot_threshold, st.pivot_shift);
 }
 
