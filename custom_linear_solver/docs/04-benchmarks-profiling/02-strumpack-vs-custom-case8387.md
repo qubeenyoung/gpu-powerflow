@@ -167,7 +167,7 @@ multifrontal LU에서 **fsz**(front size) = pivot 컬럼 수(`nc`) + Schur 행 �
 - `../01-orientation/03-lineage-strumpack-not-the-baseline.md` — lineage 정정
 - `01-strumpack-paper-reproduction.md` — STRUMPACK 논문 행렬 재현
 - `03-gemm-fraction-front-distribution.md` — front fsz/nc/uc 분포 상세
-- `../02-design-analysis/04-gemm-fraction-tc-ceiling.md`, `../03-optimization-notes/01-kernel-engineering.md`, `../storyline.md`
+- `../02-design-analysis/04-gemm-fraction-tc-ceiling.md`, `../03-optimization-notes/01-kernel-engineering.md`, `../main-report.md`
 - Claus et al., IJHPCA 2025; Spatula, MICRO 2023 (*"FullChip on V100: peak의 0.004%"*)
 
 원시 데이터: `/tmp/bench/nsys/{strumpack,custom}_nr_8387.nsys-rep`, `/tmp/bench/ncu_{custom,strumpack}_8387.csv`.

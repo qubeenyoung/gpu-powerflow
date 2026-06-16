@@ -279,7 +279,7 @@ selinv OFF가 TC 더 도와준 메커니즘:
 
 | 문서 | 내용 |
 |---|---|
-| [`../storyline.md`](../storyline.md) | 시간순 작업 로그 / 전체 storyline |
+| [`../main-report.md`](../main-report.md) | 시간순 작업 로그 / 전체 storyline |
 | [`02-comprehensive-sweep.md`](02-comprehensive-sweep.md) | 5 cases × 3 modes × 5 batches full sweep (canonical 데이터) |
 | [`03-bench-vs-cudss.md`](03-bench-vs-cudss.md) | cuDSS 대비 벤치마크 (raw B=1 + ubatch mt-auto) |
 | [`04-factorize-progress.md`](04-factorize-progress.md) | factorize 최적화 progress |

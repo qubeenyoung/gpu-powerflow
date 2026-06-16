@@ -7,7 +7,7 @@
 별도 문서 [`02-tf32-trailing-gemm.md`](02-tf32-trailing-gemm.md),
 [`03-tensor-core-investigation.md`](03-tensor-core-investigation.md),
 [`../02-design-analysis/04-gemm-fraction-tc-ceiling.md`](../02-design-analysis/04-gemm-fraction-tc-ceiling.md) 으로 분리되어 있고,
-전체 흐름은 [`../storyline.md`](../storyline.md) 가 묶는다. tier 임계값 근거는
+전체 흐름은 [`../main-report.md`](../main-report.md) 가 묶는다. tier 임계값 근거는
 [`../02-design-analysis/05-tier-thresholds.md`](../02-design-analysis/05-tier-thresholds.md).
 
 대상 HW 는 전부 RTX 3090 (GA102, sm_86), CUDA 12.8. 핵심 워크로드는 동일 sparsity 를 공유하는
@@ -350,7 +350,7 @@ parent 재설계는 거기서 시작해야. `CLS_DISABLE_EXTEND_ADD` upper-bound
 
 ### 관련 문서
 
-- [`../storyline.md`](../storyline.md) — 전체 흐름
+- [`../main-report.md`](../main-report.md) — 전체 흐름
 - [`02-tf32-trailing-gemm.md`](02-tf32-trailing-gemm.md), [`03-tensor-core-investigation.md`](03-tensor-core-investigation.md) — TC novelty 축
 - [`../02-design-analysis/04-gemm-fraction-tc-ceiling.md`](../02-design-analysis/04-gemm-fraction-tc-ceiling.md) — GEMM 비중 / TC ceiling
 - [`../02-design-analysis/05-tier-thresholds.md`](../02-design-analysis/05-tier-thresholds.md) — tier 임계값 근거

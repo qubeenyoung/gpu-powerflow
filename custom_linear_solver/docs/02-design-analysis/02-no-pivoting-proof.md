@@ -226,4 +226,4 @@ python3 /tmp/bench/no_pivot_proof.py \
 - [`01-why-custom-fast.md`](01-why-custom-fast.md) D4 — no-pivot 가정과 그 결과 (kernel 제거, launch 감소)
 - [`03-multifrontal-vs-strumpack.md`](03-multifrontal-vs-strumpack.md) §5 — STRUMPACK `laswp_vbatch_kernel` (row swap) 이 ncu SM 0.1% 로 측정된 결과
 - `docs/01-orientation/03-lineage-strumpack-not-the-baseline.md` L7 — STRUMPACK 이 partial pivoting 을 maintain 하는 이유와 cost
-- `../storyline.md` — 전체 서사 맥락
+- `../main-report.md` — 전체 서사 맥락

@@ -122,6 +122,6 @@ case30 (n=53), case118 (n=118)은 모든 factor wall이 50 μs 미만. multi-str
 
 - `03-gemm-fraction-front-distribution.md` §5, §10 — tier별 wall + 병목 + 구조
 - `../03-optimization-notes/01-kernel-engineering.md` — subtree streams 도입 history, 비-GEMM 최적화 메타-결론 (barrier stall 절감이 wall로 전환되는 한계와 multi-stream의 우회 관계), packing 회귀
-- `02-strumpack-vs-custom-case8387.md`, `../storyline.md`
+- `02-strumpack-vs-custom-case8387.md`, `../main-report.md`
 
 원본 데이터: `/home/claude/prof/ms_{0,1}_{8387,USA}_B{1,64}.nsys-rep`.

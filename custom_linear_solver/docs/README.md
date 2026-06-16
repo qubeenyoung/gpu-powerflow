@@ -13,8 +13,6 @@
 3. [`optimal-configuration.md`](optimal-configuration.md) — 현재 최적 경로의 빌드/런타임 설정과
    토글↔메소드 매핑표, 검증 수치.
 
-> `storyline.md`·`contribution-analysis.md` 는 `main-report.md` 로 통합됨(리다이렉트 스텁만 유지).
-
 ## 폴더 구조
 
 | 폴더 | 역할 |

@@ -323,7 +323,7 @@ STRUMPACK 은 *general-purpose sparse direct* 로서 이 모든 가정을 깨야
 ## 9. 출처
 
 본 저장소:
-- `../storyline.md` — 전체 서사 맥락
+- `../main-report.md` — 전체 서사 맥락
 - `docs/01-orientation/01-api-and-build-design.md` — 공개 API, 빌드 (D1 graph capture, D5 device API 의 출처)
 - `docs/01-orientation/02-related-work-and-novelty.md` — 외부 솔버 landscape, novelty 자체 평가
 - `docs/01-orientation/03-lineage-strumpack-not-the-baseline.md` — STRUMPACK GPU 의 9가지 한계 매핑

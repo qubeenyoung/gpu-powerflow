@@ -148,7 +148,7 @@ case_SyntheticUSA(N=156K)는 analyze 통과 후 factorize에서 실패 — 본 �
 
 - `../01-orientation/03-lineage-strumpack-not-the-baseline.md` — STRUMPACK ≠ 코드 베이스
 - `02-strumpack-vs-custom-case8387.md` — 같은 multifrontal에서 custom이 26× 빠른 이유의 분해
-- `../storyline.md`
+- `../main-report.md`
 - Claus, Ghysels, Boukaram, Li, IJHPCA 2025. https://journals.sagepub.com/doi/full/10.1177/10943420241288567
 
 원시 데이터: `/tmp/bench/paper_runs.csv`, 로그 `/tmp/bench/logs/{matrix}_{solver}.log`.

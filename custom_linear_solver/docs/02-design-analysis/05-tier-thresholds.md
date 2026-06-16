@@ -223,7 +223,7 @@ SMALL_THRESH 는 HW (warp=32) 에 묶여 **변경 거의 불가**:
 ---
 
 ## 관련 문서
-- `../storyline.md` — 전체 서사 맥락
+- `../main-report.md` — 전체 서사 맥락
 - [`04-gemm-fraction-tc-ceiling.md`](04-gemm-fraction-tc-ceiling.md) — tier별 trailing 비중 + TC ceiling (본 임계 위 분석)
 - [`01-why-custom-fast.md`](01-why-custom-fast.md) D2 — 3-tier 커널 라우팅 (본 임계의 상위 맥락)
 - [`../03-optimization-notes/03-tensor-core-investigation.md`](../03-optimization-notes/03-tensor-core-investigation.md) — WMMA tile 제약 (§2.5) 의 상세

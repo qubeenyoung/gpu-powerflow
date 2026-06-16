@@ -267,6 +267,6 @@ block 1024t. fsz²·4 > 96 KB shared 불가 (USA median fsz=155 → 96 KB) → g
 - `../02-design-analysis/04-gemm-fraction-tc-ceiling.md` — GEMM 분율 이론/실측 격차의 design 분석
 - `../03-optimization-notes/01-kernel-engineering.md` — front 크기별 커널 라우팅 + FP16 negative result
 - `04-multistream-impact.md` — subtree multi-stream tier별 임팩트
-- `02-strumpack-vs-custom-case8387.md`, `../storyline.md`
+- `02-strumpack-vs-custom-case8387.md`, `../main-report.md`
 
 원본: `/home/claude/prof/fronts_{8387,USA}.csv`, `analyze_flops.py`, `front_gemm_hist.py`, `ng_*.nsys-rep`, `skip_*.nsys-rep`, `ncu2_*_clean.csv`, `stall_*_clean.csv`.

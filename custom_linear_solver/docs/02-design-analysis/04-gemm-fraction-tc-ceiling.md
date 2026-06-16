@@ -350,7 +350,7 @@ Sum of kernel μs/sys ≠ wall (multistream concurrency factor).
 ---
 
 ## 관련 문서
-- `../storyline.md` — 전체 서사 맥락
+- `../main-report.md` — 전체 서사 맥락
 - [`05-tier-thresholds.md`](05-tier-thresholds.md) — SMALL_THRESH/MID_THRESH 근거
 - [`../03-optimization-notes/03-tensor-core-investigation.md`](../03-optimization-notes/03-tensor-core-investigation.md) — TC32 negative result + 디자인
 - [`../04-benchmarks-profiling/03-gemm-fraction-front-distribution.md`](../04-benchmarks-profiling/03-gemm-fraction-front-distribution.md) — front 분포 + tier별 wall

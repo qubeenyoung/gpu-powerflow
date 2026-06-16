@@ -307,7 +307,7 @@ STRUMPACK 은 같은 multifrontal 알고리즘이지만 **MAGMA vbatched 일반 
 - `/tmp/bench/ncu_custom_8387.csv` / `ncu_strumpack_8387.csv` — kernel-bound 분류
 
 ### 관련 본 저장소 문서
-- `../storyline.md` — 전체 서사 맥락
+- `../main-report.md` — 전체 서사 맥락
 - [`01-why-custom-fast.md`](01-why-custom-fast.md) — 가속 요인 우선순위 (본 문서 결론과 같은 방향)
 - [`02-no-pivoting-proof.md`](02-no-pivoting-proof.md) — §5 no-pivot 안전성 근거
 - [`04-gemm-fraction-tc-ceiling.md`](04-gemm-fraction-tc-ceiling.md) — FP32 mixed-precision 변형

@@ -3,7 +3,7 @@
 > **상태**: canonical   **갱신**: 2026-06-13
 > **한 줄**: 현재 최적 경로의 빌드/런타임 설정과 남아있는 토글 매핑을 한곳에.
 
-메소드 자체의 설명은 [`storyline.md`](storyline.md), 세부 측정은
+메소드 자체의 설명은 [`main-report.md`](main-report.md), 세부 측정은
 [`03-optimization-notes/`](03-optimization-notes/) 참조.
 
 > **이전 버전과의 차이**: 예전에는 regime별로 실험 플래그를 골라 켜야 했지만, 검증된 레버는 모두
