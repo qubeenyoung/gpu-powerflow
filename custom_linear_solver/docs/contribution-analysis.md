@@ -1,10 +1,12 @@
 # Contribution analysis — custom linear solver
 
-> **상태**: canonical (정직 버전)   **갱신**: 2026-06-16
-> **한 줄**: **현재 확정된 알고리즘적 novelty는 없다.** 개별 GPU 기법은 전부 선행연구(MAGMA·STRUMPACK·cuDSS)
-> 에 있다. 유일하게 방어 가능한 후보 기여는 *경쟁적·실증적* — "전력조류 특화 솔버가 batched tiny-front
-> Jacobian에서 일반/벤더 솔버를 이긴다(예비 ~3–4×)"이며, **그 baseline들의 구체적 한계를 공정 head-to-head로
-> 드러내야만** 성립한다. 이 문서는 그 게이트와 실험 계획을 정의한다.
+> **상태**: canonical (정직 버전)   **갱신**: 2026-06-16 (head-to-head + 문헌조사 후)
+> **한 줄**: **신규성은 *조합·특화*에 있다 (개별 기법은 전부 prior art).** 문헌조사(18 1차 소스, [head-to-head
+> 리포트 §4d](05-reports/06-head-to-head-2026-06-16.md)) 결과: **(A) GPU 멀티프론탈 per-front 커널에 extend-add
+> (조립)까지 융합**한 사례는 survey 범위 내 없음 = 알고리즘적 신규(STRUMPACK·CHOLMOD·LBNL·SABLE 전부 조립
+> 분리). **(B) 전 과정 host-free CUDA-graph 배치**는 부분 신규. 실증: 동일 FP64·동일 GPU·깊이 매칭 후에도
+> STRUMPACK+MAGMA 대비 **factor 16–22×, solve 33–66×**(B=1), cuPF 통합 기준 ~3–4×. 단, 개별 조각
+> (shared 융합·packing·tiering·cuDSS UBATCH·GPU-resident 개념)은 prior art임을 인정한 위에서의 신규성이다.
 
 선행연구 조사: [`01-orientation/02-related-work-and-novelty.md`](01-orientation/02-related-work-and-novelty.md).
 서사: [`storyline.md`](storyline.md).
@@ -104,13 +106,24 @@ partitioned-inverse GEMV solve(`deprecated/selinv/`), TC-routable front coarseni
 
 ---
 
-## 7. 결론 (현재 시점)
+## 7. 결론 (head-to-head + 문헌조사 후)
 
-- **확정 기여 없음.** 개별 기법은 prior art이고, "자체 커널/단일 symbolic"은 신규성이 아니다.
-- **유일한 후보**: batched tiny-front power-flow에서 일반/벤더 솔버 대비 *측정된 우위 + 그 한계의 기전 설명*.
-  예비 3–4×는 고무적이나 **공정 head-to-head(MAGMA/STRUMPACK/cuDSS)가 유일한 게이트**다.
-- 비교에서 우위·기전이 확인되면 → "전력조류 특화가 일반/벤더 솔버의 [측정된 한계]를 [측정된 배율]로 극복"
-  이라는 *경쟁적 기여*. 확인 안 되면 → 기여 없음으로 정직하게 보고.
+게이트(공정 head-to-head + 문헌조사) 통과. 정직하게 정리하면:
+
+- **prior art로 항복하는 것** (차별점 아님): shared 단일 커널 factor+update 융합(STRUMPACK native, Ghysels &
+  Synk §3.2), 작은 행렬 packing/vbatched(MAGMA), 크기별 tier, 단일-symbolic 배치(cuDSS UBATCH),
+  power-flow GPU-resident *개념*(Swirydowicz). "자체 커널"·"단일 symbolic"은 신규성 아님.
+- **알고리즘적 신규 (A)**: per-front 커널에 **extend-add(조립)까지 융합**(atomicAdd로 부모 scatter) — 조사한
+  모든 GPU sparse direct solver(STRUMPACK/CHOLMOD/LBNL/SABLE)는 조립을 분리한다. survey 범위 내 일치 없음.
+- **부분 신규 (B)**: 전 과정 **host-free CUDA-graph 배치**(per-level host launch 제거) — STRUMPACK 논문에
+  "cudaGraph" 0회. GPU-resident·UBATCH 개념은 선행이나 이 결합은 미보고.
+- **실증 우위**: 동일 FP64·동일 GPU, **트리 깊이까지 매칭**한 뒤에도 STRUMPACK+MAGMA 대비 B=1 factor 16–22×,
+  solve 33–66×(깊이는 solve의 한 축임을 §5d로 확인, 그러나 잔차는 융합+graph). cuPF 통합 ~3–4×.
+- **정직한 한계**: cuDSS closed-source(내부 융합/graph 미검증), 특허·미공개 미조사 → "전 세계 최초"가 아니라
+  "**survey 범위 내 처음인 조합·특화**". cuDSS보다 빠른 건 별도 증명됨(정황은 우리 편, 기전은 미확인).
+
+⇒ **방어 가능한 기여**: *"GPU 멀티프론탈에서 extend-add까지 per-front 융합 + host-free CUDA-graph 배치를,
+tiny-front 전력조류 Jacobian류에 특화"* 라는 **조합·특화 신규성 + 측정된 16–66× 우위와 그 기전**.
 
 ---
 
