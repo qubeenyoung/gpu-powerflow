@@ -44,7 +44,7 @@ inline constexpr int kTinyFrontMax = kWarpSize;  // 32
 inline constexpr int kSmallFrontMax = 64;
 
 // Tiny-tier kernel packs this many warps per block.
-inline constexpr int kSmallTierWarpsPerBlock = 8;
+inline constexpr int kTinyTierWarpsPerBlock = 8;
 
 // Upper bound on pivot columns (nc) used to size per-warp shared slabs in the solve kernels.
 inline constexpr int kMaxPivotColumns = 64;

@@ -56,7 +56,7 @@ __device__ __forceinline__ void lu_tiny_warp(FT* F, int fsz, int nc, int sl, uns
 //   3. writeback Fs → global F (factored L | U panel only; the uc×uc CB stays in Fs).
 //   4. extend_add: scatter the CB straight from shared into the parent front via atomicAdd.
 // sub_group_size = sub-group lane count (8 / 16 / 32). One sub-group of sub_group_size lanes owns one (front, batch);
-// fronts_per_warp = 32/sub_group_size sub-groups (fronts) pack per warp, kSmallTierWarpsPerBlock warps per block. sub_group_size=32 is the
+// fronts_per_warp = 32/sub_group_size sub-groups (fronts) pack per warp, kTinyTierWarpsPerBlock warps per block. sub_group_size=32 is the
 // classic one-warp-per-front form. The dispatcher picks sub_group_size from the level's max_fsz so the
 // tiny fronts (fsz ≤ 16) keep all sub_group_size lanes busy and expose fronts_per_warp independent fronts' memory
 // traffic per warp (latency hiding on this memory-latency-bound tier).
@@ -128,7 +128,7 @@ __global__ void factor_tiny(int lbegin, int level_size, int B, int front_area,
 }
 
 // Pick the tiny-tier sub-group size: sub_group_size ∈ {8,16,32}; packing (sub_group_size<32) only applies once the
-// packed grid still fills the GPU (mirrors solve/dispatch.cuh solve_small_sg).
+// packed grid still fills the GPU (mirrors solve/dispatch.cuh solve_tiny_sg).
 static int factor_tiny_sg(int max_fsz, long warps_unpacked)
 {
 #ifdef CLS_SMALL_SG32_ONLY
@@ -184,11 +184,11 @@ static void dispatch_factor_tiny(const MultifrontalPlan& plan, State& st, cudaSt
     constexpr int do_extend = kFactorDoExtend;
     const long warps_unpacked = (long)level_size * B;            // unpacked (one-warp-per-front) count
     const int sub_group_size = factor_tiny_sg(caps.max_fsz, warps_unpacked), fronts_per_warp = kWarpSize / sub_group_size;
-    const int threads_per_block = kSmallTierWarpsPerBlock * kWarpSize;
-    const int num_blocks = (int)(((warps_unpacked + fronts_per_warp - 1) / fronts_per_warp + kSmallTierWarpsPerBlock - 1) / kSmallTierWarpsPerBlock);
+    const int threads_per_block = kTinyTierWarpsPerBlock * kWarpSize;
+    const int num_blocks = (int)(((warps_unpacked + fronts_per_warp - 1) / fronts_per_warp + kTinyTierWarpsPerBlock - 1) / kTinyTierWarpsPerBlock);
     const int front_area = caps.max_fsz * caps.max_fsz;
     const size_t element_bytes = (precision == Precision::FP64) ? sizeof(double) : sizeof(float);
-    const size_t shared_bytes = (size_t)kSmallTierWarpsPerBlock * fronts_per_warp * front_area * element_bytes;
+    const size_t shared_bytes = (size_t)kTinyTierWarpsPerBlock * fronts_per_warp * front_area * element_bytes;
     if (precision == Precision::FP64)
         launch_factor_tiny_t<double>(sub_group_size, num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area,
                                       plan, d_plc, st.d_front_batch, st.d_sing, do_extend,

@@ -14,10 +14,10 @@
 //                                    for the forward sweep, joins, re-forks for the
 //                                    backward sweep, joins again.
 //
-//   per-level routing         — within each pass, levels with max_fsz ≤ kSmallFrontMax go to the
-//                                warp-packed small kernel (8 warps/block, one (front,batch)
-//                                per warp); larger levels go to the block-per-front kernel
-//                                with thread count tuned to the level's max_fsz.
+//   per-tier routing          — within each pass, the tiny tier (max_fsz ≤ kTinyFrontMax) goes to
+//                                the warp-packed kernel (8 warps/block, one (front,batch) per warp);
+//                                the small / big / large tiers share the block-per-front kernel with
+//                                thread count tuned to the level's max_fsz.
 
 #include <cuda_runtime.h>
 
@@ -31,10 +31,10 @@ using custom_linear_solver::plan::MultifrontalPlan;
 
 namespace {
 
-constexpr int kSolveSmallWarpsPerBlock = kSmallTierWarpsPerBlock;
+constexpr int kSolveTinyWarpsPerBlock = kTinyTierWarpsPerBlock;
 
-// HW warp-slot count (SMs × warps/SM) — the GPU-fill quantity used by the small-tier sub-group
-// gate (mirrors factorize/dispatch.cuh factor_warp_fill()).
+// HW warp-slot count (SMs × warps/SM) — the GPU-fill quantity used by the tiny-tier sub-group
+// gate (mirrors factorize/front_ops.cuh factor_warp_fill()).
 static long solve_warp_fill()
 {
     static const long v = [] {
@@ -47,10 +47,10 @@ static long solve_warp_fill()
     return v;
 }
 
-// Small-tier sub-group size: sub_group_size ∈ {8,16,32}. The triangular recurrences require
+// Tiny-tier sub-group size: sub_group_size ∈ {8,16,32}. The triangular recurrences require
 // lanes for pivot columns, not every contribution row, so use max_nc rather than max_fsz when
 // packing multiple fronts into one warp.
-static int solve_small_sg(int max_nc, long warps_unpacked, int B)
+static int solve_tiny_sg(int max_nc, long warps_unpacked, int B)
 {
 #ifdef CLS_SMALL_SG32_ONLY
     (void)max_nc; (void)warps_unpacked; (void)B;
@@ -95,34 +95,34 @@ static int solve_regular_fixed_nc_choice(const MultifrontalPlan& plan, const int
     return choice;
 }
 
-// One launch of a sub-group-packed small solve kernel (forward or backward), with the
-// (front type, sub_group_size) resolved at the call site. solve_fwd_small / solve_bwd_small share a
+// One launch of a sub-group-packed tiny solve kernel (forward or backward), with the
+// (front type, sub_group_size) resolved at the call site. solve_fwd_tiny / solve_bwd_tiny share a
 // signature; `fwd` selects which, `slab` is the per-sub-group shared slab.
 template <typename FrontType, int sub_group_size>
-static inline void launch_solve_small(bool fwd, int num_blocks, int threads_per_block, size_t shared_bytes, cudaStream_t ks,
+static inline void launch_solve_tiny(bool fwd, int num_blocks, int threads_per_block, size_t shared_bytes, cudaStream_t ks,
                                       int b, int level_size, int B, int slab,
                                       const MultifrontalPlan& plan, const int* d_plc,
                                       FrontType* frontB, FrontType* yB)
 {
     if (fwd)
-        solve_fwd_small<FrontType, sub_group_size><<<num_blocks, threads_per_block, shared_bytes, ks>>>(
+        solve_fwd_tiny<FrontType, sub_group_size><<<num_blocks, threads_per_block, shared_bytes, ks>>>(
             b, level_size, B, slab, d_plc, plan.d_front_off, plan.d_front_ptr,
             plan.d_ncols, plan.d_front_rows, frontB, yB, plan.front_total, plan.num_rows);
     else
-        solve_bwd_small<FrontType, sub_group_size><<<num_blocks, threads_per_block, shared_bytes, ks>>>(
+        solve_bwd_tiny<FrontType, sub_group_size><<<num_blocks, threads_per_block, shared_bytes, ks>>>(
             b, level_size, B, slab, d_plc, plan.d_front_off, plan.d_front_ptr,
             plan.d_ncols, plan.d_front_rows, frontB, yB, plan.front_total, plan.num_rows);
 }
 
 template <typename FrontType>
-static inline void launch_solve_small_t(bool fwd, int sub_group_size, int num_blocks, int threads_per_block, size_t shared_bytes,
+static inline void launch_solve_tiny_t(bool fwd, int sub_group_size, int num_blocks, int threads_per_block, size_t shared_bytes,
                                         cudaStream_t ks, int b, int level_size, int B, int slab,
                                         const MultifrontalPlan& plan, const int* d_plc,
                                         FrontType* frontB, FrontType* yB)
 {
-    if (sub_group_size == 8)       launch_solve_small<FrontType, 8>(fwd, num_blocks, threads_per_block, shared_bytes, ks, b, level_size, B, slab, plan, d_plc, frontB, yB);
-    else if (sub_group_size == 16) launch_solve_small<FrontType, 16>(fwd, num_blocks, threads_per_block, shared_bytes, ks, b, level_size, B, slab, plan, d_plc, frontB, yB);
-    else               launch_solve_small<FrontType, 32>(fwd, num_blocks, threads_per_block, shared_bytes, ks, b, level_size, B, slab, plan, d_plc, frontB, yB);
+    if (sub_group_size == 8)       launch_solve_tiny<FrontType, 8>(fwd, num_blocks, threads_per_block, shared_bytes, ks, b, level_size, B, slab, plan, d_plc, frontB, yB);
+    else if (sub_group_size == 16) launch_solve_tiny<FrontType, 16>(fwd, num_blocks, threads_per_block, shared_bytes, ks, b, level_size, B, slab, plan, d_plc, frontB, yB);
+    else               launch_solve_tiny<FrontType, 32>(fwd, num_blocks, threads_per_block, shared_bytes, ks, b, level_size, B, slab, plan, d_plc, frontB, yB);
 }
 
 template <typename FrontType>
@@ -162,18 +162,18 @@ static void fwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
     const FrontRangeCaps metrics = scan_front_range(plan, h_plc, b, e);
     const int max_front_size = metrics.max_fsz;
 
-    // Small tier: sub-group-packed warp kernel (fronts_per_warp = kWarpSize/sub_group_size fronts per warp).
-    if (classify_front_tier(max_front_size) == FrontTier::kSmall) {
+    // Tiny tier: sub-group-packed warp kernel (fronts_per_warp = kWarpSize/sub_group_size fronts per warp).
+    if (classify_front_tier(max_front_size, !float_front) == FrontTier::kTiny) {
         const long warps_unpacked = (long)(e - b) * B;
-        const int sub_group_size = solve_small_sg(metrics.level_max_nc, warps_unpacked, B), fronts_per_warp = kWarpSize / sub_group_size;
-        const int threads_per_block = kSolveSmallWarpsPerBlock * kWarpSize;
-        const int num_blocks = (int)(((warps_unpacked + fronts_per_warp - 1) / fronts_per_warp + kSolveSmallWarpsPerBlock - 1) / kSolveSmallWarpsPerBlock);
-        const size_t shared_bytes = (size_t)kSolveSmallWarpsPerBlock * fronts_per_warp * kMaxPivotColumns * element_bytes;
+        const int sub_group_size = solve_tiny_sg(metrics.level_max_nc, warps_unpacked, B), fronts_per_warp = kWarpSize / sub_group_size;
+        const int threads_per_block = kSolveTinyWarpsPerBlock * kWarpSize;
+        const int num_blocks = (int)(((warps_unpacked + fronts_per_warp - 1) / fronts_per_warp + kSolveTinyWarpsPerBlock - 1) / kSolveTinyWarpsPerBlock);
+        const size_t shared_bytes = (size_t)kSolveTinyWarpsPerBlock * fronts_per_warp * kMaxPivotColumns * element_bytes;
         if (float_front)
-            launch_solve_small_t<float>(/*fwd=*/true, sub_group_size, num_blocks, threads_per_block, shared_bytes, ks, b, e - b, B, kMaxPivotColumns,
+            launch_solve_tiny_t<float>(/*fwd=*/true, sub_group_size, num_blocks, threads_per_block, shared_bytes, ks, b, e - b, B, kMaxPivotColumns,
                                         plan, d_plc, st.d_front_batch_f, st.d_y_batch_f);
         else
-            launch_solve_small_t<double>(/*fwd=*/true, sub_group_size, num_blocks, threads_per_block, shared_bytes, ks, b, e - b, B, kMaxPivotColumns,
+            launch_solve_tiny_t<double>(/*fwd=*/true, sub_group_size, num_blocks, threads_per_block, shared_bytes, ks, b, e - b, B, kMaxPivotColumns,
                                          plan, d_plc, st.d_front_batch, st.d_y_batch);
         return;
     }
@@ -245,19 +245,19 @@ static void bwd_level(const MultifrontalPlan& plan, State& st, cudaStream_t ks, 
     const int max_front_size = metrics.max_fsz;
     const int max_contribution = metrics.level_max_uc;
 
-    // Small tier: sub-group-packed warp kernel. slab = kMaxPivotColumns (rhs) + max_contribution (x cache).
-    if (classify_front_tier(max_front_size) == FrontTier::kSmall) {
+    // Tiny tier: sub-group-packed warp kernel. slab = kMaxPivotColumns (rhs) + max_contribution (x cache).
+    if (classify_front_tier(max_front_size, !float_front) == FrontTier::kTiny) {
         const long warps_unpacked = (long)(e - b) * B;
-        const int sub_group_size = solve_small_sg(metrics.level_max_nc, warps_unpacked, B), fronts_per_warp = kWarpSize / sub_group_size;
-        const int threads_per_block = kSolveSmallWarpsPerBlock * kWarpSize;
-        const int num_blocks = (int)(((warps_unpacked + fronts_per_warp - 1) / fronts_per_warp + kSolveSmallWarpsPerBlock - 1) / kSolveSmallWarpsPerBlock);
+        const int sub_group_size = solve_tiny_sg(metrics.level_max_nc, warps_unpacked, B), fronts_per_warp = kWarpSize / sub_group_size;
+        const int threads_per_block = kSolveTinyWarpsPerBlock * kWarpSize;
+        const int num_blocks = (int)(((warps_unpacked + fronts_per_warp - 1) / fronts_per_warp + kSolveTinyWarpsPerBlock - 1) / kSolveTinyWarpsPerBlock);
         const int slab = kMaxPivotColumns + max_contribution;
-        const size_t shared_bytes = (size_t)kSolveSmallWarpsPerBlock * fronts_per_warp * slab * element_bytes;
+        const size_t shared_bytes = (size_t)kSolveTinyWarpsPerBlock * fronts_per_warp * slab * element_bytes;
         if (float_front)
-            launch_solve_small_t<float>(/*fwd=*/false, sub_group_size, num_blocks, threads_per_block, shared_bytes, ks, b, e - b, B, slab,
+            launch_solve_tiny_t<float>(/*fwd=*/false, sub_group_size, num_blocks, threads_per_block, shared_bytes, ks, b, e - b, B, slab,
                                         plan, d_plc, st.d_front_batch_f, st.d_y_batch_f);
         else
-            launch_solve_small_t<double>(/*fwd=*/false, sub_group_size, num_blocks, threads_per_block, shared_bytes, ks, b, e - b, B, slab,
+            launch_solve_tiny_t<double>(/*fwd=*/false, sub_group_size, num_blocks, threads_per_block, shared_bytes, ks, b, e - b, B, slab,
                                          plan, d_plc, st.d_front_batch, st.d_y_batch);
         return;
     }
@@ -459,20 +459,15 @@ static void solve_spine_chain(const MultifrontalPlan& plan, State& st, cudaStrea
             plan.d_front_rows, st.d_front_batch, st.d_y_batch, plan.front_total, plan.num_rows);
 }
 
-// Occupancy-gated tier split of one (level- or cell-) range, for either sweep. Splits a mixed
-// range into tier-homogeneous sub-launches so small fronts go to the warp-packed solve kernel
-// instead of block-per-front, but only once the small fronts x B fill the GPU's warp slots; below
-// that (B=1 latency regime) block-per-front's extra threads/front win, so keep the range merged.
-// Same range = independent fronts -> order-free.
+// Deterministic per-tier split of one (level- or cell-) range, for either sweep. Each non-empty tier
+// sub-range dispatches to its kernel (tiny -> warp-packed; small/big/large -> block-per-front with
+// thread count by max_fsz), independent of occupancy. Same range = independent fronts -> order-free.
+// (tier_split=false is a debug fallback that merges the whole range onto its largest front's kernel.)
 static void dispatch_tiered(const MultifrontalPlan& plan, State& st, cudaStream_t ks,
                             const int* tb, const int* d_plc, const int* h_plc, bool fwd)
 {
     constexpr int NT = MultifrontalPlan::kNumTiers;
-    constexpr int NS = MultifrontalPlan::kSmallTiers;
-    const int B = st.batch_count;
-    const long small_cnt = tb[NS] - tb[0];
-    const bool mixed = (tb[NT] - tb[0]) > small_cnt;
-    if (st.tier_split && small_cnt > 0 && mixed && small_cnt * (long)B >= solve_warp_fill()) {
+    if (st.tier_split) {
         for (int t = 0; t < NT; ++t)
             if (tb[t + 1] > tb[t]) {
                 if (fwd) fwd_level(plan, st, ks, tb[t], tb[t + 1], d_plc, h_plc);

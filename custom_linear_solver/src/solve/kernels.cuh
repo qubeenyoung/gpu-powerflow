@@ -8,10 +8,10 @@
 //
 //   tier    | block        | front location  | kernels (forward / backward)
 //   --------+--------------+-----------------+------------------------------------
-//   small   | 8 warps      | global (L1)     | solve_fwd_small<T>, solve_bwd_small<T>
+//   tiny    | 8 warps      | global (L1)     | solve_fwd_tiny<T>, solve_bwd_tiny<T>
 //   regular | 64-256 thr   | global          | solve_fwd<T>, solve_bwd<T>
 //
-// The regular kernels are NOT tier-split into mid/big like factor — the solve work per front
+// The regular kernels are NOT tier-split into small/big/large like factor — the solve work per front
 // is much lighter than factor (no rank-nc GEMM; just substitution + CB row update), so a single
 // block-per-front kernel with caller-tuned thread count covers all max_fsz > kTinyFrontMax
 // (i.e. the small / big / large factor tiers all share one solve regular kernel).
@@ -28,19 +28,19 @@ namespace custom_linear_solver {
 namespace {
 
 // =======================================================================================
-//  SMALL tier — one WARP per (front, batch), 8 warps per block
+//  TINY tier — one WARP per (front, batch), 8 warps per block
 // =======================================================================================
 //
 // The bottom etree levels (tens of thousands of tiny fronts) dominate the batched solve the
 // same way they dominate factor. Block-per-front would launch one 32-thread block per
-// (front, batch) → block-launch / scheduling overhead + poor SM packing. solve_fwd_small /
-// solve_bwd_small pack W warps per block (one (front, batch) per warp) and use __syncwarp.
+// (front, batch) → block-launch / scheduling overhead + poor SM packing. solve_fwd_tiny /
+// solve_bwd_tiny pack W warps per block (one (front, batch) per warp) and use __syncwarp.
 
 // sub_group_size = sub-group lane count (8 / 16 / 32). One sub-group of sub_group_size lanes owns one (front, batch);
 // fronts_per_warp = 32/sub_group_size fronts pack per warp (same tiny-front-packing idea as factor_tiny). sub_group_size=32 is the
 // classic one-warp-per-front form. The dispatcher picks sub_group_size from the level's max_fsz.
 template <typename T, int sub_group_size>
-__global__ void solve_fwd_small(int lbegin, int level_size, int B, int slab,
+__global__ void solve_fwd_tiny(int lbegin, int level_size, int B, int slab,
                                 const int* __restrict__ plcols,
                                 const int* __restrict__ front_off,
                                 const int* __restrict__ front_ptr,
@@ -75,7 +75,7 @@ __global__ void solve_fwd_small(int lbegin, int level_size, int B, int slab,
 }
 
 template <typename T, int sub_group_size>
-__global__ void solve_bwd_small(int lbegin, int level_size, int B, int slab,
+__global__ void solve_bwd_tiny(int lbegin, int level_size, int B, int slab,
                                 const int* __restrict__ plcols,
                                 const int* __restrict__ front_off,
                                 const int* __restrict__ front_ptr,
