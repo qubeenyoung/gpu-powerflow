@@ -13,7 +13,8 @@
 //
 // The regular kernels are NOT tier-split into mid/big like factor — the solve work per front
 // is much lighter than factor (no rank-nc GEMM; just substitution + CB row update), so a single
-// block-per-front kernel with caller-tuned thread count covers all max_fsz > kSmallFrontMax.
+// block-per-front kernel with caller-tuned thread count covers all max_fsz > kTinyFrontMax
+// (i.e. the small / big / large factor tiers all share one solve regular kernel).
 //
 // Each kernel is a thin orchestrator composing the device building blocks in phases.cuh:
 //   forward:  fwd_substitute  → sync  → fwd_cb_update
@@ -36,7 +37,7 @@ namespace {
 // solve_bwd_small pack W warps per block (one (front, batch) per warp) and use __syncwarp.
 
 // sub_group_size = sub-group lane count (8 / 16 / 32). One sub-group of sub_group_size lanes owns one (front, batch);
-// fronts_per_warp = 32/sub_group_size fronts pack per warp (same tiny-front-packing idea as factor_small). sub_group_size=32 is the
+// fronts_per_warp = 32/sub_group_size fronts pack per warp (same tiny-front-packing idea as factor_tiny). sub_group_size=32 is the
 // classic one-warp-per-front form. The dispatcher picks sub_group_size from the level's max_fsz.
 template <typename T, int sub_group_size>
 __global__ void solve_fwd_small(int lbegin, int level_size, int B, int slab,

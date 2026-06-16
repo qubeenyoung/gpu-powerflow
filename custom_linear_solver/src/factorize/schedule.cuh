@@ -1,12 +1,15 @@
 #pragma once
 
 // FACTORIZE — elimination-tree schedule (entry point). Walks the panel-etree level by level,
-// forking independent subtrees onto their own streams, and dispatches each range to the small /
-// mid / big tier (factorize/{small,mid,big}.cuh). issue_factor_levels is wrapped by factorize/factorize.cu.
+// forking independent subtrees onto their own streams, and dispatches each tier-homogeneous range to
+// its dedicated kernel — tiny / small / big / large (factorize/{tiny,small,big,large}.cuh, one file
+// per tier). Routing is a deterministic function of front size (internal/types.hpp
+// classify_front_tier), not occupancy. issue_factor_levels is wrapped by factorize/factorize.cu.
 
+#include "factorize/tiny.cuh"
 #include "factorize/small.cuh"
-#include "factorize/mid.cuh"
-#include "factorize/big.cuh"
+#include "factorize/big.cuh"     // includes small.cuh — dispatch_factor_big delegates to small at B==1
+#include "factorize/large.cuh"
 
 namespace custom_linear_solver {
 
@@ -15,40 +18,38 @@ using custom_linear_solver::plan::MultifrontalPlan;
 namespace {
 
 // Per-range dispatcher: scan the panels in plcols[b..e), pick the tier from the level's max front
-// size, and dispatch one right-sized kernel. A mid range whose shared layout overflows the
-// per-block budget falls through to the big tier on the same range.
+// size, and dispatch one right-sized kernel. The big tier delegates to the small-tier whole-front
+// kernel at B==1 (see dispatch_factor_big).
 static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
                                      cudaStream_t stream, int b, int e,
                                      const int* d_plc, const int* h_plc)
 {
     if (e <= b) return;
     const FrontRangeCaps caps = scan_front_range(plan, h_plc, b, e);
-    switch (classify_front_tier(caps.max_fsz)) {
-        case FrontTier::kSmall:
-            dispatch_factor_small(plan, st, stream, b, e, d_plc, caps);
-            return;
-        case FrontTier::kLarge:
-            // Large fronts try the shared-resident mid kernel first; the mid/big split is the
-            // per-precision shared-budget fit decided inside dispatch_factor_mid (fsz*fsz*sizeof(elem)
-            // <= the opt-in budget). Fronts that overflow fall through to the global big tier.
-            if (dispatch_factor_mid(plan, st, stream, b, e, d_plc, h_plc, caps)) return;
-            dispatch_factor_big(plan, st, stream, b, e, d_plc, h_plc, caps);
-            return;
+    const bool fp64 = (st.precision == Precision::FP64);
+    // Deterministic tier -> dedicated kernel (boundaries in internal/types.hpp). The range is
+    // tier-homogeneous (analyze grouped it), so classifying by its max front size routes the whole
+    // range to a single kernel — no occupancy/opt-in gate decides which kernel runs.
+    switch (classify_front_tier(caps.max_fsz, fp64)) {
+        case FrontTier::kTiny:  dispatch_factor_tiny(plan, st, stream, b, e, d_plc, caps);        return;
+        case FrontTier::kSmall: dispatch_factor_small(plan, st, stream, b, e, d_plc, h_plc, caps); return;
+        case FrontTier::kBig:   dispatch_factor_big(plan, st, stream, b, e, d_plc, h_plc, caps);   return;
+        case FrontTier::kLarge: dispatch_factor_large(plan, st, stream, b, e, d_plc, h_plc, caps); return;
     }
 }
 
 // Dispatch one (level- or cell-) range described by its (kNumTiers+1) tier boundaries `tb` into
 // d_plc/h_plc. Splits into tier-homogeneous sub-launches when the occupancy gate passes, else
 // dispatches the whole range on the larger kernel (pre-split behaviour). Same range = independent
-// fronts, so the small→mid→big sub-launches are order-free and correct.
+// fronts, so the tiny→small→big→large sub-launches are order-free and correct.
 static void issue_factor_tiered(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
                                 const int* tb, const int* d_plc, const int* h_plc)
 {
     constexpr int NT = MultifrontalPlan::kNumTiers;
-    constexpr int NS = MultifrontalPlan::kSmallTiers;
-    const long small_cnt = tb[NS] - tb[0];
-    const bool mixed = (tb[NT] - tb[0]) > small_cnt;  // a larger-tier front is present
-    if (st.tier_split && small_cnt > 0 && mixed && small_cnt * (long)st.batch_count >= factor_warp_fill()) {
+    if (st.tier_split) {
+        // Deterministic per-tier dispatch: each non-empty tier sub-range -> its dedicated kernel,
+        // independent of occupancy. (tier_split=false is a debug fallback that merges the whole level
+        // onto its largest front's kernel.)
         for (int t = 0; t < NT; ++t)
             if (tb[t + 1] > tb[t])
                 issue_factor_level_range(plan, st, stream, tb[t], tb[t + 1], d_plc, h_plc);

@@ -14,15 +14,36 @@ namespace custom_linear_solver {
 // Warp width on all supported architectures.
 inline constexpr int kWarpSize = 32;
 
-// Small-tier boundary: fronts with front_size <= kSmallFrontMax use the warp-packed small kernel.
-// Everything larger is a block-per-front "large" front whose kernel (shared-resident mid vs global
-// big) is chosen at dispatch time by the shared-memory-fit test below — NOT by a fixed column cap.
-inline constexpr int kSmallFrontMax = 32;
+// ── Front-size tiers ───────────────────────────────────────────────────────────────────────────
+// Each tier routes to ONE dedicated factor/solve kernel. The kernel is a deterministic function of
+// front size (and, for the big|large split, precision) — no occupancy/opt-in gating decides which
+// kernel runs. The three boundaries are derived from physical limits, not tuned constants:
+//
+//   tiny  (fsz <= kTinyFrontMax)                  -> warp-packed sub-group kernel (factor_tiny)
+//   small (fsz <= kSmallFrontMax)                 -> whole-front shared-resident  (factor_small)
+//   big   (fsz <= whole_front_shared_max(prec))   -> panel-resident shared, CB in global (factor_big)
+//   large (larger)                                -> global-resident, panels staged (factor_large)
+//
+// Rationale per boundary:
+//   tiny|small = warp width (32): sub-group packing (8/16/32 lanes per front) only lives inside one
+//                warp; below it, warp-per-front + __syncwarp beats a block-per-front kernel that would
+//                idle most threads and pay a full block barrier on the tens of thousands of leaf fronts.
+//   small|big  = whole-front shared occupancy crossover (64): whole-front staging costs fsz²·elem of
+//                shared, so beyond ~64 the footprint drops occupancy below ~2 blocks/SM and the
+//                panel-resident kernel (only L/U panels in shared, the bulky CB left in global, ~fsz²/3)
+//                recovers bandwidth.
+//   big|large  = whole-front shared capacity (whole_front_shared_max): the largest fsz whose dense
+//                fsz²·elem staging fits the opt-in budget — 159 (float) / 111 (double). Past it the
+//                front cannot be shared-resident at all, so it goes to the global kernel with max
+//                per-front threads. FP64 reaches "large" sooner (sizeof double), by construction.
 
-// How many leading tiers use the warp-packed small kernel (small only).
-inline constexpr int kSmallTierCount = 1;
+// tiny|small boundary = warp width.
+inline constexpr int kTinyFrontMax = kWarpSize;  // 32
 
-// Small-tier kernel packs this many warps per block.
+// small|big boundary = whole-front shared occupancy crossover.
+inline constexpr int kSmallFrontMax = 64;
+
+// Tiny-tier kernel packs this many warps per block.
 inline constexpr int kSmallTierWarpsPerBlock = 8;
 
 // Upper bound on pivot columns (nc) used to size per-warp shared slabs in the solve kernels.
@@ -58,22 +79,21 @@ inline constexpr int kFusedSmallFrontMax = 48;
 #endif
 
 // Opt-in dynamic shared-memory size passed to cudaFuncAttributeMaxDynamicSharedMemorySize for the
-// shared-resident kernels (sm_86 cap). THIS budget — together with the runtime precision — is the
-// mid/big boundary: dispatch_factor_mid keeps a front shared-resident (mid kernel) only while
-// fsz*fsz*sizeof(elem) fits here; otherwise it falls through to the global big kernel.
+// shared-resident kernels (sm_86 cap). This budget — together with the precision — sets the big|large
+// tier boundary below (the largest front whose whole fsz×fsz staging fits here).
 inline constexpr std::size_t kDynamicSharedMemoryOptInBytes = 99 * 1024;
 
-// Largest front (columns) whose dense fsz×fsz FP32 staging fits the budget above — i.e. the mid/big
-// boundary for the float (FP32/TF32) path, DERIVED from the same budget so the analyze-time bucketing
-// and the runtime dispatch agree (no hard-coded 128). FP64 fronts use sizeof(double) and hit the
-// boundary sooner, so a mid-bucketed FP64 front simply falls through to big inside dispatch_factor_mid.
-constexpr int float_shared_front_max()
+// big|large boundary: the largest front (columns) whose dense fsz×fsz staging fits the budget above at
+// the given precision — 159 (float, FP32/TF32) / 111 (double, FP64). DERIVED from the budget so the
+// analyze-time tier bucketing and the runtime dispatch agree, and so FP64 enters "large" sooner.
+constexpr int whole_front_shared_max(bool fp64)
 {
+    const long elem = fp64 ? (long)sizeof(double) : (long)sizeof(float);
     int f = 1;
-    while ((long)(f + 1) * (f + 1) * (long)sizeof(float) <= (long)kDynamicSharedMemoryOptInBytes) ++f;
-    return f;  // 159 for a 99 KiB budget
+    while ((long)(f + 1) * (f + 1) * elem <= (long)kDynamicSharedMemoryOptInBytes) ++f;
+    return f;  // 159 float / 111 double
 }
-inline constexpr int kFloatSharedFrontMax = float_shared_front_max();
+inline constexpr int kFloatSharedFrontMax = whole_front_shared_max(false);  // 159
 
 // Maximum number of CUDA streams used for independent-subtree dispatch.
 inline constexpr int kMaxSubtreeStreams = 8;
@@ -81,36 +101,28 @@ inline constexpr int kMaxSubtreeStreams = 8;
 // Byte alignment of the per-array sub-allocations inside the single device arena.
 inline constexpr int kArenaAlignmentBytes = 256;
 
-// Front-size tier for dispatch routing: small (warp-packed kernel) vs large (block-per-front). The
-// mid-vs-big split among large fronts is decided at dispatch time by the shared-fit test, not here.
-enum class FrontTier { kSmall, kLarge };
+// The four dedicated front-size tiers (see the boundary rationale at the top). One kernel per tier;
+// classification is a pure function of front size and precision.
+enum class FrontTier { kTiny, kSmall, kBig, kLarge };
 
-constexpr FrontTier classify_front_tier(int front_size)
+constexpr FrontTier classify_front_tier(int front_size, bool fp64)
 {
-    return front_size <= kSmallFrontMax ? FrontTier::kSmall : FrontTier::kLarge;
+    if (front_size <= kTinyFrontMax) return FrontTier::kTiny;
+    if (front_size <= kSmallFrontMax) return FrontTier::kSmall;
+    if (front_size <= whole_front_shared_max(fp64)) return FrontTier::kBig;
+    return FrontTier::kLarge;
 }
 
-// Mid sub-tier boundary: the block-per-front range is split at kMidSplitFrontMax so a heterogeneous
-// level dispatches its smaller-front majority with a tighter shared staging budget (Fs scales as
-// fsz_cap², so a tighter cap raises occupancy).
-inline constexpr int kMidSplitFrontMax = 64;
+// Number of dispatch tiers (== number of dedicated kernels). The analyze-time tier-homogeneous
+// dispatch order groups a level's panels into these tiers so each (level, tier) sub-launch hits
+// exactly one kernel.
+inline constexpr int kNumFrontBuckets = 4;
 
-// Front-size buckets for the analyze-time tier ordering and the occupancy-gated dispatch split.
-// Boundaries match the runtime dispatch: small | mid-low (<= kMidSplitFrontMax) | mid-high (fits the
-// float shared budget) | large (overflows -> big). Each bucket's sub-launch carries its own fsz_cap,
-// so anchoring the mid-high boundary at kFloatSharedFrontMax (not an arbitrary 128) keeps FP32/TF32
-// fronts that fit shared on the mid kernel instead of being dragged to big by a larger neighbour.
-inline constexpr int kMidBucketCount = 2;
-inline constexpr int kBigBucketCount = 1;
-inline constexpr int kNumFrontBuckets = kSmallTierCount + kMidBucketCount + kBigBucketCount;
-
-constexpr int front_bucket(int front_size)
+// Tier index (0=tiny, 1=small, 2=big, 3=large) for the analyze-time bucketing. Must match
+// classify_front_tier exactly so a homogeneous bucket routes to a single kernel at dispatch.
+constexpr int front_bucket(int front_size, bool fp64)
 {
-    if (front_size <= kSmallFrontMax) return 0;                  // small
-    const int mid0 = kSmallTierCount;
-    if (front_size <= kMidSplitFrontMax) return mid0;            // mid-low
-    if (front_size <= kFloatSharedFrontMax) return mid0 + 1;     // mid-high (fits float shared)
-    return kSmallTierCount + kMidBucketCount;                    // large (big kernel)
+    return static_cast<int>(classify_front_tier(front_size, fp64));
 }
 
 // Round `value` up to the next multiple of `alignment` (alignment > 0).

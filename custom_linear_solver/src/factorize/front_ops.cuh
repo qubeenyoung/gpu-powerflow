@@ -1,13 +1,14 @@
 #pragma once
 
-// FACTORIZE — shared substrate used by >=2 tiers (factorize/{small,mid,big}.cuh).
+// FACTORIZE — shared substrate used by >=2 tiers (factorize/{tiny,small,big,large}.cuh).
 //
 // Internal — included into the factor/solve driver TUs (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
 // Dense per-front phase primitives (precision-agnostic): panel LU (lu_small_front / lu_panel_factor),
 // U-panel solve, scalar trailing, extend-add, writeback. Each tier kernel sequences these itself.
-// Plus the TF32 mma macros / Ozaki helpers used by the mid (blocked) and big (thin-K) Tensor-Core
-// paths, and the device-property queries (factor_num_sms / factor_warp_fill) used by the launch gates.
+// Plus the TF32 mma macros / Ozaki helpers used by the small (blocked), big (panel), and large
+// (thin-K) Tensor-Core paths, and the device-property queries (factor_num_sms / factor_warp_fill)
+// used by the launch gates.
 
 #include <algorithm>
 #include <cstdio>
@@ -115,12 +116,10 @@ static int factor_num_sms()
 //   roots and runs on the main stream after all subtree streams have signalled completion.
 //   The use_multistream gate also handles the "no spine" case (spine_start_level < 0) by
 //   not enqueueing any spine levels on the main stream.
-// Occupancy gate: warp-packing a small-tier range beats the block-per-front kernel only once the
-// small fronts × B fill the GPU's warp slots. Below that — notably B=1, the latency regime — the
-// block-per-front kernel gives each small front 8× the threads and a mixed range already has enough
-// fronts to occupy the device, so keeping the range merged on the larger kernel wins (unsplit
-// regressed B=1 factor by up to ~80%). The threshold is a pure hardware quantity (SMs × warps/SM
-// via device attrs), so the rule generalizes across matrices and GPUs.
+// GPU warp-slot count (SMs × warps/SM). The tier router is deterministic (front size → kernel), so
+// this no longer gates split-vs-merge; it is used only by factor_tiny_sg to pick the tiny-tier
+// sub-group size (pack 8/16/32 fronts per warp only while the packed grid still fills the device).
+// A pure hardware quantity (device attrs), so it generalizes across matrices and GPUs.
 static long factor_warp_fill()
 {
     static const long v = [] {
@@ -134,7 +133,32 @@ static long factor_warp_fill()
 }
 
 template <typename T>
-__device__ __forceinline__ void lu_small_front(T* F, int fsz, int nc, int t, int nt, int* sing)
+__device__ __forceinline__ T pivot_abs(T x)
+{
+    return x < T(0) ? -x : x;
+}
+
+template <typename T>
+__device__ __forceinline__ T guarded_pivot(T piv, bool static_pivoting,
+                                           double pivot_threshold, double pivot_shift,
+                                           int* sing, bool leader)
+{
+    if (piv == T(0)) {
+        if (leader) *sing = 1;
+        if (!static_pivoting) return T(1);
+    }
+    if (static_pivoting && pivot_abs(piv) <= static_cast<T>(pivot_threshold)) {
+        if (leader) *sing = 1;
+        const T mag = static_cast<T>(pivot_shift);
+        return (piv < T(0)) ? -mag : mag;
+    }
+    return piv;
+}
+
+template <typename T>
+__device__ __forceinline__ void lu_small_front(T* F, int fsz, int nc, int t, int nt,
+                                               int* sing, bool static_pivoting,
+                                               double pivot_threshold, double pivot_shift)
 {
     // For each pivot column k:
     //   1. Read piv = F[k, k]; flag singularity.
@@ -142,8 +166,9 @@ __device__ __forceinline__ void lu_small_front(T* F, int fsz, int nc, int t, int
     //   3. Rank-1 update the entire (fsz−k−1)² block below-right of the pivot.
     //   4. Block barrier between k and k+1.
     for (int k = 0; k < nc; ++k) {
-        T piv = F[(long)k * fsz + k];
-        if (piv == T(0)) { if (t == 0) *sing = 1; piv = T(1); }
+        const long diag = (long)k * fsz + k;
+        T piv = guarded_pivot(F[diag], static_pivoting, pivot_threshold, pivot_shift, sing, t == 0);
+        if (t == 0) F[diag] = piv;
         for (int i = k + 1 + t; i < fsz; i += nt) F[(long)i * fsz + k] /= piv;
         __syncthreads();
         const int m = fsz - k - 1;
@@ -156,7 +181,9 @@ __device__ __forceinline__ void lu_small_front(T* F, int fsz, int nc, int t, int
 }
 
 template <typename T>
-__device__ __forceinline__ void lu_panel_factor(T* F, int fsz, int nc, int t, int nt, int* sing)
+__device__ __forceinline__ void lu_panel_factor(T* F, int fsz, int nc, int t, int nt,
+                                                int* sing, bool static_pivoting,
+                                                double pivot_threshold, double pivot_shift)
 {
     // Row-fused panel LU pays 1 block barrier/pivot (vs the two-phase form's 2). Barrier cost
     // dominates the latency-bound mid kernel (exp_260612), but the row-fused form serializes the
@@ -176,8 +203,9 @@ __device__ __forceinline__ void lu_panel_factor(T* F, int fsz, int nc, int t, in
         // single pass — `lik` is kept in a register and applied across the panel columns
         // jj ∈ (k, nc) without touching shared again. One __syncthreads per k.
         for (int k = 0; k < nc; ++k) {
-            T piv = F[(long)k * fsz + k];
-            if (piv == T(0)) { if (t == 0) *sing = 1; piv = T(1); }
+            const long diag = (long)k * fsz + k;
+            T piv = guarded_pivot(F[diag], static_pivoting, pivot_threshold, pivot_shift, sing, t == 0);
+            if (t == 0) F[diag] = piv;
             const T inv_piv = T(1) / piv;
             for (int i = k + 1 + t; i < fsz; i += nt) {
                 const T lik = F[(long)i * fsz + k] * inv_piv;
@@ -195,8 +223,9 @@ __device__ __forceinline__ void lu_panel_factor(T* F, int fsz, int nc, int t, in
     // avoids the per-thread serial inner panel loop of the row-fused form, which is the
     // hotter cost for wide panels.
     for (int k = 0; k < nc; ++k) {
-        T piv = F[(long)k * fsz + k];
-        if (piv == T(0)) { if (t == 0) *sing = 1; piv = T(1); }
+        const long diag = (long)k * fsz + k;
+        T piv = guarded_pivot(F[diag], static_pivoting, pivot_threshold, pivot_shift, sing, t == 0);
+        if (t == 0) F[diag] = piv;
         const T inv_piv = T(1) / piv;
         // (a) Divide column k below the pivot.
         for (int i = k + 1 + t; i < fsz; i += nt) {
