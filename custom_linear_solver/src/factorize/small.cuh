@@ -5,6 +5,7 @@
 // trailing. Kernel + blocked-TC helpers + dispatch, all here.
 
 #include "factorize/front_ops.cuh"
+#include "factorize/small_ablation.cuh"   // CLS_SMALL_ABLATION=1 → MAGMA/STRUMPACK-style ablation
 
 namespace custom_linear_solver {
 
@@ -296,6 +297,17 @@ static void dispatch_factor_small(const MultifrontalPlan& plan, State& st, cudaS
     }();
     (void)max_uc; (void)level_max_nc; (void)level_max_uc; (void)h_plc;
     dim3 grid(level_size, B);
+
+    // A/B ablation: replace our fused whole-front-shared kernel with the MAGMA/STRUMPACK-style
+    // operation-separated, global-resident path (4 launches). Same result; the gap is factor_small's
+    // contribution. (env CLS_SMALL_ABLATION=1)
+    if (small_ablation_enabled()) {
+        if (precision == Precision::FP64)
+            dispatch_small_ablation<double>(plan, st, stream, b, e, d_plc, st.d_front_batch, do_extend);
+        else
+            dispatch_small_ablation<float>(plan, st, stream, b, e, d_plc, st.d_front_batch_f, do_extend);
+        return;
+    }
 
     const size_t element_bytes = (precision == Precision::FP64) ? sizeof(double) : sizeof(float);
     const size_t shared_bytes = (size_t)fsz_cap * fsz_cap * element_bytes;   // whole front in shared
