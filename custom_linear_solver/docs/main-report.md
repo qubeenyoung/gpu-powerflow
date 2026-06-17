@@ -112,6 +112,12 @@ reorder 1회 + refactor+solve). **트리 깊이까지 매칭**(STRUMPACK `and` o
 같은 정밀도(잔차 STRUMPACK 3e-16, 우리 2e-14), 같은 GPU, 깊이까지 맞췄는데 16–66×. **접근이 동일했다면 이
 격차가 없어야 한다.** 그러므로 격차의 정체를 규명해야 한다. (상세: [§06 리포트](05-reports/06-head-to-head-2026-06-16.md))
 
+> **정정(2026-06-17, [§08 공정튜닝](05-reports/08-fair-strumpack-tuning-2026-06-17.md)):** 이 16–66×는 STRUMPACK을
+> 기본 정렬(metis, 78층 deep-tree)로 돌려 *부풀려진* 수치다. STRUMPACK 권장 `NodeNDP`로 공정 튜닝하면 STRUMPACK이
+> 우리보다 얕고(14층) fill도 적은(1.67×) 동작점에 도달하며, 격차는 **factor ~10–13×, solve ~12–16×로 줄어든다.**
+> ⇒ ordering·amalgamation·깊이·fill은 차별점이 아니다(STRUMPACK도 함, 일부 더 잘함). 남는 ~10×만이 깊이·fill·
+> ordering을 통제한 뒤의 순수 커널 효율이다. 헤드라인은 16–66×가 아니라 **공정 튜닝 후 ~10×**로 읽어야 한다.
+
 ### 3.3 왜 느린가 — packing 과 fusion 의 *입도 배타성*
 
 packing(SM 을 채우는 것)과 full-front fusion(front 파이프라인을 on-chip 에 올려 global 왕복을 없애는 것)은
@@ -250,6 +256,7 @@ GA102 에서 FP64 는 FP32 의 1/64 속도 + 2× 바이트 → FP32 경로가 FP
 ## 8. 문서 색인
 
 - [`05-reports/06-head-to-head-2026-06-16.md`](05-reports/06-head-to-head-2026-06-16.md) — head-to-head 실험·기전·문헌 판정(상세).
+- [`05-reports/08-fair-strumpack-tuning-2026-06-17.md`](05-reports/08-fair-strumpack-tuning-2026-06-17.md) — **공정 정정**: STRUMPACK NodeNDP 튜닝(16–66×→~10×), 우리 NodeNDP 이식의 아키텍처적 무력, panel_width=8 최적화.
 - [`01-orientation/02-related-work-and-novelty.md`](01-orientation/02-related-work-and-novelty.md) — 선행연구 전체.
 - [`01-orientation/01-api-and-build-design.md`](01-orientation/01-api-and-build-design.md) — API·빌드·cuPF 통합.
 - [`optimal-configuration.md`](optimal-configuration.md) — 권장 빌드/실행 설정.

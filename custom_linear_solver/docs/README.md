@@ -65,6 +65,7 @@
 - [`06-cudss-vs-custom-sweep-2026-06-10.md`](05-reports/06-cudss-vs-custom-sweep-2026-06-10.md) — **선형계 단독** cuDSS vs custom **6 케이스 × 배치 5단계 전체 스윕**, analyze/factorize/solve (solve 최적화 반영 재측정).
 - [`06-head-to-head-2026-06-16.md`](05-reports/06-head-to-head-2026-06-16.md) — **STRUMPACK+MAGMA head-to-head**(동일 FP64·깊이 매칭, 16–66×), ncu/nsys 기전, 문헌 신규성 판정.
 - [`07-generalization-suitesparse-2026-06-16.md`](05-reports/07-generalization-suitesparse-2026-06-16.md) — **SuiteSparse 일반화**(circuit·2D/3D-FEM), FP64 large-tier 버그 fix + multi-block 최적화(parabolic cuDSS 추월).
+- [`08-fair-strumpack-tuning-2026-06-17.md`](05-reports/08-fair-strumpack-tuning-2026-06-17.md) — **공정 정정**: STRUMPACK NodeNDP 튜닝(헤드라인 16–66×→~10×), 우리 NodeNDP+npes 이식의 아키텍처적 무력(ordering separator tree 미사용), 기본 panel_width=16→8 최적화.
 - [`07-cupf-backend-comparison-2026-06-11.md`](05-reports/07-cupf-backend-comparison-2026-06-11.md) — **cuPF(graph off) 전체 조류계산** 백엔드 비교(**결정적**: Ozaki TF32 + serial-ND seed 1588 + 클럭 고정), **6 case(13K 포함) × B=1/16/64/256**: fp64/mixed 에서 cuDSS vs custom. **결론: custom-mixed 가 배치서 cuDSS 대비 4–6×; tf32(Ozaki) 가 fp32 보다 근소 우위(factorize 1.05–1.2× 가 NR 에선 희석).** 교훈: parallel-ND(기본)는 비결정적이라 fp32↔tf32 비교 무효 → serial-ND 고정 필수.
 
 ## 정직성 노트

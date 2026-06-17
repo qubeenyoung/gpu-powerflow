@@ -124,13 +124,12 @@ static int compute_effective_panel_width(int n, int max_panel_width, bool float_
 #ifdef CLS_RESPECT_PANEL_CAP
     int effective_panel_width = max_panel_width;
 #else
-    // Confirmed by the deterministic panel-width sweep (TF32 reproduction report §8, serial-ND
-    // seed 1588): small systems favor width 8, large favor width 16. Widths 24/32 only inflate
-    // padded fill and lost on every case, and the earlier 12/20 tiers + the 5K-8K width-18 special
-    // case were superseded (case3012wp at n=5725 confirmed width 8, not 18). The threshold sits
-    // between case8387pegase (n=14908 -> 8) and case_ACTIVSg25k (n=47246 -> 16); the 15K-47K gap is
-    // unmeasured and within ~1.5% either way.
-    int effective_panel_width = (n >= 16000) ? 16 : max_panel_width;
+    // Width 8 is the default for ALL sizes (config max_panel_width=8). The earlier "n>=16000 -> 16"
+    // override was disproven by the fair panel-width sweep (report 05-reports/08-fair-strumpack-
+    // tuning-2026-06-17.md): width 8 beats 16 on every power-flow case (ACTIVSg25k factor 1.41x /
+    // solve 1.19x, SyntheticUSA 1.04x/1.05x, case3120sp 1.05x/1.10x). The old override hard-pinned
+    // large n to 16, leaving that gain on the table. Widths 24/32 still lose (padded-fill inflation).
+    int effective_panel_width = max_panel_width;
 #endif
     (void)float_front;
     if (effective_panel_width < 1) effective_panel_width = 1;

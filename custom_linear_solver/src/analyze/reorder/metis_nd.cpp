@@ -216,6 +216,27 @@ bool run_nd_on_graph(int n, std::vector<idx_t>& xadj, std::vector<idx_t>& adjncy
     options[METIS_OPTION_NUMBERING] = 0;
     options[METIS_OPTION_SEED] = seed;
 
+    // Optional ND ordering hyperparameter (analog of STRUMPACK's nd_param): when CLS_ND_NPES>1,
+    // order with METIS_NodeNDP(npes) instead of METIS_NodeND. NodeND's options[] has no leaf-count
+    // / recursion-stop knob; NodeNDP takes npes (number of subdomains) explicitly, which moves the
+    // tree-depth <-> fill operating point. Serial deterministic path; CLS_ND_NPES_SWAP flips the
+    // perm/iperm output convention (verified by residual).
+    if (const char* s = std::getenv("CLS_ND_NPES")) {
+        const int npes = std::atoi(s);
+        if (npes > 1) {
+            idx_t nv = n, np = npes;
+            std::vector<idx_t> mperm(n), miperm(n), sizes(2 * static_cast<std::size_t>(npes) + 2, 0);
+            const int rc = METIS_NodeNDP(nv, xadj.data(), adjncy.data(), nullptr, np,
+                                         options, mperm.data(), miperm.data(), sizes.data());
+            if (rc == METIS_OK) {
+                const bool swap = std::getenv("CLS_ND_NPES_SWAP") != nullptr;
+                for (int i = 0; i < n; ++i)
+                    perm[i] = static_cast<int>(swap ? miperm[i] : mperm[i]);
+                return true;
+            }
+        }
+    }
+
     if (parallel) {
         const int base_thr = parallel_nd_base_threshold(n);
         std::vector<int> pp;

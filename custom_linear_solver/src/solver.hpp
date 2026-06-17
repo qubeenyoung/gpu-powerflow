@@ -40,9 +40,10 @@ struct SolverConfig {
     bool use_parallel_nested_dissection = true;      // multi-threaded METIS-ND ordering
     int  metis_seed = 42;                            // METIS ordering seed (diagnostic / A-B)
     int  max_panel_width = 8;                        // max columns amalgamated into one supernode
-                                                     // panel (1..64). The analyzer sets the swept
-                                                     // optimum by size — 16 for n>=16k, else this
-                                                     // value (8) — unless CLS_RESPECT_PANEL_CAP.
+                                                     // panel (1..64). Width 8 is the fair-tuned
+                                                     // optimum for all sizes (report §08, 2026-06-17);
+                                                     // analyzer uses this value directly unless
+                                                     // CLS_RESPECT_PANEL_CAP changes clamp behavior.
     // ---- Numeric factorization ----
     bool enable_shift_retry = true;                  // enables StaticDiagonalShift compatibility path
     double shift_retry_epsilon = 1.0e-8;             // pivot threshold and replacement magnitude
