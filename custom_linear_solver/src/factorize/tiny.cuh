@@ -4,6 +4,7 @@
 // sub-groups pack into warps. Kernel + launch + dispatch, all here.
 
 #include "factorize/front_ops.cuh"
+#include "factorize/small_ablation.cuh"   // CLS_TINY_ABLATION=1 → MAGMA/STRUMPACK-style ablation
 
 namespace custom_linear_solver {
 
@@ -182,6 +183,17 @@ static void dispatch_factor_tiny(const MultifrontalPlan& plan, State& st, cudaSt
     const int B = st.batch_count;
     const int level_size = e - b;
     constexpr int do_extend = kFactorDoExtend;
+
+    // A/B ablation: process tiny fronts the MAGMA/STRUMPACK way (one block per front, op-separated,
+    // global) — removes the sub-group packing + fused shared pipeline. (env CLS_TINY_ABLATION=1)
+    if (tiny_ablation_enabled()) {
+        if (precision == Precision::FP64)
+            dispatch_small_ablation<double>(plan, st, stream, b, e, d_plc, st.d_front_batch, do_extend);
+        else
+            dispatch_small_ablation<float>(plan, st, stream, b, e, d_plc, st.d_front_batch_f, do_extend);
+        return;
+    }
+
     const long warps_unpacked = (long)level_size * B;            // unpacked (one-warp-per-front) count
     const int sub_group_size = factor_tiny_sg(caps.max_fsz, warps_unpacked), fronts_per_warp = kWarpSize / sub_group_size;
     const int threads_per_block = kTinyTierWarpsPerBlock * kWarpSize;

@@ -98,6 +98,19 @@ inline bool small_ablation_enabled()
     return on;
 }
 
+// Same prior-art ablation applied to the TINY tier (CLS_TINY_ABLATION=1). The abl_* kernels are
+// front-size agnostic, so routing tiny fronts through them reproduces the MAGMA/STRUMPACK mapping
+// (one block per front, op-separated, global) — i.e. it removes BOTH the sub-group packing and the
+// fused shared-resident pipeline that make factor_tiny fast. The gap is the tiny kernel's effect.
+inline bool tiny_ablation_enabled()
+{
+    static const bool on = [] {
+        const char* s = std::getenv("CLS_TINY_ABLATION");
+        return s && std::atoi(s) != 0;
+    }();
+    return on;
+}
+
 // STRUMPACK-style operation-separated dispatch of the small tier (4 graph-ordered launches).
 template <typename T>
 static void dispatch_small_ablation(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
