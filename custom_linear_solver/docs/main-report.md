@@ -144,9 +144,12 @@ sub-group 안에서 **shared 상주로 융합 실행**된다(on-chip 재사용).
 
 ### 3.5 기전 = occupancy 회복 = 그 20×
 
-ncu 측정: occupancy **2 % → 30–59 %**, lane util **7 % → 45–70 %**. 이 회복(~12–20×)이 곧 §3.2 의 측정 격차다.
-H2D/D2H 전송도(nsys: D2H 0.03 ms), pivot 도(no-pivot 비용은 O(1/f), §06 §5), 트리 깊이도(매칭 후에도 잔차
-존재, §06 §5d) 주원인이 아니다 — **packing+full-fusion 동시 = occupancy 회복**이 드라이버다.
+ncu 측정: occupancy **2 % → 30–59 %**, lane util **7 % → 45–70 %**.
+
+> **레짐 의존(ablation, §06 §5e):** packing이 주역인 건 **배치(B=64)**다 — tiny-tier 자체 6.0×(커널을 STRUMPACK식
+> 으로 ablate한 controlled A/B). **단일 시스템(B=1)에선** packing(1.37×)·amalgamation 얕은 트리(1.46×)·GPU-resident
+> graph(1.39×)가 *동급*이고, STRUMPACK 대비 16×의 절반 이상은 STRUMPACK 구현 오버헤드(alloc churn·CPU solve)다.
+> 즉 "occupancy가 단일 주원인"은 B=64 한정이며, B=1은 세 기여 + baseline 오버헤드의 합으로 봐야 정직하다.
 
 ### 3.6 문헌 판정 (deep-research, 18 1차 소스, 3표 교차검증)
 
