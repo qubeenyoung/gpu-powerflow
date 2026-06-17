@@ -2,13 +2,13 @@
 
 // FACTORIZE — elimination-tree schedule (entry point). Walks the panel-etree level by level,
 // forking independent subtrees onto their own streams, and dispatches each tier-homogeneous range to
-// its dedicated kernel — tiny / small / big / large (factorize/{tiny,small,big,large}.cuh, one file
+// its dedicated kernel — small / mid / big / large (factorize/{small,mid,big,large}.cuh, one file
 // per tier). Routing is a deterministic function of front size (internal/types.hpp
 // classify_front_tier), not occupancy. issue_factor_levels is wrapped by factorize/factorize.cu.
 
-#include "factorize/tiny.cuh"
 #include "factorize/small.cuh"
-#include "factorize/big.cuh"     // includes small.cuh — dispatch_factor_big delegates to small at B==1
+#include "factorize/mid.cuh"
+#include "factorize/big.cuh"     // includes mid.cuh — dispatch_factor_big delegates to mid at B==1
 #include "factorize/large.cuh"
 
 namespace custom_linear_solver {
@@ -18,7 +18,7 @@ using custom_linear_solver::plan::MultifrontalPlan;
 namespace {
 
 // Per-range dispatcher: scan the panels in plcols[b..e), pick the tier from the level's max front
-// size, and dispatch one right-sized kernel. The big tier delegates to the small-tier whole-front
+// size, and dispatch one right-sized kernel. The big tier delegates to the mid-tier whole-front
 // kernel at B==1 (see dispatch_factor_big).
 static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
                                      cudaStream_t stream, int b, int e,
@@ -31,8 +31,8 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
     // tier-homogeneous (analyze grouped it), so classifying by its max front size routes the whole
     // range to a single kernel — no occupancy/opt-in gate decides which kernel runs.
     switch (classify_front_tier(caps.max_fsz, fp64)) {
-        case FrontTier::kTiny:  dispatch_factor_tiny(plan, st, stream, b, e, d_plc, caps);        return;
-        case FrontTier::kSmall: dispatch_factor_small(plan, st, stream, b, e, d_plc, h_plc, caps); return;
+        case FrontTier::kSmall:  dispatch_factor_small(plan, st, stream, b, e, d_plc, caps);        return;
+        case FrontTier::kMid: dispatch_factor_mid(plan, st, stream, b, e, d_plc, h_plc, caps); return;
         case FrontTier::kBig:   dispatch_factor_big(plan, st, stream, b, e, d_plc, h_plc, caps);   return;
         case FrontTier::kLarge: dispatch_factor_large(plan, st, stream, b, e, d_plc, h_plc, caps); return;
     }
@@ -41,7 +41,7 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
 // Dispatch one (level- or cell-) range described by its (kNumTiers+1) tier boundaries `tb` into
 // d_plc/h_plc. Splits into tier-homogeneous sub-launches when the occupancy gate passes, else
 // dispatches the whole range on the larger kernel (pre-split behaviour). Same range = independent
-// fronts, so the tiny→small→big→large sub-launches are order-free and correct.
+// fronts, so the small→mid→big→large sub-launches are order-free and correct.
 static void issue_factor_tiered(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
                                 const int* tb, const int* d_plc, const int* h_plc)
 {

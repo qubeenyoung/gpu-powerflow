@@ -7,7 +7,7 @@
 // whole-front kernel (see dispatch_factor_big).
 
 #include "factorize/front_ops.cuh"
-#include "factorize/small.cuh"   // dispatch_factor_small — B==1 delegation
+#include "factorize/mid.cuh"   // dispatch_factor_mid — B==1 delegation
 
 namespace custom_linear_solver {
 
@@ -19,7 +19,7 @@ namespace {
 //  PANEL-RESIDENT BIG KERNEL   (exp_260612 structural — break the whole-front shared cap)
 // =======================================================================================
 //
-// The baseline SMALL-tier factor_small stages the WHOLE front (fsz²) into shared, so big-tier fronts are
+// The baseline SMALL-tier factor_mid stages the WHOLE front (fsz²) into shared, so big-tier fronts are
 // shared-limited to 1–2 blocks/SM → 8–16% occupancy → the memory-bound kernel only reaches ~35–40%
 // of peak DRAM (ncu). The work is there (waves≫1 at B=64); the mapping starves bandwidth.
 //
@@ -218,7 +218,7 @@ __global__ void factor_big(int lbegin, int lend,
 // bulky contribution block stays in global and the extend-add is fused into the parent. shared shrinks
 // from fsz² to nc(fsz+uc) → ~3–4× more blocks/SM → recovers DRAM bandwidth on the big-tier fronts the
 // whole-front kernel starves (storyline §4-(3) — the largest measured batch lever). The tier
-// (kSmallFrontMax < fsz <= whole_front_shared_max) is exactly the size range where the whole-front
+// (kMidFrontMax < fsz <= whole_front_shared_max) is exactly the size range where the whole-front
 // kernel's shared footprint drops occupancy *under batch*.
 //
 // Batch-regime split (the only non-size condition, and a clean B==1 boundary — not an occupancy-fill
@@ -232,7 +232,7 @@ static void dispatch_factor_big(const MultifrontalPlan& plan, State& st, cudaStr
                                 const FrontRangeCaps& caps)
 {
     if (st.batch_count == 1) {
-        dispatch_factor_small(plan, st, stream, b, e, d_plc, h_plc, caps);
+        dispatch_factor_mid(plan, st, stream, b, e, d_plc, h_plc, caps);
         return;
     }
     const auto& [max_fsz, max_uc, level_max_nc, level_max_uc] = caps;

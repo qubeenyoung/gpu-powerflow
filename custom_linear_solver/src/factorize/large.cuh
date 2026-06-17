@@ -269,7 +269,7 @@ __device__ __forceinline__ void trailing_update_tf32_tc(float* F, int fsz, int n
 // the contribution block straight into the parent front (fused trail+extend, baked in — removes the
 // uncoalesced CB global write+read round-trip; docs note 30/53). UseTC (T = float, TF32) runs the
 // TF32 mma trailing on eligible shapes (nc≤32, uc≤256) and scalar otherwise; FP64/FP32 run the
-// staged-scalar trailing. Large fronts are always fsz>kFusedSmallFrontMax (no lu_small_front fast path), so the kernel
+// staged-scalar trailing. Large fronts are always fsz>kFusedMidFrontMax (no lu_mid_front fast path), so the kernel
 // runs panel LU -> U-solve -> trailing in order and the fused drain is unconditional.
 // Supersedes factor_big_staged<T> and factor_big_tf32_ptx. The L/U staging (2·nc·uc·sizeof(T)) always
 // fits the 96 KB opt-in budget on power-grid Jacobians, so there is no non-staged fallback.
@@ -309,9 +309,9 @@ __global__ void factor_large(int lbegin, int lend, const int* __restrict__ plcol
         float* Ltf = reinterpret_cast<float*>(smem_large_unified);
         float* Utf = Ltf + (long)uc_pad_max * nc_pad_max;
         const bool tc = (nc <= kTensorCorePivotColumnCap && uc <= CLS_TC_UC_CAP);
-        fused = (extend_ok && fsz > kFusedSmallFrontMax && tc);
+        fused = (extend_ok && fsz > kFusedMidFrontMax && tc);
         (void)level_max_nc; (void)level_max_uc;
-        // Big fronts are always fsz>kFusedSmallFrontMax, so no fused Phase 1+3 fast path: panel LU, U-solve, trailing.
+        // Big fronts are always fsz>kFusedMidFrontMax, so no fused Phase 1+3 fast path: panel LU, U-solve, trailing.
         lu_panel_factor<float>(F, fsz, nc, t, nt, sing, static_pivoting,
                                pivot_threshold, pivot_shift);       // Phase 1
         u_panel_solve_fewsync<float>(F, fsz, nc, uc, t, nt);        // Phase 2 (barrier-cut)
@@ -325,7 +325,7 @@ __global__ void factor_large(int lbegin, int lend, const int* __restrict__ plcol
         // full staging would exceed the opt-in budget (large uc — circuit / 2D-FEM separators).
         const int trail_jt = uc_pad_max;
         (void)nc_pad_max;
-        fused = (extend_ok && fsz > kFusedSmallFrontMax);
+        fused = (extend_ok && fsz > kFusedMidFrontMax);
         lu_panel_factor<T>(F, fsz, nc, t, nt, sing, static_pivoting,
                            pivot_threshold, pivot_shift);          // Phase 1
         u_panel_solve_fewsync<T>(F, fsz, nc, uc, t, nt);           // Phase 2 (barrier-cut)
@@ -387,7 +387,7 @@ __global__ void factor_large_panel(int lbegin, int lend, const int* __restrict__
 // bottleneck once the trailing was multi-blocked: it did ~1/20 of the trailing's FLOPs but took
 // more time — under-fill + serial nc-loop, ncu grid 18-32 / occ 17% / SM 5-12%). The L21/U12 panel
 // solves are parallel over the uc rows/cols, so split into:
-//   factor_large_pivot  : factor the nc×nc A11 block only (one block/front, tiny, serial nc).
+//   factor_large_pivot  : factor the nc×nc A11 block only (one block/front, small, serial nc).
 //   factor_large_panels : multi-block over uc — L21 = A21·U11⁻¹ (per row) and U12 = L11⁻¹·A12 (per
 //                         col), forward-substitution against the staged pivot block. Fills the GPU.
 template <typename T>
@@ -482,7 +482,7 @@ __global__ void factor_large_trail(int lbegin, int lend, const int* __restrict__
     const int i0 = ti * TM, j0 = tj * TN;
     T* F = front + front_off[p];
     const int par = panel_parent[p];
-    const bool fused = (par >= 0 && do_extend && fsz > kFusedSmallFrontMax);
+    const bool fused = (par >= 0 && do_extend && fsz > kFusedMidFrontMax);
     T* Fp = (par >= 0) ? (front + front_off[par]) : nullptr;
     const int pfsz = (par >= 0) ? (front_ptr[par + 1] - front_ptr[par]) : 0;
     const int abase = asm_ptr[p];
@@ -533,7 +533,7 @@ static void dispatch_factor_large(const MultifrontalPlan& plan, State& st, cudaS
     dim3 grid(e - b, st.batch_count);
 
     // Blocked-LU large tier (all precisions): pivot(nc×nc, per-front) → L21/U12 panels(multi-block)
-    // → trailing(multi-block). Graph edges order the three launches. Only the tiny pivot block is
+    // → trailing(multi-block). Graph edges order the three launches. Only the small pivot block is
     // per-front; everything else fills the GPU. (uc index space uses level_max_uc, unclamped.)
     constexpr int PT = 256;  // panel-solve tile width
     const int p_ntx = (level_max_uc + PT - 1) / PT;

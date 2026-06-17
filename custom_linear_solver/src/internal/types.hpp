@@ -19,16 +19,16 @@ inline constexpr int kWarpSize = 32;
 // front size (and, for the big|large split, precision) — no occupancy/opt-in gating decides which
 // kernel runs. The three boundaries are derived from physical limits, not tuned constants:
 //
-//   tiny  (fsz <= kTinyFrontMax)                  -> warp-packed sub-group kernel (factor_tiny)
-//   small (fsz <= kSmallFrontMax)                 -> whole-front shared-resident  (factor_small)
+//   small  (fsz <= kSmallFrontMax)                  -> warp-packed sub-group kernel (factor_small)
+//   mid   (fsz <= kMidFrontMax)                 -> whole-front shared-resident  (factor_mid)
 //   big   (fsz <= whole_front_shared_max(prec))   -> panel-resident shared, CB in global (factor_big)
 //   large (larger)                                -> global-resident, panels staged (factor_large)
 //
 // Rationale per boundary:
-//   tiny|small = warp width (32): sub-group packing (8/16/32 lanes per front) only lives inside one
+//   small|mid = warp width (32): sub-group packing (8/16/32 lanes per front) only lives inside one
 //                warp; below it, warp-per-front + __syncwarp beats a block-per-front kernel that would
 //                idle most threads and pay a full block barrier on the tens of thousands of leaf fronts.
-//   small|big  = whole-front shared occupancy crossover (64): whole-front staging costs fsz²·elem of
+//   mid|big  = whole-front shared occupancy crossover (64): whole-front staging costs fsz²·elem of
 //                shared, so beyond ~64 the footprint drops occupancy below ~2 blocks/SM and the
 //                panel-resident kernel (only L/U panels in shared, the bulky CB left in global, ~fsz²/3)
 //                recovers bandwidth.
@@ -37,14 +37,14 @@ inline constexpr int kWarpSize = 32;
 //                front cannot be shared-resident at all, so it goes to the global kernel with max
 //                per-front threads. FP64 reaches "large" sooner (sizeof double), by construction.
 
-// tiny|small boundary = warp width.
-inline constexpr int kTinyFrontMax = kWarpSize;  // 32
+// small|mid boundary = warp width.
+inline constexpr int kSmallFrontMax = kWarpSize;  // 32
 
-// small|big boundary = whole-front shared occupancy crossover.
-inline constexpr int kSmallFrontMax = 64;
+// mid|big boundary = whole-front shared occupancy crossover.
+inline constexpr int kMidFrontMax = 64;
 
-// Tiny-tier kernel packs this many warps per block.
-inline constexpr int kTinyTierWarpsPerBlock = 8;
+// Small-tier kernel packs this many warps per block.
+inline constexpr int kSmallTierWarpsPerBlock = 8;
 
 // Upper bound on pivot columns (nc) used to size per-warp shared slabs in the solve kernels.
 inline constexpr int kMaxPivotColumns = 64;
@@ -52,10 +52,10 @@ inline constexpr int kMaxPivotColumns = 64;
 // Tensor-core trailing GEMM caps the staged pivot dimension at this many columns.
 inline constexpr int kTensorCorePivotColumnCap = 32;
 
-// Fronts with fsz <= this run the lu_small_front fused (Phase 1+2+3) path inside the mid kernel;
+// Fronts with fsz <= this run the lu_mid_front fused (Phase 1+2+3) path inside the mid kernel;
 // larger fronts run the blocked panel-LU / U-solve / trailing. Big fronts are always > this.
 // (Was a scattered literal 48 in factorize/{mid,big}.cuh — consolidated here.)
-inline constexpr int kFusedSmallFrontMax = 48;
+inline constexpr int kFusedMidFrontMax = 48;
 
 
 // TC-eligibility caps for the TF32 trailing path (mid + big). Relaxed defaults (2026-06-11): nearly
@@ -103,12 +103,12 @@ inline constexpr int kArenaAlignmentBytes = 256;
 
 // The four dedicated front-size tiers (see the boundary rationale at the top). One kernel per tier;
 // classification is a pure function of front size and precision.
-enum class FrontTier { kTiny, kSmall, kBig, kLarge };
+enum class FrontTier { kSmall, kMid, kBig, kLarge };
 
 constexpr FrontTier classify_front_tier(int front_size, bool fp64)
 {
-    if (front_size <= kTinyFrontMax) return FrontTier::kTiny;
     if (front_size <= kSmallFrontMax) return FrontTier::kSmall;
+    if (front_size <= kMidFrontMax) return FrontTier::kMid;
     if (front_size <= whole_front_shared_max(fp64)) return FrontTier::kBig;
     return FrontTier::kLarge;
 }
@@ -118,7 +118,7 @@ constexpr FrontTier classify_front_tier(int front_size, bool fp64)
 // exactly one kernel.
 inline constexpr int kNumFrontBuckets = 4;
 
-// Tier index (0=tiny, 1=small, 2=big, 3=large) for the analyze-time bucketing. Must match
+// Tier index (0=small, 1=mid, 2=big, 3=large) for the analyze-time bucketing. Must match
 // classify_front_tier exactly so a homogeneous bucket routes to a single kernel at dispatch.
 constexpr int front_bucket(int front_size, bool fp64)
 {

@@ -22,7 +22,7 @@ namespace custom_linear_solver {
 //   FP64       – everything double. Reference accuracy (~1e-13), slowest factor.
 //   FP32       – the whole front is float. ~1e-4 accurate, ~2x faster than FP64 on RTX 3090.
 //   TF32       – FP32 front + TF32 mma.m16n8k8 trailing GEMM. Small/big fronts use the shared-resident
-//                blocked / panel-resident Tensor-Core kernels (factor_small / factor_big); large
+//                blocked / panel-resident Tensor-Core kernels (factor_mid / factor_big); large
 //                fronts use the global-resident factor_large. Recommended path on power-grid Jacobians.
 //
 // TF32 requires Ampere (sm80+).

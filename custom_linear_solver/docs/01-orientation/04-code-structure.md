@@ -57,7 +57,7 @@ per-front phase 4개 + stage/writeback/orchestrator. 모두 `__device__ __forcei
 
 | Tier | Kernel | 구성 |
 |------|--------|------|
-| small | `factor_small<T>` | 1 warp = 1 (front, batch). 8 warps/block. per-warp shared. fused LU. |
+| small | `factor_mid<T>` | 1 warp = 1 (front, batch). 8 warps/block. per-warp shared. fused LU. |
 | mid | `factor_mid<T>` | 1 block = 1 (front, batch). 256 thread. 전체 shared stage-in. staged scalar trailing. |
 | mid | `factor_mid_tc` | mid + FP16 WMMA trailing |
 | mid | `factor_mid_tf32` | mid + TF32 WMMA trailing |
@@ -178,7 +178,7 @@ P1 (reciprocal multiply) 만 default kernel `lu_panel_factor` 에 흡수 retaine
 
 ```
 src/factorize/  (정리 전, 11파일)
-├── small.cuh / mid.cuh / big.cuh        → kernels.cuh (mid 의 trailing variants 는 phases.cuh)
+├── mid.cuh / mid.cuh / big.cuh        → kernels.cuh (mid 의 trailing variants 는 phases.cuh)
 ├── mid_warp.cuh / mid_opt.cuh           → deprecated/
 ├── primitives.cuh / stage.cuh / panel_lu.cuh / u_solve.cuh /
 │   trailing.cuh / extend_add.cuh / writeback.cuh / factorize_front.cuh → phases.cuh (전부 device 빌딩 블록)
@@ -200,7 +200,7 @@ src/factorize/  (정리 전, 11파일)
 | `src/factorize/extend_add.cuh` | `src/factorize/phases.cuh` |
 | `src/factorize/writeback.cuh` | `src/factorize/phases.cuh` |
 | `src/factorize/factorize_front.cuh` | `src/factorize/phases.cuh` |
-| `src/factorize/small.cuh` | `src/factorize/kernels.cuh` |
+| `src/factorize/mid.cuh` | `src/factorize/kernels.cuh` |
 | `src/factorize/mid.cuh` | `src/factorize/kernels.cuh` |
 | `src/factorize/big.cuh` | `src/factorize/kernels.cuh` |
 | `src/factorize/mid_warp.cuh` | `deprecated/mid_warp/mid_warp.cuh` |
@@ -212,7 +212,7 @@ src/factorize/  (정리 전, 11파일)
 |---------|---------|
 | `src/solve/primitives.cuh` (`fwd_*`, `bwd_*`, `MF_MAX_NC`) | `src/solve/phases.cuh` |
 | `src/solve/primitives.cuh` (`gather_rhs`, `scatter_sol`) | `src/solve/permute.cuh` |
-| `src/solve/small.cuh` | `src/solve/kernels.cuh` |
+| `src/solve/mid.cuh` | `src/solve/kernels.cuh` |
 | `src/solve/big.cuh` | `src/solve/kernels.cuh` |
 | `src/multifrontal.cu:issue_solve_levels` | `src/solve/dispatch.cuh` |
 

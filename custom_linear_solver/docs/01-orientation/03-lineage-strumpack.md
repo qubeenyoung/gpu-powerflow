@@ -118,7 +118,7 @@ src/
 | L# | 한계 | 출처 |
 |---|---|---|
 | **L1** | Solve가 호스트 메모리 + CPU fallback | Claus et al. IJHPCA 2025 ("STRUMPACK takes host memory ... extra transfers. We plan to develop a fully GPU resident solve phase in the near future.") |
-| **L2** | Tiny-front (fsz<32) 처리 비효율 | Ghysels & Synk 2022, Claus et al. 2025: MAGMA vbatched + 자체 `<32×32` 커널, 벤더 batched는 *"not sufficiently optimized"* for tiny fronts |
+| **L2** | Small-front (fsz<32) 처리 비효율 | Ghysels & Synk 2022, Claus et al. 2025: MAGMA vbatched + 자체 `<32×32` 커널, 벤더 batched는 *"not sufficiently optimized"* for small fronts |
 | **L3** | 회로/전력망 류 그래프에서 V100 peak의 **0.004%** 사용 | Spatula, MICRO 2023 (외부 STRUMPACK profiling) |
 | **L4** | 레벨당 다중 커널 launch (factor → extend 분리) | Ghysels & Synk 2022 |
 | **L5** | 단일 시스템 API — B개의 시스템(같은 symbolic, 다른 값) batched 지원 없음 | Claus et al. 2025 (SuperLU_DIST가 batched 있으나 FP64-only — Boukaram et al. 2024) |
@@ -132,13 +132,13 @@ src/
 | L# | STRUMPACK 한계 | custom_linear_solver의 대응 | 위치 / 측정 효과 |
 |---|---|---|---|
 | **L1** | CPU solve fallback | **End-to-end device-resident API** (`set_data`/`set_rhs`/`set_solution` device 포인터, `solve()`는 device 솔브 그래프 replay) | `docs/01-orientation/01-api-and-build-design.md` "Public API Shape" + `src/solve/multifrontal.cu`. 본 측정 Transport에서 STRUMPACK solve = 0.77 s (CPU 경고) vs cuDSS = 0.09 s |
-| **L2** | Tiny-front 비효율 | **Warp-per-front 전용 커널** (`mf_factor_small_warp_b`): `fsz≤32` 레벨은 1 warp/front, 8 warps/block, 프론트를 per-warp shared로 coalesced 스테이지, `__syncwarp()`만 | `src/batched/factor_small.cuh`. `docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`: dominant bottom level 2.47→1.12 ms, **compute-bound 76%** 달성 |
+| **L2** | Small-front 비효율 | **Warp-per-front 전용 커널** (`mf_factor_mid_warp_b`): `fsz≤32` 레벨은 1 warp/front, 8 warps/block, 프론트를 per-warp shared로 coalesced 스테이지, `__syncwarp()`만 | `src/batched/factor_mid.cuh`. `docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`: dominant bottom level 2.47→1.12 ms, **compute-bound 76%** 달성 |
 | **L3** | 일반 그래프 peak 0.004% | (L2/L8과 함께) front-size 분포 자체에 맞춘 커널 라우팅 — 우리도 latency-bound이지만 그 안에서 가장 빠른 lever 사용 | `docs/01-orientation/02-related-work-and-novelty.md` §2: 95% of fronts are fsz≤16 (only 5% of flops), 75% compute / 33% DRAM (3 bands) |
 | **L4** | 레벨 직렬화 | **Fused factor+extend-add 커널** (`mf_factor_extend_level`): 한 블록이 프론트 factor 후 곧바로 부모 프론트로 extend-add (`atomicAdd`). 부모는 strictly 높은 레벨이라 race-free | `src/factorize/multifrontal.cu`. *"Halves graph nodes, removes one inter-kernel sync per level"* |
 | **L5** | 단일 시스템 API | **Batched 경로** (`src/batched/*.cuh`): 한 번의 analyze로 B개의 시스템 factor/solve. 1 symbolic + B numeric | `src/batched/multifrontal_batched.cu`. NR 전력조류(모든 NR iter가 같은 pattern, 값만 바뀜)에 직격 |
 | **L6** | FP64 중심 | **FP32-native batched 경로** (`BatchPrecision::FP32`): 프론트 자체가 FP32, no FP64 master | 자체 FP64 baseline 대비 **factor+solve −42…−46%** (`docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`) |
 | **L7** | METIS NodeND 스택 한계 | **GPU symmetric graph build** (`matrix::build_symmetric_graph_device`) + `metis_nd_from_graph`: CPU `build_symmetric_adjacency` 직렬 단계 제거. 전력망 야코비안은 N≤200K로 stack 한계 자체 발생 안 함 | `src/reordering/metis_nd.cpp`. `docs/03-optimization-notes/02-factor-solve-analyze-optimization.md`: **analyze −22…−34%** (소/중규모) |
-| **L8** | 일률 블록 크기 | **3-tier 블록 크기**: tiny(fsz≤32) warp-per-front, mid(32<fsz≤159) shared-resident, big(fsz>159) **1024-thread** | `src/tc/factor_tc.cuh` + `docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md` §3. 70k factor 0.87→0.77 ms |
+| **L8** | 일률 블록 크기 | **3-tier 블록 크기**: small(fsz≤32) warp-per-front, mid(32<fsz≤159) shared-resident, big(fsz>159) **1024-thread** | `src/tc/factor_tc.cuh` + `docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md` §3. 70k factor 0.87→0.77 ms |
 | **L9** | CUDA Graph 미사용 | **Factor/solve CUDA Graph capture & replay**: analyze 시점에 한 번 캡처, 매 NR iter에서 replay | `docs/01-orientation/01-api-and-build-design.md` analyze 단계. *"kernel time = factor/solve wall-clock의 ~97%"* — launch overhead < 3% |
 
 ### 3.3 측정으로 확인된 차이
@@ -184,7 +184,7 @@ cuDSS와의 단일 시스템(B=1) 비교 (`docs/03-optimization-notes/05-mysolve
 ## 5. 한 줄 결론
 
 - **베이스라인 관계**: STRUMPACK은 알고리즘 패밀리 동료(멀티프론탈 LU)이자 third-party 벤치마크 비교 대상일 뿐, `external/lin_solver`도 `custom_linear_solver`도 STRUMPACK 코드 베이스가 아니다. API는 cuDSS 모방, 초기 numeric backend는 KLU 위임에서 시작해 자체 GPU 멀티프론탈로 단계 교체된 lineage.
-- **발전 매핑**: STRUMPACK GPU의 알려진 9가지 한계(L1~L9) — 호스트 솔브, tiny-front 비효율, 멀티 커널 launch, FP64 중심, 단일 시스템 API, METIS 스택, 일률 블록 크기, CUDA Graph 미사용 — 에 대한 각각의 대응 커널/구조를 power-grid 야코비안 타깃에 맞춰 구현.
+- **발전 매핑**: STRUMPACK GPU의 알려진 9가지 한계(L1~L9) — 호스트 솔브, small-front 비효율, 멀티 커널 launch, FP64 중심, 단일 시스템 API, METIS 스택, 일률 블록 크기, CUDA Graph 미사용 — 에 대한 각각의 대응 커널/구조를 power-grid 야코비안 타깃에 맞춰 구현.
 
 ---
 

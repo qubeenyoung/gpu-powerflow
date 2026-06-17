@@ -31,7 +31,7 @@ build/custom_linear_solver_run <case> --precision tf32 --batch 64 \
 - **panel width**: 자동 — 분석기가 `n≥16k → 16`, 그 외 `--max-panel-width`(기본 8)를 쓴다(결정적 스윕
   확정값, [`05-reports/05-tf32-reproduction-2026-06-10.md`](05-reports/05-tf32-reproduction-2026-06-10.md) §8).
   사용자 값을 그대로 강제하려면 `-DCLS_RESPECT_PANEL_CAP=ON`.
-- **항상 baked-in**: no-pivot, CUDA graph, METIS-ND, **4-tier 결정적 라우팅**(tiny/small/big/large —
+- **항상 baked-in**: no-pivot, CUDA graph, METIS-ND, **4-tier 결정적 라우팅**(small/small/big/large —
   front 크기·정밀도만으로 전용 커널 결정, 점유 휴리스틱 게이트 없음; 경계는 워프 32 / 점유 64 / shared
   용량 159·111). 단 하나의 비-크기 조건은 **big 티어의 배치 레짐 분기**(shared 전략) — `B=1` 은 whole-front
   (critical-path), `B>1` 은 panel-resident(대역폭). **정밀도는 티어와 직교** — TF32 모드면 small/big/large

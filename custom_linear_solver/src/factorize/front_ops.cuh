@@ -1,10 +1,10 @@
 #pragma once
 
-// FACTORIZE — shared substrate used by >=2 tiers (factorize/{tiny,small,big,large}.cuh).
+// FACTORIZE — shared substrate used by >=2 tiers (factorize/{small,mid,big,large}.cuh).
 //
 // Internal — included into the factor/solve driver TUs (single TU; CUDA_SEPARABLE_COMPILATION OFF).
 //
-// Dense per-front phase primitives (precision-agnostic): panel LU (lu_small_front / lu_panel_factor),
+// Dense per-front phase primitives (precision-agnostic): panel LU (lu_mid_front / lu_panel_factor),
 // U-panel solve, scalar trailing, extend-add, writeback. Each tier kernel sequences these itself.
 // Plus the TF32 mma macros / Ozaki helpers used by the small (blocked), big (panel), and large
 // (thin-K) Tensor-Core paths, and the device-property queries (factor_num_sms / factor_warp_fill)
@@ -117,7 +117,7 @@ static int factor_num_sms()
 //   The use_multistream gate also handles the "no spine" case (spine_start_level < 0) by
 //   not enqueueing any spine levels on the main stream.
 // GPU warp-slot count (SMs × warps/SM). The tier router is deterministic (front size → kernel), so
-// this no longer gates split-vs-merge; it is used only by factor_tiny_sg to pick the tiny-tier
+// this no longer gates split-vs-merge; it is used only by factor_small_sg to pick the small-tier
 // sub-group size (pack 8/16/32 fronts per warp only while the packed grid still fills the device).
 // A pure hardware quantity (device attrs), so it generalizes across matrices and GPUs.
 static long factor_warp_fill()
@@ -156,7 +156,7 @@ __device__ __forceinline__ T guarded_pivot(T piv, bool static_pivoting,
 }
 
 template <typename T>
-__device__ __forceinline__ void lu_small_front(T* F, int fsz, int nc, int t, int nt,
+__device__ __forceinline__ void lu_mid_front(T* F, int fsz, int nc, int t, int nt,
                                                int* sing, bool static_pivoting,
                                                double pivot_threshold, double pivot_shift)
 {
@@ -388,7 +388,7 @@ __device__ __forceinline__ void writeback_factored(MT* M, const WT* W, int fsz, 
 }
 
 // Each tier kernel sequences these phases itself (Phase 1 panel LU -> Phase 2 U-solve ->
-// Phase 3 trailing; small fronts fuse Phase 1+3 via lu_small_front). See factorize/{mid,big}.cuh.
+// Phase 3 trailing; mid fronts fuse Phase 1+3 via lu_mid_front). See factorize/{mid,big}.cuh.
 
 }  // namespace
 }  // namespace custom_linear_solver

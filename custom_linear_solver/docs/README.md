@@ -1,12 +1,12 @@
 # `custom_linear_solver` 문서 색인
 
 > **상태**: canonical   **갱신**: 2026-06-16
-> **한 줄**: tiny-front 전력망 Jacobian 용 배치 GPU multifrontal 솔버 문서의 진입점.
+> **한 줄**: small-front 전력망 Jacobian 용 배치 GPU multifrontal 솔버 문서의 진입점.
 
 ## 먼저 읽기
 
 1. [`main-report.md`](main-report.md) — **통합 캐논 리포트**(storyline·contribution-analysis 통합). 문제(근원
-   tiny-front) → 솔버 개요 → 핵심 기여 논리(개별 기법은 prior art → head-to-head 16–66× → packing/fusion 입도
+   small-front) → 솔버 개요 → 핵심 기여 논리(개별 기법은 prior art → head-to-head 16–66× → packing/fusion 입도
    배타성 → sub-group 분해로 해소 → occupancy 회복 = 기전 → 문헌 판정) → 4-tier 구현 → 성능 → 정직한 분해·한계.
 2. [`05-reports/06-head-to-head-2026-06-16.md`](05-reports/06-head-to-head-2026-06-16.md) — head-to-head 실험·
    기전(ncu/nsys)·문헌 판정 상세.
@@ -43,7 +43,7 @@
 - [`01-kernel-engineering.md`](03-optimization-notes/01-kernel-engineering.md) — substrate 미세최적화·병목진단·결정로그(3단 tier 커널, 동기화, 디스패치, staging, "sync≠wall").
 - [`02-tf32-trailing-gemm.md`](03-optimization-notes/02-tf32-trailing-gemm.md) — V9h PTX trailing GEMM 스택, 폐기 매크로, 영구 교훈, FP16 PTX default.
 - [`03-tensor-core-investigation.md`](03-optimization-notes/03-tensor-core-investigation.md) — 텐서코어 조사 통합: large-case 성공, 8387/13K dead-end 매트릭스, Ozaki 정확도, **honest ~1.1× 정정**.
-- [`04-solve-optimization-2026-06-10.md`](03-optimization-notes/04-solve-optimization-2026-06-10.md) — **solve 경로 ~1.5× 가속** (tiny-tier nc-packing, spine fusion, full solve graph, inverse scatter, B=1 fixed-nc 라우팅). 통합 완료 + 기각 가설 기록.
+- [`04-solve-optimization-2026-06-10.md`](03-optimization-notes/04-solve-optimization-2026-06-10.md) — **solve 경로 ~1.5× 가속** (small-tier nc-packing, spine fusion, full solve graph, inverse scatter, B=1 fixed-nc 라우팅). 통합 완료 + 기각 가설 기록.
 - [`05-tc-eligibility-relaxation-2026-06-11.md`](03-optimization-notes/05-tc-eligibility-relaxation-2026-06-11.md) — TF32 적격 gate(`uc≤256`/small 조건) 완화 → **거의 모든 small/big/large 가 TC**. `max_uc` 클램프–cap 연동 버그 수정, **uc>256 spine(70K L25 spike 10→5.6%) 제거**, factorize ~1.02–1.06×. **기본값으로 승격**(cap 256→512, small 하한 풀음).
 - [`06-b1-factorize-regime-2026-06-13.md`](03-optimization-notes/06-b1-factorize-regime-2026-06-13.md) — **B=1 = under-fill(occupancy) 바운드**. scheduling/tiling/sync/amalgamation 무효. 작동하는 레버는 **B=1 텐서코어(Ozaki-TC, fp32 정확도, USA −17%)** 하나(ordering 선택은 §08, 이후 제거). B=64 와 정반대 체제. (exp_260612 01·03·04·05·11 압축)
 - [`07-batch-factorize-structural-2026-06-13.md`](03-optimization-notes/07-batch-factorize-structural-2026-06-13.md) — **STRUCTURAL: panel-resident big 커널**(L/U 패널만 shared → DRAM 2–32%→55–65%, **USA B=64 −9.3%**, default-on). register-block(+4%)·scatter 미세최적화(+2–3%). gather/tiled/fewsync/sysblk/small-band-TC 회귀 → `deprecated/`. (exp_260612 06·09·10 압축)
@@ -66,6 +66,7 @@
 - [`06-head-to-head-2026-06-16.md`](05-reports/06-head-to-head-2026-06-16.md) — **STRUMPACK+MAGMA head-to-head**(동일 FP64·깊이 매칭, 16–66×), ncu/nsys 기전, 문헌 신규성 판정.
 - [`07-generalization-suitesparse-2026-06-16.md`](05-reports/07-generalization-suitesparse-2026-06-16.md) — **SuiteSparse 일반화**(circuit·2D/3D-FEM), FP64 large-tier 버그 fix + multi-block 최적화(parabolic cuDSS 추월).
 - [`08-fair-strumpack-tuning-2026-06-17.md`](05-reports/08-fair-strumpack-tuning-2026-06-17.md) — **공정 정정**: STRUMPACK NodeNDP 튜닝(헤드라인 16–66×→~10×), 우리 NodeNDP+npes 이식의 아키텍처적 무력(ordering separator tree 미사용), 기본 panel_width=16→8 최적화.
+- [`09-strumpack-mechanism-ncu-2026-06-17.md`](05-reports/09-strumpack-mechanism-ncu-2026-06-17.md) — **커널-레벨 기전(ncu/nsys)**: 매핑 입도(small=sub-group vs one-block-per-front, occ 4%→60%; >32=512 vs 64 thread), MAGMA/no-MAGMA 둘 다 GPU, host alloc churn(H2D/D2H 무관), nc(F11) 라우팅 문헌판정, STRUMPACK 자체 small/big 실측(power-flow getrf 0%).
 - [`07-cupf-backend-comparison-2026-06-11.md`](05-reports/07-cupf-backend-comparison-2026-06-11.md) — **cuPF(graph off) 전체 조류계산** 백엔드 비교(**결정적**: Ozaki TF32 + serial-ND seed 1588 + 클럭 고정), **6 case(13K 포함) × B=1/16/64/256**: fp64/mixed 에서 cuDSS vs custom. **결론: custom-mixed 가 배치서 cuDSS 대비 4–6×; tf32(Ozaki) 가 fp32 보다 근소 우위(factorize 1.05–1.2× 가 NR 에선 희석).** 교훈: parallel-ND(기본)는 비결정적이라 fp32↔tf32 비교 무효 → serial-ND 고정 필수.
 
 ## 정직성 노트

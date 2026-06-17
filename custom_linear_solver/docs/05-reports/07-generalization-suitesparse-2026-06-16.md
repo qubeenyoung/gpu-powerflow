@@ -1,6 +1,6 @@
 # 일반화 실험 — SuiteSparse 행렬에서 STRUMPACK·cuDSS·우리 (2026-06-16)
 
-> **상태**: canonical   **한 줄**: 우리 기여(tiny-front packing+fusion 입도)가 power-flow 특수현상이 아님을
+> **상태**: canonical   **한 줄**: 우리 기여(small-front packing+fusion 입도)가 power-flow 특수현상이 아님을
 > 다른 행렬류(circuit·2D-FEM)로 검증하고, 그 과정에서 FP64 large-tier 의 한도 버그를 고치고 multi-block 으로
 > 최적화해 큰-front 2D 행렬에서도 cuDSS 와 경쟁/우위에 도달.
 
@@ -11,26 +11,26 @@
 
 ## 1. 목적
 
-main-report §3 의 기여는 "front < warp 인 tiny-front 레짐에서 packing+full-fusion 을 sub-group 입도로 동시
-달성"이다. 이게 **power-flow 만의 현상인지, tiny-front 행렬류 일반인지**를 SuiteSparse 로 검증한다 — front 크기
-스펙트럼(2D/회로 tiny-front → 3D large-front)을 가로질러 STRUMPACK+MAGMA·cuDSS·우리를 측정.
+main-report §3 의 기여는 "front < warp 인 small-front 레짐에서 packing+full-fusion 을 sub-group 입도로 동시
+달성"이다. 이게 **power-flow 만의 현상인지, small-front 행렬류 일반인지**를 SuiteSparse 로 검증한다 — front 크기
+스펙트럼(2D/회로 small-front → 3D large-front)을 가로질러 STRUMPACK+MAGMA·cuDSS·우리를 측정.
 
-## 2. baseline 특성화 — tiny-front 바닥은 일반적이다 (RTX 3090, FP64)
+## 2. baseline 특성화 — small-front 바닥은 일반적이다 (RTX 3090, FP64)
 
 factor = refactorization(= Newton step). STRUMPACK/cuDSS 배율 = launch/occupancy-bound multifrontal 의 손해.
 
 | 행렬 | 류 | n | fill/row* | cuDSS f/s | STRUMPACK f/s | STRMPK/cuDSS (f, **s**) |
 |---|---|---|---|---|---|---|
-| scircuit | 회로(tiny) | 171k | 16 | 4.98 / 1.53 | 75.9 / 85.5 | 15× / **56×** |
+| scircuit | 회로(small) | 171k | 16 | 4.98 / 1.53 | 75.9 / 85.5 | 15× / **56×** |
 | G3_circuit | 2D 회로 | 1.59M | 114 | 395 / 15.2 | 1851 / 1339 | 4.7× / **88×** |
 | parabolic_fem | 2D FEM | 526k | 97 | 79.4 / 5.65 | 257 / 161 | 3.2× / **28×** |
 | cant | 3D FEM | 62k | 588 | 63.2 / 3.02 | 150 / 17.7 | 2.4× / **5.9×** |
 | bmwcra_1 | 3D 구조 | 149k | 881 | 520 / 9.95 | 617 / 49.0 | 1.2× / **4.9×** |
 
-*fill/row = STRUMPACK factor nnz / n (front 크기 대용치). 작을수록 tiny-front.
+*fill/row = STRUMPACK factor nnz / n (front 크기 대용치). 작을수록 small-front.
 
-**결론**: per-level vbatched 멀티프론탈(STRUMPACK)이 tiny-front(회로·2D-FEM)에서 solve 28–88× 느리고, 3D
-large-front 에선 5–6× 로 소멸. → **tiny-front launch/occupancy 바닥은 power-flow 특수현상이 아니라 넓은
+**결론**: per-level vbatched 멀티프론탈(STRUMPACK)이 small-front(회로·2D-FEM)에서 solve 28–88× 느리고, 3D
+large-front 에선 5–6× 로 소멸. → **small-front launch/occupancy 바닥은 power-flow 특수현상이 아니라 넓은
 행렬류의 현상**(우리 기여의 적용 경계가 측정으로 확인됨). cuDSS(supernodal)는 두 레짐 다 견고 = 진짜 경쟁자.
 
 ## 3. 우리 솔버 적용 — 정정 2건 + 버그 1건 + 최적화 1건
@@ -49,7 +49,7 @@ budget 에 맞는다"* 고 가정을 박아놨던 게 원인.
 
 | | 지배 커널 | grid | SM 처리율 | 진단 |
 |---|---|---|---|
-| power-flow B=1 | factor_small 52.7% | 1–9 블록 | 0.5–3.4% | 상위 레벨 front 1–9개 → under-fill |
+| power-flow B=1 | factor_mid 52.7% | 1–9 블록 | 0.5–3.4% | 상위 레벨 front 1–9개 → under-fill |
 | parabolic | factor_large 98.6% | 2 블록 | 0.8% | under-fill + 거대 front 를 block=128 이 직렬 처리 |
 
 → B=1 단일시스템은 트리 상단에서 GPU 를 못 채우는 임계경로 바닥(tier 무관). 헤드룸은 배치(이미 활용)와 큰 front.
@@ -87,7 +87,7 @@ fallback 으로 수정(`01d9d4d`). 최신 B=1 FP64(단일 시스템, warmed) 3-w
 
 | 행렬 | 레짐 | custom f/s | cuDSS f/s | STRUMPACK f/s | STR/cuDSS factor |
 |---|---|---|---|---|---|
-| scircuit | tiny-front | **4.39** / 2.18 | 4.98 / **1.53** | 77.9 / 87.3 | STR **15.6× 느림** |
+| scircuit | small-front | **4.39** / 2.18 | 4.98 / **1.53** | 77.9 / 87.3 | STR **15.6× 느림** |
 | parabolic_fem | 2D-FEM | **65.4** / 7.15 | 78.6 / **5.65** | 227 / 125 | STR 2.9× 느림 |
 | cant | 3D FEM | **59.4** / 4.29 | 63.2 / **3.02** | 150 / 17.7 | STR 2.4× 느림 |
 | bmwcra_1 | 3D 구조 | (arena 캡) | 520 / 9.95 | 617 / 49 | STR 1.2× 느림 |
@@ -109,14 +109,14 @@ Table-2 행렬 **Transport** 에서 우리 harness 를 직접 측정:
 
 → **우리 harness 가 논문을 재현한다**: Transport(3D)에서 STRUMPACK 이 cuDSS 보다 빠르고(1.11×), 기존 3090
 재현(1.13×)과 거의 일치, 논문 A100(2.75×)과 방향 일치(3090 FP64=1/64 라 배율만 축소). residual 5e-15(full pivot).
-**즉 STRUMPACK baseline 은 공정**하다 — 설계 타깃(큰 3D)에선 논문대로 빠르고, tiny-front(scircuit 15×)에서 느린
-건 진짜 약점이지 측정 오류가 아니다. custom 이 tiny-front 에서 STRUMPACK 을 압도하는 결과는 정당하다.
+**즉 STRUMPACK baseline 은 공정**하다 — 설계 타깃(큰 3D)에선 논문대로 빠르고, small-front(scircuit 15×)에서 느린
+건 진짜 약점이지 측정 오류가 아니다. custom 이 small-front 에서 STRUMPACK 을 압도하는 결과는 정당하다.
 
 ## 5. 한계 / 남은 일
 
 - **G3_circuit / Transport / bmwcra_1**: custom analyze 의 8GB front-arena 상한(`total > 1G doubles`)에 걸림 —
   all-fronts-GPU-resident 설계의 메모리 스케일링 한계(기존 §04-01 에도 기록된 동작). 큰 3D/2D end-to-end 는
-  front 스트리밍 재설계 필요. (custom 은 power-grid 및 작은 tiny-front 타깃.)
+  front 스트리밍 재설계 필요. (custom 은 power-grid 및 작은 small-front 타깃.)
 - **batched 큰-front FP32/TF32 정밀도**: parabolic 같은 stiff 2D-FEM 에선 FP32/TF32 가 부정확(조건수) — FP64 가
   정답 모드. FP32/TF32 는 well-conditioned power-flow(cuPF) 타깃이므로 무관.
 - **cuDSS UBATCH 미측정**: *배치 대 배치* 공정 비교는 cuDSS UBATCH 하니스 확장 후 가능.

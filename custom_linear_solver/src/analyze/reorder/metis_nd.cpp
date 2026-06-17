@@ -216,6 +216,14 @@ bool run_nd_on_graph(int n, std::vector<idx_t>& xadj, std::vector<idx_t>& adjncy
     options[METIS_OPTION_NUMBERING] = 0;
     options[METIS_OPTION_SEED] = seed;
 
+    // Optional METIS quality knob (default NSEPS=1): CLS_METIS_NSEPS=k tries k separators per
+    // bisection and keeps the best (lower fill, slower analyze). Diagnostic A/B for "is the
+    // default ordering optimal".
+    if (const char* s = std::getenv("CLS_METIS_NSEPS")) {
+        const int ns = std::atoi(s);
+        if (ns >= 1) options[METIS_OPTION_NSEPS] = ns;
+    }
+
     // Optional ND ordering hyperparameter (analog of STRUMPACK's nd_param): when CLS_ND_NPES>1,
     // order with METIS_NodeNDP(npes) instead of METIS_NodeND. NodeND's options[] has no leaf-count
     // / recursion-stop knob; NodeNDP takes npes (number of subdomains) explicitly, which moves the

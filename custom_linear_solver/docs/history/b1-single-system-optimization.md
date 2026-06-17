@@ -22,7 +22,7 @@ cancel DVFS drift — clocks are NOT lockable here, cross-binary noise floor ≈
 
 ncu on `mf_factor_extend_level` over the elimination-tree levels:
 
-- Leaf levels: thousands of tiny fronts — well parallelized.
+- Leaf levels: thousands of small fronts — well parallelized.
 - **Spine (root-ward) levels: grid = 1–5 blocks, `sm__throughput ≈ 0.3%`, `dram__throughput ≈
   0.3%`, yet 23–42 µs each.** A single block runs the sequential nc-step panel LU where every
   front access is a ~500-cycle GLOBAL round-trip, serialized by the `__syncthreads` chain, on 1 SM
@@ -42,7 +42,7 @@ latency-bound on near-planar power-grid systems).
 | approach | result |
 |---|---|
 | **Cooperative level fusion** (one `cg::grid_group` megakernel, `grid.sync()` per level instead of per-level launches) — solve | **+30% … +220% WORSE** at every grid/block size. CUDA-graph per-level launches already pipeline efficiently; a device-wide `grid.sync()` costs more than a graph-node dependency and it sheds leaf-level parallelism. (kept, opt-in `CLS_COOP_SOLVE`) |
-| **Warp-per-front factor** (port of the batched tiny-front kernel to B=1) | **+77% … +155% WORSE.** With one front per warp the few-front spine levels get 32 threads on a 48-wide front + uncoalesced global; leaf levels (the only fit) are <7% of B=1 factor. (kept disabled, `kWarpFrontMax=0`) |
+| **Warp-per-front factor** (port of the batched small-front kernel to B=1) | **+77% … +155% WORSE.** With one front per warp the few-front spine levels get 32 threads on a 48-wide front + uncoalesced global; leaf levels (the only fit) are <7% of B=1 factor. (kept disabled, `kWarpFrontMax=0`) |
 | **Shared-front factor** (stage front into dynamic shared, fp64) | net negative: shared footprint (fsz²·8B) caps occupancy on the medium-front levels and the few-front levels it helps are a small slice. |
 | **Shared-front factor, fp32-only** (float halves the shared footprint; fp32 never used the multi-block path so its spine is most starved) | **real but modest: −6…−8% factor on 9241**, ~0 elsewhere, accuracy bit-matched (gated to fsz≥49 where the original also uses the blocked 3-phase LU). **KEPT (default on for fp32).** |
 | Multi-block threshold 81→49/64 (fp64 spine) | within ±6% noise; one case regressed. Reverted to 81. |

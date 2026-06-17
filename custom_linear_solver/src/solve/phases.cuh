@@ -42,7 +42,7 @@ __device__ __forceinline__ double solve_div(double a, double b) { return a / b; 
 // warp-per-front kernels `lane = threadIdx.x & 31`, for block kernels caller restricts to
 // `if (threadIdx.x < 32)` and passes lane = threadIdx.x.
 // SG = sub-group lane count (8 / 16 / 32). For the warp-per-front kernels SG=32 (full warp);
-// the sub-group-packed tiny kernels pass SG<32, `lane` = lane within the sub-group, and `mask`
+// the sub-group-packed small kernels pass SG<32, `lane` = lane within the sub-group, and `mask`
 // = that sub-group's active-lane mask. The broadcast shuffle uses width=SG so each sub-group
 // broadcasts row-k of its own front. SG=32 / mask=0xffffffff is the classic full-warp form
 // (what every block / spine caller uses).
@@ -180,7 +180,7 @@ __device__ __forceinline__ void bwd_load_rhs_and_x_fixed(const T* y_global, cons
 //                           nc * (ceil(cb/32) + log2(32)). Best when cb >> nc.
 //
 // The reduce path only wins for very contribution-heavy small fronts. Empirically, `cb > 8*nc`
-// was the best gate after switching tiny-tier packing to max-nc-based subgroups; lower gates
+// was the best gate after switching small-tier packing to max-nc-based subgroups; lower gates
 // overuse shuffle reduction and regress the batch solve.
 // SG = sub-group lane count (8/16/32) for the warp/sub-group reduce path; `width` = the
 // caller's active lane count (SG for warp/sub-group kernels, blockDim for the regular tier);

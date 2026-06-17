@@ -132,9 +132,9 @@ pw=16이 이웃값(pw=8·32)보다 나쁜 **국소 최악점**(factor 1.28 vs 0.
    돌려서 부풀려졌다. NodeNDP로 공정 튜닝하면 factor 16×→~10–13×, solve 33–66×→~12–16×.
 2. **ordering·amalgamation·깊이·fill은 차별점이 아니다.** STRUMPACK도 한다(NodeNDP/SYMQAMD), 일부는 더 잘한다.
    우리 NodeNDP 이식은 아키텍처적으로 무력(separator tree를 안 씀). 깊이/fill은 우리 쪽 amalgamation(pw) 담당.
-3. **남는 ~10× 우위는 깊이·fill·ordering 통제 후의 순수 커널/구현 효율**: tiny packing+fusion occupancy
+3. **남는 ~10× 우위는 깊이·fill·ordering 통제 후의 순수 커널/구현 효율**: small packing+fusion occupancy
    (2%→30–59%, §06 §5b) + GPU-resident solve vs MAGMA vbatched(occupancy 2%) + STRUMPACK solve 오버헤드.
-   단 §06 §5e ablation대로 **B=1에선 packing+fusion 단독 기여는 1.27×**(tiny tier가 factor의 ~43%, Amdahl 천장
+   단 §06 §5e ablation대로 **B=1에선 packing+fusion 단독 기여는 1.27×**(small tier가 factor의 ~43%, Amdahl 천장
    ~1.74×)이고, 잔여는 amalgamation·graph·STRUMPACK 구현 오버헤드의 합 — "커널이 단일 주원인"은 B=64 한정.
 4. **부수**: 기본 panel_width=16 → 8로 내리면 power-flow 전 케이스에서 factor/solve 개선(25k 최대 1.41×).
 

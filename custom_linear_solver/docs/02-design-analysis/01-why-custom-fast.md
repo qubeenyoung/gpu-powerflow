@@ -24,7 +24,7 @@
 | 사실 | 측정값 (case8387pegase, N=14908) | 함의 |
 |---|---|---|
 | max front size | **96** | dense LU 영역 (fsz≥256) 의 38% 도 못 됨 |
-| 96.2% of fronts have fsz ≤ 16 | 7,136 / 7,421 panels | 거의 모든 work 가 "tiny front" 영역 |
+| 96.2% of fronts have fsz ≤ 16 | 7,136 / 7,421 panels | 거의 모든 work 가 "small front" 영역 |
 | etree depth | 31 levels | 깊은 dependency chain |
 | front arena (FP64) | ~4 MB | 24 GB GPU memory 의 0.02% |
 | factor 본체 (`mf_factor_extend_level`) ncu | SM 4.4%, DRAM 1.8%, FP64 25.3% | **latency-bound** — GPU 어느 자원도 saturate 못 함 |
@@ -42,7 +42,7 @@
 
 | 구성 | 시간 | 메커니즘 |
 |---|---:|---|
-| GPU kernel work | ~5 ms (35%) | 1000+ tiny vbatched kernels |
+| GPU kernel work | ~5 ms (35%) | 1000+ small vbatched kernels |
 | `cudaLaunchKernel` overhead (~700 calls × 6 μs) | ~4 ms (28%) | 한 NR iter 에 700+ launch |
 | 페이지락/디바이스 alloc | ~2 ms (14%) | 매 iter buffer 재할당 |
 | H2D memcpy | ~2 ms (14%) | 작은 청크 다수 |
@@ -118,7 +118,7 @@ cudaGraphLaunch(factor_graph_exec, stream);        // replay 1회 (한 줄)
 **가정**: max fsz < 160 — 본 도메인 측정 사실 (§1).
 
 **결정**: front 의 fsz 에 따라 세 가지 GPU kernel 중 하나로 dispatch (`docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`):
-- **fsz ≤ 32**: warp-per-front kernel `mf_factor_small_warp_b` — 1 warp/front, 8 warps/block, per-warp shared memory, `__syncwarp()` 만 사용. block barrier 없음.
+- **fsz ≤ 32**: warp-per-front kernel `mf_factor_mid_warp_b` — 1 warp/front, 8 warps/block, per-warp shared memory, `__syncwarp()` 만 사용. block barrier 없음.
 - **32 < fsz ≤ 159**: shared-resident mid-front kernel `mf_factor_mid_tc32_b` — 프론트 전체를 dynamic shared memory(레벨별 최대 fsz²에 맞춰 sized) 에 한 번 로드, panel LU/U-solve/trailing/extend-add 가 모두 shared 위, L/U 만 write-back.
 - **fsz > 159**: 1024-thread/block big-separator kernel — 큰 separator (9~25 fronts/level) 에 다수 warp packing 으로 sequential dependency 은닉.
 

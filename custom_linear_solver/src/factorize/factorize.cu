@@ -15,23 +15,23 @@ using custom_linear_solver::plan::MultifrontalPlan;
 void register_factor_attributes(Precision precision)
 {
     (void)precision;
-    cudaFuncSetAttribute(factor_tiny<float, 8>,
+    cudaFuncSetAttribute(factor_small<float, 8>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_tiny<float, 16>,
+    cudaFuncSetAttribute(factor_small<float, 16>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_tiny<float, 32>,
+    cudaFuncSetAttribute(factor_small<float, 32>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_tiny<double, 8>,
+    cudaFuncSetAttribute(factor_small<double, 8>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_tiny<double, 16>,
+    cudaFuncSetAttribute(factor_small<double, 16>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_tiny<double, 32>,
+    cudaFuncSetAttribute(factor_small<double, 32>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_small<float, true>,
+    cudaFuncSetAttribute(factor_mid<float, true>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_small<float, false>,
+    cudaFuncSetAttribute(factor_mid<float, false>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_small<double, false>,
+    cudaFuncSetAttribute(factor_mid<double, false>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_large<double, false>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);

@@ -24,13 +24,13 @@ runs (RTX 3090, sm_86, B=64–128; see `docs/03-optimization-notes/01-fp32-batch
 
 | Solver | Factorization | Target matrices | Batched (B systems, 1 symbolic)? | FP16 / mixed / tensor-core? | Documented GPU bottleneck |
 |---|---|---|---|---|---|
-| **STRUMPACK** | Multifrontal LU (unsymmetric) | General SuiteSparse; large dense fronts | No (single system; *level-batches fronts internally*) | No (FP64-centric) | **Latency/launch-bound on tiny fronts**; custom <32×32 kernel + MAGMA vbatched GETRF to cut launch overhead [1][2] |
+| **STRUMPACK** | Multifrontal LU (unsymmetric) | General SuiteSparse; large dense fronts | No (single system; *level-batches fronts internally*) | No (FP64-centric) | **Latency/launch-bound on small fronts**; custom <32×32 kernel + MAGMA vbatched GETRF to cut launch overhead [1][2] |
 | **SuperLU_DIST** | Supernodal right-looking LU | General; distributed | **Yes** — uniform-batched, one symbolic, fixed pivot, pivoting off [3] | **No — FP64 only**; demoed on **fusion plasma**, not power grids [3] | Launch/alloc/transfer latency dominates "many small problems"; needed a *new flattened L/U* struct because supernodal layout is unsuitable for batching [3] |
 | **GLU 3.0** | Right-looking column LU (level-scheduled) | **Circuit** simulation matrices | No | No (separate FP32/FP64 runs, not mixed) | Double-U dependency-detection cost + fixed thread allocation [4] |
 | **cuDSS** (NVIDIA) | Supernodal LU/LDL/Cholesky | General; NVIDIA markets it **for the US power grid** | **Yes — now has a real uniform-batch-of-many-systems API** (`CUDSS_CONFIG_UBATCH_SIZE/INDEX`, v0.6.0+; non-uniform batch v0.4.0) [9b] | FP32 / FP64 / **double-double** value types (v0.8.0) + **iterative refinement** (IR_TOL, IR_N_STEPS); **no FP16, no tensor-core factor mode** [9b] | Vendor; only NVIDIA-internal OPF numbers, no independent power-grid Jacobian benchmark [9][9b] |
 | **Power-flow batched LU** (Wang/Fraunhofer 2021) | Gilbert–Peierls **column LU + refactorization** (not multifrontal) | **Power-grid NR power-flow Jacobians** sharing one Ybus pattern | **Yes** — many NR-PFs, one symbolic/fill structure, batched refactorization | **FP64 (double) — CONFIRMED from full text**, justified by "high numerical stability requirement during the LU refactorization"; no low/mixed precision [5] | Targets GPU under-saturation at small batch; fine-grained (4× threads) for earlier saturation [5] |
 | **Batch LU** (Zhou et al. 2017) | Whole-system batched LU (packaged into one big problem) | **Power-grid** N-x security / Monte-Carlo PF, shared topology | **Yes** | Not stated | Up to **76× vs KLU** (1-thread); ~4× vs multicore KLU [6] |
-| **PanguLU** (Fu et al., SC'23) | **Regular 2D block-cyclic** sparse direct (blocks stored *sparse*; per-block sparse-BLAS) — **not multifrontal, not large-dense-front** | General SuiteSparse; **distributed multi-GPU** (MPI+OpenMP+CUDA, up to 128 A100) | **No** — only **batched-RHS over one factorization** (`pangulu_gstrs` called repeatedly); **not B-systems-one-symbolic** | FP32 **and** FP64, real/complex (compile-time); **no FP16/mixed/tensor-core** [10] | Distributed-scaling solver (11.7×/18× vs SuperLU_DIST at scale); not a tiny-front / power-grid target |
+| **PanguLU** (Fu et al., SC'23) | **Regular 2D block-cyclic** sparse direct (blocks stored *sparse*; per-block sparse-BLAS) — **not multifrontal, not large-dense-front** | General SuiteSparse; **distributed multi-GPU** (MPI+OpenMP+CUDA, up to 128 A100) | **No** — only **batched-RHS over one factorization** (`pangulu_gstrs` called repeatedly); **not B-systems-one-symbolic** | FP32 **and** FP64, real/complex (compile-time); **no FP16/mixed/tensor-core** [10] | Distributed-scaling solver (11.7×/18× vs SuperLU_DIST at scale); not a small-front / power-grid target |
 
 **PanguLU resolved (was unverified):** it is a *general-purpose, distributed, 2D-block* sparse LU — **not** power-grid-specialized, **not** multifrontal, and its "batching" is multiple RHS on one factorization, **not** a uniform batch of many distinct systems. It does **not** scoop our batched/FP32/multifrontal/power-grid combination [10]. (Basker/KokkosKernels still produced no confirmed power-grid-relevant claims; treat as out of scope.)
 
@@ -47,7 +47,7 @@ compute-bound — by an enormous margin.** An independent third-party profiling 
 circuit matrix, largest supernode only 3047) versus **26 % of peak on `atmosmoddd`** (92 % of FLOPs
 in supernodes > 4000) [7]. The cause is exactly the structural property our power-grid Jacobians
 share: near-planar graphs ⇒ small nested-dissection separators ⇒ **the work scatters across tens of
-thousands of tiny fronts/supernodes** where dense-GPU-LU throughput is near zero (the dense-LU
+thousands of small fronts/supernodes** where dense-GPU-LU throughput is near zero (the dense-LU
 throughput curve "drops linearly below 10 000 and flattens around 20 000") [7].
 
 > This is *quantitatively the same picture we measured* on our Jacobians: at ACTIVSg25k, **95 % of
@@ -59,7 +59,7 @@ throughput curve "drops linearly below 10 000 and flattens around 20 000") [7].
 crude, load-imbalanced workaround.** Grouping different-sized supernodes into one kernel "causes
 load imbalance … poor SM utilization," and level-by-level traversal "incurs additional DRAM
 traffic" [7]. STRUMPACK still needs a hand-written `< 32×32` kernel because vendor/MAGMA batched
-routines "are not sufficiently optimized" for tiny fronts [1][2] — the very regime our warp-per-front
+routines "are not sufficiently optimized" for small fronts [1][2] — the very regime our warp-per-front
 kernel targets.
 
 **(c) On power-grid KKT/Jacobian systems specifically, general GPU direct solvers lose to a
@@ -73,8 +73,8 @@ factorization + refactorization, not a general dense-front solver.
 
 **Answer to the question:** yes — it is specialization. General multifrontal/supernodal libraries
 are engineered for matrices with **large dense fronts** (their FLOPs live there); power-grid
-Jacobians have **no large fronts**, so those libraries run at a tiny fraction of peak and even the
-batched fallback is crude. A solver built around the actual structure (many tiny fronts, one shared
+Jacobians have **no large fronts**, so those libraries run at a small fraction of peak and even the
+batched fallback is crude. A solver built around the actual structure (many small fronts, one shared
 symbolic, accuracy relaxable) is a different machine.
 
 ---
@@ -84,7 +84,7 @@ symbolic, accuracy relaxable) is a different machine.
 ### What we built (measured, this repo)
 A **uniform-batched, FP32-native, GPU multifrontal** factor+solve for power-grid NR Jacobians:
 one shared symbolic/etree/amalgamation for all B systems; front arena FP32 (no FP64 master);
-tiny-front levels run a **warp-per-front shared-cached kernel**, mid fronts a **shared-resident
+small-front levels run a **warp-per-front shared-cached kernel**, mid fronts a **shared-resident
 block kernel** (per-level-sized shared, L/U-only write-back), the few big separators a
 **1024-thread** kernel; solve uses **warp-packed** small levels. Result vs our own FP32 batched
 baseline: factor+solve **−25…−28 %** on the large cases (ACTIVSg25k/70k), **−42…−46 % vs FP64**,
@@ -98,13 +98,13 @@ solve alone **−30…−41 %**, at **FP32 accuracy** (no iterative refinement n
 | Uniform-batched sparse direct factorization (B systems, 1 symbolic, no pivoting) | **Yes** — SuperLU_DIST [3] (FP64, fusion plasma); **and cuDSS now ships a uniform-batch-of-systems API** (v0.6.0+) [9b] | **NOT novel** as a concept — and as of cuDSS v0.6 it is a *vendor primitive*. Do not claim "first batched." |
 | Doing it with a **multifrontal / dense-front** GPU kernel (vs column-LU refactorization) | The power-grid batched solvers [5][6] use **column / whole-system LU**, *not* multifrontal fronts | **Partially novel framing** — batched-multifrontal for this target is not documented, but it's an implementation choice, not a new algorithm. |
 | **FP32-native fronts** (drop the FP64 master entirely, accept FP32 accuracy) for batched power-grid factorization | **Every nearest neighbor is FP64**: Wang/Fraunhofer is **explicitly FP64** ("high numerical stability requirement during the LU refactorization") [5], SuperLU_DIST batched is FP64 [3], the ACOPF winners are FP64 [8], cuDSS power-grid demo is FP64/double-double [9b]. GLU3.0 runs FP32 but only as a *Maxwell hardware workaround* on **circuit** matrices, single-system [4] | **No prior art found, and the field's stated assumption is the opposite** (FP64 "required"). Still absence-of-evidence, but now the closest competitor's own words frame FP32-native as a genuine departure. |
-| **Tiny-front-specialized GPU kernels** (warp-per-front, shared-resident, adaptive threads) beating the library "uniform batch" / `<32×32` fallback | STRUMPACK's `<32×32` naive kernel [1][2] and "crude batching" [7] are the *baseline we improve on* | **Engineering contribution**, well-motivated by [7]; the specific kernel design is ours. |
-| **FP16 / tensor cores** help this factorization | The survey found **no source** quantifying tensor-core efficiency at tiny supernode width K (≤16–32) | **Our empirical negative result is genuinely new data** (see below). |
+| **Small-front-specialized GPU kernels** (warp-per-front, shared-resident, adaptive threads) beating the library "uniform batch" / `<32×32` fallback | STRUMPACK's `<32×32` naive kernel [1][2] and "crude batching" [7] are the *baseline we improve on* | **Engineering contribution**, well-motivated by [7]; the specific kernel design is ours. |
+| **FP16 / tensor cores** help this factorization | The survey found **no source** quantifying tensor-core efficiency at small supernode width K (≤16–32) | **Our empirical negative result is genuinely new data** (see below). |
 
 **Bottom line on novelty:** the *headline idea* (batched, shared-symbolic, power-grid-specialized
 GPU solve) is **not novel** — it has clear prior art [5][6]. What has **no exact prior art** in the
 surveyed literature is the **specific combination**: *batched + FP32-native + multifrontal-dense-
-front + tiny-front-specialized kernels* for power-grid Jacobians. That is a real but **narrow**
+front + small-front-specialized kernels* for power-grid Jacobians. That is a real but **narrow**
 gap, and it is an absence-of-evidence claim, not a proof.
 
 ### The most defensible *scientific* contribution
@@ -117,10 +117,10 @@ any comparative speed claim). The defensible contributions are two **characteriz
    cores to beat the FP32 FMA loop**, and an FP64-master TC path is *slower than pure FP32* because
    the master's cast/writeback/double-atomic/2× memory overhead dominates the latency-bound work
    (FP16 trailing even diverges at 25k/70k). The survey confirmed **no published source quantifies
-   tensor-core efficiency in this tiny-K sparse-direct regime** — so "tensor cores do not help
+   tensor-core efficiency in this small-K sparse-direct regime** — so "tensor cores do not help
    power-grid multifrontal factorization, and why" is a publishable, currently-undocumented finding.
 
-2. **The lever is FP32-native + tiny-front kernel engineering, not precision tricks.** We show the
+2. **The lever is FP32-native + small-front kernel engineering, not precision tricks.** We show the
    factor/solve is latency/occupancy-bound (matching [7]), and that the wins come from removing the
    FP64 master and from warp-per-front / shared-resident / warp-packed kernels — i.e. attacking the
    exact bottleneck [7] names but does not solve well (its `<32×32` naive kernel + crude batching).
@@ -138,21 +138,21 @@ A defensible paper/report argues a **chain**, each link backed by a measurement 
    of peak on power-grid-class graphs [7]; on power-grid KKT/Jacobians they don't beat a single CPU
    core and GPU often *hurts* [8]. → A specialized solver is needed (this is the accepted finding we
    build on, not our claim).
-3. **Diagnosis (our measurement).** Profile the batched multifrontal: 95 % of fronts are tiny, every
+3. **Diagnosis (our measurement).** Profile the batched multifrontal: 95 % of fronts are small, every
    level is `compute<60 % ∧ DRAM<60 %` = latency/occupancy-bound; the trailing GEMM (where tensor
    cores would apply) is a minority of time and has `K=nc≤20`. → Precision/tensor-core levers are
    inert here; the lever is launch/occupancy/traffic.
 4. **Negative result (contribution 1).** Tensor cores and an FP64-master mixed path **lose to pure
    FP32** on this workload; quantify why (thin K, master overhead, divergence at scale). Literature
    has no counter-evidence (RQ4 gap). [this repo]
-5. **Method (contribution 2).** FP32-native fronts + per-regime kernels: warp-per-front tiny
+5. **Method (contribution 2).** FP32-native fronts + per-regime kernels: warp-per-front small
    levels, shared-resident mid fronts (L/U-only write-back), high-thread big separators, warp-packed
    solve; one shared symbolic/amalgamation across B. Tie each kernel to the bottleneck it removes.
 6. **Evaluation.** (a) vs our FP64/Mixed/FP32 baselines — done (−25…−46 %). (b) **vs cuDSS, KLU,
    and the batched power-flow solvers [5][6] — REQUIRED, not yet done.** (c) accuracy: FP32 residual
    suffices for the NR outer loop (no IR) — needs the IR-vs-FP32 ablation [RQ6 gap].
 7. **Positioning / novelty.** State plainly: batched shared-symbolic power-grid solving is prior art
-   [5][6]; our delta is the FP32-native multifrontal + tiny-front kernels + the tensor-core negative
+   [5][6]; our delta is the FP32-native multifrontal + small-front kernels + the tensor-core negative
    result. Do **not** claim the batched concept as new.
 
 ---
@@ -195,7 +195,7 @@ self-consistent cases, each as strong as the evidence honestly allows.
    multifrontal solver — but a literature *survey* not finding one is not proof none exists, and FP32
    sparse LU itself is old (GLU3.0 [4]).
 5. **The tensor-core negative result is "folklore."** The multifrontal-GPU community already routes
-   only large fronts to cuBLAS/tensor-core GEMM and hand-writes tiny-front kernels [1][7]; that small
+   only large fronts to cuBLAS/tensor-core GEMM and hand-writes small-front kernels [1][7]; that small
    fronts don't use tensor cores well is implicitly known.
 → **Conclusion of Case A:** the work is solid *engineering* on a known problem with known primitives;
    it is not a research contribution until a head-to-head win exists.
@@ -204,9 +204,9 @@ self-consistent cases, each as strong as the evidence honestly allows.
 *Argued as strongly as the evidence permits.*
 
 1. **A combination with no located prior art.** *batched + FP32-native (no FP64 master) + multifrontal
-   dense-front + tiny-front-specialized kernels + power-grid Jacobians.* Each nearest neighbor misses
+   dense-front + small-front-specialized kernels + power-grid Jacobians.* Each nearest neighbor misses
    ≥1 axis: Wang [5]=FP64+column-LU; SuperLU_DIST [3]=FP64+fusion-plasma; cuDSS [9b]=FP64/dd vendor
-   black-box, no tiny-front kernels published; GLU3.0 [4]=FP32-but-circuit-single-system; PanguLU
+   black-box, no small-front kernels published; GLU3.0 [4]=FP32-but-circuit-single-system; PanguLU
    [10]=FP64/FP32-but-general-distributed-2D-block, batched-RHS-only. The scoop check (2021–2026)
    found nothing closer.
 2. **The FP32-native result contradicts the field's stated assumption.** The closest competitor [5]
@@ -219,7 +219,7 @@ self-consistent cases, each as strong as the evidence honestly allows.
      trailing GEMM has contraction depth `K = nc ≤ 16–20`; FP16/WMMA loses to the FP32 FMA loop, and
      an FP64-master mixed path is *slower than pure FP32* (cast/writeback/double-atomic/2× memory),
      with FP16 trailing diverging at 25k/70k. The "folklore" (Case A pt 5) is *qualitative*; **no
-     source quantifies tensor-core inefficiency in this tiny-K sparse-direct power-grid regime** —
+     source quantifies tensor-core inefficiency in this small-K sparse-direct power-grid regime** —
      turning folklore into a measured, reproducible result *is* the contribution.
    - **C2 — the lever is kernel engineering against a documented bottleneck.** Spatula [7] measured
      the bottleneck (0.004 % of peak on near-planar FullChip) but its mitigation is "crude batching";
@@ -238,8 +238,8 @@ self-consistent cases, each as strong as the evidence honestly allows.
   batched-shared-symbolic is prior art (now even a cuDSS primitive [9b]), and we have **no head-to-
   head win**. Do not write that sentence.
 - **Accept the narrow claim.** The *combination* is unscooped, and the **two characterization
-  results survive every check**: (C1) the quantified tiny-K tensor-core/FP64-master negative result —
-  which the survey confirms is **undocumented** — and (C2) FP32-native + tiny-front kernel
+  results survive every check**: (C1) the quantified small-K tensor-core/FP64-master negative result —
+  which the survey confirms is **undocumented** — and (C2) FP32-native + small-front kernel
   engineering that beats the FP64/Mixed paths and is motivated by the exact bottleneck the literature
   names but does not solve. The newly-confirmed fact that the closest competitor [5] **chose FP64 for
   stability** converts our FP32 result from "absence of evidence" into "contradicts a published
