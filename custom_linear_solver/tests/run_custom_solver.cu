@@ -56,6 +56,7 @@ struct Options {
     int metis_seed = 42;  // METIS ordering seed for deterministic A/B sweeps
     bool no_multistream = false;     // disable subtree multi-stream dispatch
     bool no_tier_split = false;      // disable occupancy-gated per-front tier split
+    bool one_block_per_front = false; // STRUMPACK-style op-separated one-block/front factor
     bool analyze_info = false;       // print analyze-phase front/subtree summary
     bool matching = false;
     cls::PivotStrategy pivot_strategy = cls::PivotStrategy::StaticDiagonalShift;
@@ -153,6 +154,7 @@ void usage(const char* argv0)
         << "  --metis-seed N       METIS ordering seed for serial/parallel ND A/Bs\n"
         << "  --no-multistream      disable subtree multi-stream dispatch (single stream)\n"
         << "  --no-tier-split       disable occupancy-gated per-front tier split (whole-level)\n"
+        << "  --one-block-per-front factor every front with STRUMPACK-style one-block/op kernels\n"
         << "  --matching            enable structural row/column matching before factorization\n"
         << "  --pivot-strategy MODE none|shift|partial (partial is rejected unless implemented)\n"
         << "  --pivot-epsilon X     static shift pivot threshold/magnitude\n"
@@ -209,6 +211,8 @@ Options parse_args(int argc, char** argv)
             options.no_multistream = true;
         } else if (arg == "--no-tier-split") {
             options.no_tier_split = true;
+        } else if (arg == "--one-block-per-front") {
+            options.one_block_per_front = true;
         } else if (arg == "--matching") {
             options.matching = true;
         } else if (arg == "--pivot-strategy") {
@@ -360,6 +364,7 @@ int main(int argc, char** argv)
         if (options.max_panel_width > 0) solver_config.max_panel_width = options.max_panel_width;
         solver_config.use_multistream_subtrees = !options.no_multistream;
         solver_config.tier_split = !options.no_tier_split;
+        solver_config.one_block_per_front = options.one_block_per_front;
         solver_config.matching = options.matching ? cls::MatchingMode::Structural
                                                   : cls::MatchingMode::None;
         solver_config.use_matching = options.matching;

@@ -8,34 +8,37 @@
 // analyze/plan/lower.cu and the factorize/solve dispatchers.
 
 #include <cstddef>
+#include <cstdlib>
 
 namespace custom_linear_solver {
 
 // Warp width on all supported architectures.
 inline constexpr int kWarpSize = 32;
 
-// ── Front-size tiers ───────────────────────────────────────────────────────────────────────────
-// Each tier routes to ONE dedicated factor/solve kernel. The kernel is a deterministic function of
-// front size (and, for the big|large split, precision) — no occupancy/opt-in gating decides which
-// kernel runs. The three boundaries are derived from physical limits, not tuned constants:
+// ── Front-size tiers (3) ─────────────────────────────────────────────────────────────────────────
+// Each tier routes to ONE dedicated factor kernel; the kernel is a deterministic function of front
+// size — no occupancy/opt-in gating decides which kernel runs. Two boundaries, both physical:
 //
-//   small  (fsz <= kSmallFrontMax)                  -> warp-packed sub-group kernel (factor_small)
-//   mid   (fsz <= kMidFrontMax)                 -> whole-front shared-resident  (factor_mid)
-//   big   (fsz <= whole_front_shared_max(prec))   -> panel-resident shared, CB in global (factor_big)
-//   large (larger)                                -> global-resident, panels staged (factor_large)
+//   small (fsz <= kSmallFrontMax=32)  -> warp-packed sub-group kernel              (factor_small)
+//   mid   (fsz <= kMidFrontMax=64)    -> whole-front shared-resident, 1 block/front (factor_mid)
+//   big   (fsz > 64)                  -> global-resident; L/U panel tiles staged; ONE front spread
+//                                        across MANY blocks (pivot + panel + trailing multi-block) (factor_big)
 //
 // Rationale per boundary:
 //   small|mid = warp width (32): sub-group packing (8/16/32 lanes per front) only lives inside one
 //                warp; below it, warp-per-front + __syncwarp beats a block-per-front kernel that would
 //                idle most threads and pay a full block barrier on the tens of thousands of leaf fronts.
-//   mid|big  = whole-front shared occupancy crossover (64): whole-front staging costs fsz²·elem of
-//                shared, so beyond ~64 the footprint drops occupancy below ~2 blocks/SM and the
-//                panel-resident kernel (only L/U panels in shared, the bulky CB left in global, ~fsz²/3)
-//                recovers bandwidth.
-//   big|large  = whole-front shared capacity (whole_front_shared_max): the largest fsz whose dense
-//                fsz²·elem staging fits the opt-in budget — 159 (float) / 111 (double). Past it the
-//                front cannot be shared-resident at all, so it goes to the global kernel with max
-//                per-front threads. FP64 reaches "large" sooner (sizeof double), by construction.
+//   mid|big   = whole-front shared occupancy crossover (64): whole-front staging costs fsz²·elem of
+//                shared, so beyond ~64 the footprint drops occupancy below ~2 blocks/SM. The big tier
+//                keeps the front in global and stages only small tiles, spreading one front's work
+//                across many blocks — fills the GPU when fronts are few/large, and absorbs fronts too
+//                large to be shared-resident at all (FEM/circuit root separators).
+//
+// HISTORY (2026-06-18): a former 4-tier scheme had big=panel-resident (65–111) + large=global (>111).
+// A measured A/B collapsed it: the panel-resident tier gave ~1.2% at batch (the old §07 −9.3% no longer
+// reproduces) and was 16% SLOWER than the global multi-block kernel for 65–111 fronts at B=1. So 65–111
+// was folded into the global kernel and "large" was renamed "big". whole_front_shared_max() survives
+// only as the big kernel's bounded-shared staging threshold.
 
 // small|mid boundary = warp width.
 inline constexpr int kSmallFrontMax = kWarpSize;  // 32
@@ -79,11 +82,11 @@ inline constexpr int kFusedMidFrontMax = 48;
 #endif
 
 // Opt-in dynamic shared-memory size passed to cudaFuncAttributeMaxDynamicSharedMemorySize for the
-// shared-resident kernels (sm_86 cap). This budget — together with the precision — sets the big|large
+// shared-resident kernels (sm_86 cap). This budget — together with the precision — sets the big-tier bounded-shared staging threshold (the
 // tier boundary below (the largest front whose whole fsz×fsz staging fits here).
 inline constexpr std::size_t kDynamicSharedMemoryOptInBytes = 99 * 1024;
 
-// big|large boundary: the largest front (columns) whose dense fsz×fsz staging fits the budget above at
+// Bounded-shared threshold: the largest front (columns) whose dense fsz×fsz staging fits the budget above at
 // the given precision — 159 (float, FP32/TF32) / 111 (double, FP64). DERIVED from the budget so the
 // analyze-time tier bucketing and the runtime dispatch agree, and so FP64 enters "large" sooner.
 constexpr int whole_front_shared_max(bool fp64)
@@ -101,26 +104,26 @@ inline constexpr int kMaxSubtreeStreams = 8;
 // Byte alignment of the per-array sub-allocations inside the single device arena.
 inline constexpr int kArenaAlignmentBytes = 256;
 
-// The four dedicated front-size tiers (see the boundary rationale at the top). One kernel per tier;
+// The three dedicated front-size tiers (see the boundary rationale at the top). One kernel per tier;
 // classification is a pure function of front size and precision.
-enum class FrontTier { kSmall, kMid, kBig, kLarge };
+enum class FrontTier { kSmall, kMid, kBig };
 
-constexpr FrontTier classify_front_tier(int front_size, bool fp64)
+inline FrontTier classify_front_tier(int front_size, bool fp64)
 {
+    (void)fp64;
     if (front_size <= kSmallFrontMax) return FrontTier::kSmall;
     if (front_size <= kMidFrontMax) return FrontTier::kMid;
-    if (front_size <= whole_front_shared_max(fp64)) return FrontTier::kBig;
-    return FrontTier::kLarge;
+    return FrontTier::kBig;    // fsz > 64: global-resident multi-block (was large tier)
 }
 
 // Number of dispatch tiers (== number of dedicated kernels). The analyze-time tier-homogeneous
 // dispatch order groups a level's panels into these tiers so each (level, tier) sub-launch hits
 // exactly one kernel.
-inline constexpr int kNumFrontBuckets = 4;
+inline constexpr int kNumFrontBuckets = 3;
 
-// Tier index (0=small, 1=mid, 2=big, 3=large) for the analyze-time bucketing. Must match
+// Tier index (0=small, 1=mid, 2=big) for the analyze-time bucketing. Must match
 // classify_front_tier exactly so a homogeneous bucket routes to a single kernel at dispatch.
-constexpr int front_bucket(int front_size, bool fp64)
+inline int front_bucket(int front_size, bool fp64)
 {
     return static_cast<int>(classify_front_tier(front_size, fp64));
 }

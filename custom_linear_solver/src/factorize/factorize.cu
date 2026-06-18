@@ -33,11 +33,11 @@ void register_factor_attributes(Precision precision)
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
     cudaFuncSetAttribute(factor_mid<double, false>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_large<double, false>,
+    cudaFuncSetAttribute(factor_big<double, false>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_large<float, false>,
+    cudaFuncSetAttribute(factor_big<float, false>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
-    cudaFuncSetAttribute(factor_large<float, true>,
+    cudaFuncSetAttribute(factor_big<float, true>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSharedMemoryOptInBytes);
 }
 

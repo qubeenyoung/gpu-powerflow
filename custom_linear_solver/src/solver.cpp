@@ -151,7 +151,8 @@ Status Solver::setup(int batch_size)
         impl_->config.enable_shift_retry && impl_->config.shift_retry_epsilon > 0.0;
     return custom_linear_solver::setup(impl_->plan, batch_size, impl_->config.precision,
                                        impl_->state, impl_->config.use_multistream_subtrees,
-                                       impl_->config.tier_split, static_pivoting,
+                                       impl_->config.tier_split,
+                                       impl_->config.one_block_per_front, static_pivoting,
                                        impl_->config.shift_retry_epsilon,
                                        impl_->config.shift_retry_epsilon)
                ? Status::kSuccess

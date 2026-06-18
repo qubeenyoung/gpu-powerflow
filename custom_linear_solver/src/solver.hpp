@@ -30,7 +30,7 @@ enum class Status {
 };
 
 // User-configurable knobs. Set on the SolverConfig passed to Solver(). Tunables not listed
-// here (the four front-size tier boundaries, the TF32 PTX trailing stack, the cp.async stage-in,
+// here (the three front-size tier boundaries, the TF32 PTX trailing stack, the cp.async stage-in,
 // the per-front kernel routing) are baked into the build because every measured off-default
 // regressed at least one case.
 struct SolverConfig {
@@ -55,6 +55,10 @@ struct SolverConfig {
                                                      // tier's dedicated kernel). false = debug
                                                      // whole-level dispatch (every front promoted to
                                                      // the level's largest-tier kernel).
+    bool one_block_per_front = false;                // STRUMPACK-style factor dispatch: ignore
+                                                     // front-size tiers and factor each level with
+                                                     // operation-separated global kernels using one
+                                                     // CUDA block per (front, batch).
     bool use_multistream_subtrees = true;            // dispatch independent subtrees on
                                                      // separate streams (capped at 8). Set
                                                      // false for single-stream debugging.

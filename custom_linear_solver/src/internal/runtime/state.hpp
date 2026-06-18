@@ -21,9 +21,9 @@ namespace custom_linear_solver {
 //
 //   FP64       – everything double. Reference accuracy (~1e-13), slowest factor.
 //   FP32       – the whole front is float. ~1e-4 accurate, ~2x faster than FP64 on RTX 3090.
-//   TF32       – FP32 front + TF32 mma.m16n8k8 trailing GEMM. Small/big fronts use the shared-resident
-//                blocked / panel-resident Tensor-Core kernels (factor_mid / factor_big); large
-//                fronts use the global-resident factor_large. Recommended path on power-grid Jacobians.
+//   TF32       – FP32 front + TF32 mma.m16n8k8 trailing GEMM. Small/mid fronts use the warp-packed / whole-front shared
+//                kernels (factor_small / factor_mid); big
+//                fronts use the global-resident multi-block factor_big. Recommended path on power-grid Jacobians.
 //
 // TF32 requires Ampere (sm80+).
 enum class Precision { FP64, FP32, TF32 };
@@ -48,6 +48,7 @@ struct State {
     int num_rows = 0;
     Precision precision = Precision::FP64;
     bool tier_split = true;  // occupancy-gated per-front tier split in factor/solve dispatch
+    bool one_block_per_front = false;  // STRUMPACK-style op-separated factor dispatch
     bool static_pivoting = false;
     double pivot_threshold = 0.0;
     double pivot_shift = 0.0;
@@ -111,7 +112,7 @@ struct State {
 // reproducibility); when there is only one subtree the flag has no effect.
 bool setup(const plan::MultifrontalPlan& plan, int B, Precision precision, State& state,
            bool use_multistream_subtrees = true, bool tier_split = true,
-           bool static_pivoting = false, double pivot_threshold = 0.0,
+           bool one_block_per_front = false, bool static_pivoting = false, double pivot_threshold = 0.0,
            double pivot_shift = 0.0);
 
 // Bind a caller-owned cudaStream_t (passed as void*). External / capturable mode only.

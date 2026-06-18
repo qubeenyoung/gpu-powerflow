@@ -132,6 +132,14 @@ static long factor_warp_fill()
     return v;
 }
 
+// Single "is there enough independent work to fill the GPU?" gate, shared by the small-tier packing
+// decision and the big-tier panel-resident decision. `work` is the parallel-unit count, which always
+// combines batch AND level (front_count × B, optionally after packing) — never batch or level alone.
+static inline bool factor_saturates(long work)
+{
+    return work >= factor_warp_fill();
+}
+
 template <typename T>
 __device__ __forceinline__ T pivot_abs(T x)
 {

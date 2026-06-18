@@ -1,6 +1,11 @@
 # 배치 factorize 구조 최적화 — panel-resident 커널이 whole-front shared 천장을 깬다
 
-> **상태**: reference   **갱신**: 2026-06-13
+> **상태**: SUPERSEDED (panel-resident tier 제거됨, 2026-06-18)   **갱신**: 2026-06-13
+> **정정(2026-06-18, [§10 tier 통합](../05-reports/10-tier-consolidation-2026-06-18.md)):** 이 문서의 핵심 결과인
+> "panel-resident USA B=64 −9.3%"는 **더 이상 재현되지 않는다 — 현재 ~1.2%**(그 사이 whole-front 경로가
+> panel_width 16→8·포화 게이트·커널 개선으로 빨라져 격차가 닫힘). A/B 결과 65–111 front 는 panel-resident보다
+> **global multi-block(옛 large) 커널이 B=1 에서 16% 빠르다.** 그래서 panel-resident "big" 티어는 **제거**되고
+> 65–111 은 global 커널에 흡수됨(4-tier→3-tier). 아래 내용은 역사적 기록.
 > **한 줄**: B=64 factorize 는 memory-latency 바운드(AI≈2 ≪ roofline ridge 10) + thin-K(nc median ~15)라 bandwidth/compute 어느 쪽도 못 채운다. **STRUCTURAL 승리는 panel-resident mid 커널**: L/U 패널만 shared(CB 는 global)로 두어 shared 를 fsz²→nc(fsz+uc) ≈ 3× 축소 → blocks/SM 3–4× → **DRAM 2–32%→55–65%, SyntheticUSA B=64 −9.3%**(default-on). register-block trailing(+4%)·scatter 미세최적화(+2–3%)는 미세 레버. gather/tiled/fewsync/sysblk/small-band-TC 는 전부 회귀(→ §negative).
 
 exp_260612 (RTX 3090, sm_86) 배치 체제. 원자료: `../exp_260612/`(notes 06·09·10), B=1 체제는 [`06-b1-factorize-regime`](06-b1-factorize-regime-2026-06-13.md).

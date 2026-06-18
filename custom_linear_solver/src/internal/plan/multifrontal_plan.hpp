@@ -37,7 +37,7 @@ struct MultifrontalPlan {
     // its largest front's tier. h_level_tier_off has stride (kNumTiers+1) per level: entry
     // [L*(kNumTiers+1)+t] is the absolute start in h_plcols_tier of tier t at level L;
     // [...+kNumTiers] is the level end.
-    static constexpr int kNumTiers = kNumFrontBuckets;  // dispatch tiers: small | mid | big | large
+    static constexpr int kNumTiers = kNumFrontBuckets;  // dispatch tiers: small | mid | big
     std::vector<int> h_plcols_tier;     // P entries: level-major, tier-contiguous within level
     std::vector<int> h_level_tier_off;  // num_plevels * (kNumTiers+1) CSR offsets
     int* d_plcols_tier = nullptr;       // device mirror of h_plcols_tier

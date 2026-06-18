@@ -16,7 +16,7 @@
 //
 //   per-tier routing          — within each pass, the small tier (max_fsz ≤ kSmallFrontMax) goes to
 //                                the warp-packed kernel (8 warps/block, one (front,batch) per warp);
-//                                the mid / big / large tiers share the block-per-front kernel with
+//                                the mid / big tiers share the block-per-front kernel with
 //                                thread count tuned to the level's max_fsz.
 
 #include <cuda_runtime.h>
@@ -503,7 +503,7 @@ static void solve_spine_chain(const MultifrontalPlan& plan, State& st, cudaStrea
 }
 
 // Deterministic per-tier split of one (level- or cell-) range, for either sweep. Each non-empty tier
-// sub-range dispatches to its kernel (small -> warp-packed; mid/big/large -> block-per-front with
+// sub-range dispatches to its kernel (small -> warp-packed; mid/big -> block-per-front with
 // thread count by max_fsz), independent of occupancy. Same range = independent fronts -> order-free.
 // (tier_split=false is a debug fallback that merges the whole range onto its largest front's kernel.)
 static void dispatch_tiered(const MultifrontalPlan& plan, State& st, cudaStream_t ks,

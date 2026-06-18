@@ -8,8 +8,7 @@
 
 #include "factorize/small.cuh"
 #include "factorize/mid.cuh"
-#include "factorize/big.cuh"     // includes mid.cuh — dispatch_factor_big delegates to mid at B==1
-#include "factorize/large.cuh"
+#include "factorize/big.cuh"
 
 namespace custom_linear_solver {
 
@@ -33,9 +32,22 @@ static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
     switch (classify_front_tier(caps.max_fsz, fp64)) {
         case FrontTier::kSmall:  dispatch_factor_small(plan, st, stream, b, e, d_plc, caps);        return;
         case FrontTier::kMid: dispatch_factor_mid(plan, st, stream, b, e, d_plc, h_plc, caps); return;
-        case FrontTier::kBig:   dispatch_factor_big(plan, st, stream, b, e, d_plc, h_plc, caps);   return;
-        case FrontTier::kLarge: dispatch_factor_large(plan, st, stream, b, e, d_plc, h_plc, caps); return;
+        case FrontTier::kBig: dispatch_factor_big(plan, st, stream, b, e, d_plc, h_plc, caps); return;
     }
+}
+
+// STRUMPACK/MAGMA-style baseline: no tier routing, no whole-front shared fusion, one block per
+// (front, batch), with LU / U-solve / trailing / extend-add as separate ordered kernels.
+static void issue_factor_one_block_per_front(const MultifrontalPlan& plan, State& st,
+                                             cudaStream_t stream, int b, int e,
+                                             const int* d_plc)
+{
+    if (e <= b) return;
+    constexpr int do_extend = kFactorDoExtend;
+    if (st.precision == Precision::FP64)
+        dispatch_mid_ablation<double>(plan, st, stream, b, e, d_plc, st.d_front_batch, do_extend);
+    else
+        dispatch_mid_ablation<float>(plan, st, stream, b, e, d_plc, st.d_front_batch_f, do_extend);
 }
 
 // Dispatch one (level- or cell-) range described by its (kNumTiers+1) tier boundaries `tb` into
@@ -89,7 +101,10 @@ static void issue_factor_levels(const MultifrontalPlan& plan, State& st, cudaStr
             for (int L = 0; L < plan.num_plevels; ++L) {
                 if (L >= spine_lo) break;
                 if (cnt[L] == 0) continue;
-                if (have_sub)
+                if (st.one_block_per_front)
+                    issue_factor_one_block_per_front(plan, st, ks, off[L], off[L] + cnt[L],
+                                                     plan.d_plcols);
+                else if (have_sub)
                     issue_factor_tiered(plan, st, ks,
                                         sub_tb + ((long)k * plan.num_plevels + L) * (NT + 1),
                                         plan.d_plcols, plan.h_plcols.data());
@@ -109,14 +124,21 @@ static void issue_factor_levels(const MultifrontalPlan& plan, State& st, cudaStr
         if (plan.spine_start_level >= 0) {
             for (int L = plan.spine_start_level; L < plan.num_plevels; ++L) {
                 const int b = plan.panel_level_ptr[L], e = plan.panel_level_ptr[L + 1];
-                issue_factor_level_range(plan, st, stream, b, e,
-                                         plan.d_plcols, plan.h_plcols.data());
+                if (st.one_block_per_front)
+                    issue_factor_one_block_per_front(plan, st, stream, b, e, plan.d_plcols);
+                else
+                    issue_factor_level_range(plan, st, stream, b, e,
+                                             plan.d_plcols, plan.h_plcols.data());
             }
         }
     } else {
         // Single stream: tier-split each level under the occupancy gate (see issue_factor_tiered).
         for (int L = 0; L < plan.num_plevels; ++L) {
-            if (have_lvl)
+            if (st.one_block_per_front)
+                issue_factor_one_block_per_front(plan, st, stream,
+                                                 plan.panel_level_ptr[L], plan.panel_level_ptr[L + 1],
+                                                 plan.d_plcols);
+            else if (have_lvl)
                 issue_factor_tiered(plan, st, stream, lvl_tb + (long)L * (NT + 1),
                                     plan.d_plcols_tier, plan.h_plcols_tier.data());
             else

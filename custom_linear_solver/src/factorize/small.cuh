@@ -132,14 +132,34 @@ __global__ void factor_small(int lbegin, int level_size, int B, int front_area,
 // packed grid still fills the GPU (mirrors solve/dispatch.cuh solve_small_sg).
 static int factor_small_sg(int max_fsz, long warps_unpacked)
 {
-#ifdef CLS_MID_SG32_ONLY
+#ifdef CLS_SMALL_SG32_ONLY
     (void)max_fsz; (void)warps_unpacked;
     return 32;
 #else
     int sg = (max_fsz <= 8) ? 8 : (max_fsz <= 16 ? 16 : 32);
-    if (warps_unpacked / (32 / sg) < factor_warp_fill()) sg = 32;
+    // Pack (sg<32) only if the packed grid still fills the GPU; else sg=32 to maximise the grid.
+    // Shared fill gate (factor_saturates) — work = packed warp count = (level_size×B)/(32/sg).
+    if (!factor_saturates(warps_unpacked / (32 / sg))) sg = 32;
     return sg;
 #endif
+}
+
+// SMALL-tier ablation decomposition (env CLS_SMALL_AB), read once. Isolates the two axes of the
+// sub-group-packed fused kernel against the STRUMPACK-style mapping:
+//   0 (unset) : baseline — sub-group packing + fusion (factor_small, SG by size, W warps/block)
+//   1 "warp"  : SG=32 → one front per warp (drops SUB-GROUP packing; fusion + block packing kept)
+//   2 "block" : SG=32 + 1 warp/block → one front per block (drops sub-group + block packing; fused)
+//   3 "ops"   : op-separated, one block per front, global (drops fusion too) = dispatch_mid_ablation
+// Decomposition: baseline→warp = sub-group packing; warp→block = block packing; block→ops = fusion.
+inline int small_ab_mode()
+{
+    static const int m = [] {
+        const char* s = std::getenv("CLS_SMALL_AB");
+        if (!s) return 0;
+        const char c = s[0];
+        return c == 'w' ? 1 : c == 'b' ? 2 : c == 'o' ? 3 : 0;
+    }();
+    return m;
 }
 
 // Launch helper: instantiates factor_small for a concrete (front type, sub-group size). Keeps
@@ -184,9 +204,11 @@ static void dispatch_factor_small(const MultifrontalPlan& plan, State& st, cudaS
     const int level_size = e - b;
     constexpr int do_extend = kFactorDoExtend;
 
-    // A/B ablation: process small fronts the MAGMA/STRUMPACK way (one block per front, op-separated,
-    // global) — removes the sub-group packing + fused shared pipeline. (env CLS_SMALL_ABLATION=1)
-    if (small_ablation_enabled()) {
+    // A/B ablation (env CLS_SMALL_AB, see small_ab_mode): "ops" reproduces the MAGMA/STRUMPACK
+    // mapping (op-separated, one block per front, global — fusion + packing both off). The
+    // legacy CLS_SMALL_ABLATION=1 is kept as an alias for "ops".
+    const int ab = small_ab_mode();
+    if (small_ablation_enabled() || ab == 3) {
         if (precision == Precision::FP64)
             dispatch_mid_ablation<double>(plan, st, stream, b, e, d_plc, st.d_front_batch, do_extend);
         else
@@ -194,13 +216,17 @@ static void dispatch_factor_small(const MultifrontalPlan& plan, State& st, cudaS
         return;
     }
 
+    // ab==1 "warp": SG=32 → one front per warp (no sub-group packing).
+    // ab==2 "block": SG=32 + one warp per block → one front per block (no sub-group/block packing).
     const long warps_unpacked = (long)level_size * B;            // unpacked (one-warp-per-front) count
-    const int sub_group_size = factor_small_sg(caps.max_fsz, warps_unpacked), fronts_per_warp = kWarpSize / sub_group_size;
-    const int threads_per_block = kSmallTierWarpsPerBlock * kWarpSize;
-    const int num_blocks = (int)(((warps_unpacked + fronts_per_warp - 1) / fronts_per_warp + kSmallTierWarpsPerBlock - 1) / kSmallTierWarpsPerBlock);
+    const int sub_group_size = (ab == 1 || ab == 2) ? 32 : factor_small_sg(caps.max_fsz, warps_unpacked);
+    const int fronts_per_warp = kWarpSize / sub_group_size;
+    const int warps_per_block = (ab == 2) ? 1 : kSmallTierWarpsPerBlock;
+    const int threads_per_block = warps_per_block * kWarpSize;
+    const int num_blocks = (int)(((warps_unpacked + fronts_per_warp - 1) / fronts_per_warp + warps_per_block - 1) / warps_per_block);
     const int front_area = caps.max_fsz * caps.max_fsz;
     const size_t element_bytes = (precision == Precision::FP64) ? sizeof(double) : sizeof(float);
-    const size_t shared_bytes = (size_t)kSmallTierWarpsPerBlock * fronts_per_warp * front_area * element_bytes;
+    const size_t shared_bytes = (size_t)warps_per_block * fronts_per_warp * front_area * element_bytes;
     if (precision == Precision::FP64)
         launch_factor_small_t<double>(sub_group_size, num_blocks, threads_per_block, shared_bytes, stream, b, level_size, B, front_area,
                                       plan, d_plc, st.d_front_batch, st.d_sing, do_extend,

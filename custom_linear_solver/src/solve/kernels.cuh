@@ -11,10 +11,10 @@
 //   small    | 8 warps      | global (L1)     | solve_fwd_small<T>, solve_bwd_small<T>
 //   regular | 64-256 thr   | global          | solve_fwd<T>, solve_bwd<T>
 //
-// The regular kernels are NOT tier-split into small/big/large like factor — the solve work per front
+// The regular kernels are NOT tier-split into small/mid/big like factor — the solve work per front
 // is much lighter than factor (no rank-nc GEMM; just substitution + CB row update), so a single
 // block-per-front kernel with caller-tuned thread count covers all max_fsz > kSmallFrontMax
-// (i.e. the small / big / large factor tiers all share one solve regular kernel).
+// (i.e. the small / mid / big factor tiers all share one solve regular kernel).
 //
 // Each kernel is a thin orchestrator composing the device building blocks in phases.cuh:
 //   forward:  fwd_substitute  → sync  → fwd_cb_update
