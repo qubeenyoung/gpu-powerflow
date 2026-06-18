@@ -579,7 +579,8 @@ int main(int argc, char** argv) {
     std::cout
         << "matrix=" << options.matrix_path << '\n'
         << "rhs=" << options.rhs_path << '\n'
-        << "n=" << matrix.rows << " nnz=" << matrix.nnz() << '\n'
+        << "n=" << matrix.rows << '\n'
+        << "nnz=" << matrix.nnz() << '\n'
         << "precision=" << (options.fp32 ? "fp32" : "fp64") << '\n'
         << "repeat=" << options.repeat << '\n'
         << "matching=" << (options.use_matching ? 1 : 0) << '\n'

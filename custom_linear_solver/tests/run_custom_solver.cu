@@ -410,7 +410,8 @@ int main(int argc, char** argv) {
       std::cout
           << "matrix=\"" << options.matrix_path.string() << "\"\n"
           << "rhs=\"" << options.rhs_path.string() << "\"\n"
-          << "n=" << matrix.rows << " nnz=" << matrix.nnz() << '\n'
+          << "n=" << matrix.rows << '\n'
+          << "nnz=" << matrix.nnz() << '\n'
           << "parallel_nd=" << (options.use_parallel_nested_dissection ? 1 : 0)
           << '\n'
           << "read_ms="
@@ -576,7 +577,8 @@ int main(int argc, char** argv) {
 
     std::cout << "matrix=" << options.matrix_path << '\n'
               << "rhs=" << options.rhs_path << '\n'
-              << "n=" << matrix.rows << " nnz=" << matrix.nnz() << '\n'
+              << "n=" << matrix.rows << '\n'
+              << "nnz=" << matrix.nnz() << '\n'
               << "parallel_nd="
               << (options.use_parallel_nested_dissection ? 1 : 0) << '\n'
               << "repeat=" << options.repeat << " warmup=" << options.warmup

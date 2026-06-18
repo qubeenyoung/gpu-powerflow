@@ -7,67 +7,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-option(CLS_BUILD_CUDA_OPS "Build copied CUDA multifrontal operation kernels" ON)
-# ON  (default): batched_setup captures the factor/solve kernels into internal CUDA graphs that
-#                batched_factorize/solve replay (the standalone behavior).
-# OFF: external/capturable mode. The batched path issues its kernels directly onto a caller stream
-#      (batched_set_stream) with no internal graph and no host sync, so an OUTER stream capture
+option(CLS_BUILD_CUDA_OPS "Build the CUDA multifrontal factor/solve kernels" ON)
+# ON  (default): setup captures the factor/solve kernels into internal CUDA graphs that
+#                factorize/solve replay (the standalone behavior).
+# OFF: external/capturable mode. The factor/solve path issues its kernels directly onto a caller
+#      stream (set_stream) with no internal graph and no host sync, so an OUTER stream capture
 #      (e.g. cuPF's whole-iteration graph) can record them. cuPF forces this OFF when built with
 #      CUPF_ENABLE_CUDA_GRAPH.
-option(CLS_INTERNAL_GRAPH "Capture batched factor/solve into internal CUDA graphs" ON)
+option(CLS_INTERNAL_GRAPH "Capture factor/solve into internal CUDA graphs" ON)
 option(CLS_BUILD_SCRIPTS "Build custom_linear_solver command-line scripts" ON)
 option(CLS_BUILD_CUDSS_SCRIPT "Build cuDSS command-line comparison script" OFF)
-option(CLS_ENABLE_NVTX "Enable NVTX ranges in command-line profiling scripts" OFF)
-option(CLS_FUSE_TF32_TRAIL_EXTEND
-  "Experimental: fuse TF32 tensor-core trailing drain with extend-add for big fronts (helps B=1, neutral/regresses at batch; see note 55)" OFF)
-option(CLS_FUSE_SCALAR_TRAIL_EXTEND
-  "Experimental: fuse staged-scalar (fp32/fp64) trailing drain with extend-add for mid/big fronts — removes the CB global write+read round-trip (atomicAdd straight to parent)" OFF)
-option(CLS_TF32_OZAKI_TC2
-  "Experimental: use two-component Ozaki-style TF32 head/tail Tensor Core products" OFF)
-option(CLS_TF32_OZAKI_TC2_FIRST_ORDER
-  "Experimental: omit the tail-tail product from CLS_TF32_OZAKI_TC2" OFF)
-option(CLS_RESPECT_PANEL_CAP
-  "Experimental: respect the requested panel cap instead of overriding it by matrix size" OFF)
-option(CLS_SMALL_SG32_ONLY
-  "Diagnostic: force small-front factor/solve kernels to the legacy one-front-per-warp subgroup size" OFF)
-set(CLS_PAR_ND_DEPTH "4" CACHE STRING
-  "Diagnostic: recursion depth for parallel nested dissection")
-if(NOT CLS_PAR_ND_DEPTH MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CLS_PAR_ND_DEPTH must be an integer")
-endif()
-set(CLS_PAR_ND_SMALL_BASE_THR "4000" CACHE STRING
-  "Diagnostic: base METIS_NodeND threshold for parallel ND when n < 20000")
-if(NOT CLS_PAR_ND_SMALL_BASE_THR MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CLS_PAR_ND_SMALL_BASE_THR must be an integer")
-endif()
-set(CLS_PAR_ND_LARGE_BASE_THR "20000" CACHE STRING
-  "Diagnostic: base METIS_NodeND threshold for parallel ND when n >= 20000")
-if(NOT CLS_PAR_ND_LARGE_BASE_THR MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CLS_PAR_ND_LARGE_BASE_THR must be an integer")
-endif()
-if(CLS_TF32_OZAKI_TC2_FIRST_ORDER)
-  set(CLS_TF32_OZAKI_TC2 ON CACHE BOOL
-      "Experimental: use two-component Ozaki-style TF32 head/tail Tensor Core products" FORCE)
-endif()
-# Compile-time gate for the profile/dump toolkit (src/profile/). Default ON for Debug builds,
-# OFF for Release/RelWithDebInfo/MinSizeRel — when OFF, all profile macros expand to no-ops,
-# profile.cpp is not compiled, and libnvToolsExt is not linked.
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(_CLS_PROFILE_DEFAULT ON)
-else()
-  set(_CLS_PROFILE_DEFAULT OFF)
-endif()
-option(CLS_ENABLE_PROFILE
-  "Compile in profile/dump instrumentation (CSV timers + buffer dumps)" ${_CLS_PROFILE_DEFAULT})
 
 set(CLS_CUDA_ARCHITECTURES "86" CACHE STRING
-  "CUDA architectures for custom_linear_solver_ops; must be >= 80 for TF32 WMMA")
+  "CUDA architectures for custom_linear_solver_ops; must be >= 80 for TF32 mma")
 
 foreach(_cls_arch IN LISTS CLS_CUDA_ARCHITECTURES)
   string(REGEX REPLACE "-.*$" "" _cls_arch_num "${_cls_arch}")
   if(_cls_arch_num MATCHES "^[0-9]+$" AND _cls_arch_num LESS 80)
     message(FATAL_ERROR
-      "custom_linear_solver requires CLS_CUDA_ARCHITECTURES >= 80 for TF32 WMMA; "
+      "custom_linear_solver requires CLS_CUDA_ARCHITECTURES >= 80 for TF32 mma; "
       "got ${_cls_arch}.")
   endif()
 endforeach()
@@ -110,32 +68,6 @@ if(CLS_BUILD_CUDA_OPS)
     src/analyze/reorder/metis_nd.cpp
   )
 
-  # Profile module: compiled in only when CLS_ENABLE_PROFILE=ON. Pulls in NVTX as a link
-  # dependency since profile.cpp uses libnvToolsExt directly. When OFF, profile.hpp inlines
-  # empty stubs and none of this is needed.
-  if(CLS_ENABLE_PROFILE)
-    list(APPEND CLS_OP_SOURCES src/profile/profile.cpp)
-    find_path(NVTX_INCLUDE_DIR
-      NAMES nvtx3/nvToolsExt.h nvToolsExt.h
-      HINTS
-        /usr/local/cuda/include
-        /usr/local/cuda-12.8/targets/x86_64-linux/include
-        $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/nvtx/include
-        /usr/local/lib/python3.10/dist-packages/nvidia/nvtx/include)
-    find_library(NVTOOLSEXT_LIBRARY
-      NAMES nvToolsExt
-      HINTS
-        /usr/local/cuda/lib64
-        /usr/local/cuda-12.8/targets/x86_64-linux/lib
-        /usr/lib
-        /usr/lib/x86_64-linux-gnu)
-    if(NOT NVTX_INCLUDE_DIR OR NOT NVTOOLSEXT_LIBRARY)
-      message(FATAL_ERROR
-        "CLS_ENABLE_PROFILE=ON requires NVTX headers and libnvToolsExt.")
-    endif()
-    get_filename_component(NVTOOLSEXT_LIBRARY_DIR "${NVTOOLSEXT_LIBRARY}" DIRECTORY)
-  endif()
-
   add_library(custom_linear_solver_ops STATIC ${CLS_OP_SOURCES})
   target_include_directories(custom_linear_solver_ops PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -146,36 +78,9 @@ if(CLS_BUILD_CUDA_OPS)
     CUDA::cublas
     ${METIS_LIBRARY}
   )
-  if(CLS_ENABLE_PROFILE)
-    target_compile_definitions(custom_linear_solver_ops PUBLIC CLS_ENABLE_PROFILE=1)
-    target_include_directories(custom_linear_solver_ops PUBLIC ${NVTX_INCLUDE_DIR})
-    target_link_libraries(custom_linear_solver_ops PUBLIC ${NVTOOLSEXT_LIBRARY})
-  endif()
   if(CLS_INTERNAL_GRAPH)
     target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_INTERNAL_GRAPH)
   endif()
-  if(CLS_FUSE_SCALAR_TRAIL_EXTEND)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_FUSE_SCALAR_TRAIL_EXTEND)
-  endif()
-  if(CLS_FUSE_TF32_TRAIL_EXTEND)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_FUSE_TF32_TRAIL_EXTEND)
-  endif()
-  if(CLS_TF32_OZAKI_TC2)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_TF32_OZAKI_TC2)
-  endif()
-  if(CLS_TF32_OZAKI_TC2_FIRST_ORDER)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_TF32_OZAKI_TC2_FIRST_ORDER)
-  endif()
-  if(CLS_RESPECT_PANEL_CAP)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_RESPECT_PANEL_CAP)
-  endif()
-  if(CLS_SMALL_SG32_ONLY)
-    target_compile_definitions(custom_linear_solver_ops PRIVATE CLS_SMALL_SG32_ONLY)
-  endif()
-  target_compile_definitions(custom_linear_solver_ops PRIVATE
-    CLS_PAR_ND_DEPTH=${CLS_PAR_ND_DEPTH}
-    CLS_PAR_ND_SMALL_BASE_THR=${CLS_PAR_ND_SMALL_BASE_THR}
-    CLS_PAR_ND_LARGE_BASE_THR=${CLS_PAR_ND_LARGE_BASE_THR})
   set_target_properties(custom_linear_solver_ops PROPERTIES
     CUDA_ARCHITECTURES "${CLS_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION OFF
@@ -184,30 +89,6 @@ if(CLS_BUILD_CUDA_OPS)
   target_link_libraries(custom_linear_solver_api INTERFACE custom_linear_solver_ops)
 
   if(CLS_BUILD_SCRIPTS)
-    # When CLS_ENABLE_NVTX is set, both runners get NVTX include + library so their
-    # NVTX_RANGE_* helpers compile through to libnvToolsExt. Located here so the
-    # detection runs once before either target is configured.
-    if(CLS_ENABLE_NVTX)
-      find_path(NVTX_INCLUDE_DIR
-        NAMES nvtx3/nvToolsExt.h nvToolsExt.h
-        HINTS
-          /usr/local/cuda/include
-          /usr/local/cuda-12.8/targets/x86_64-linux/include
-          $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/nvtx/include
-          /usr/local/lib/python3.10/dist-packages/nvidia/nvtx/include)
-      find_library(NVTOOLSEXT_LIBRARY
-        NAMES nvToolsExt
-        HINTS
-          /usr/local/cuda/lib64
-          /usr/local/cuda-12.8/targets/x86_64-linux/lib
-          /usr/lib
-          /usr/lib/x86_64-linux-gnu)
-      if(NOT NVTX_INCLUDE_DIR OR NOT NVTOOLSEXT_LIBRARY)
-        message(FATAL_ERROR "CLS_ENABLE_NVTX=ON requires NVTX headers and libnvToolsExt.")
-      endif()
-      get_filename_component(NVTOOLSEXT_LIBRARY_DIR "${NVTOOLSEXT_LIBRARY}" DIRECTORY)
-    endif()
-
     add_executable(custom_linear_solver_run
       tests/io.cpp
       tests/run_custom_solver.cu
@@ -222,13 +103,6 @@ if(CLS_BUILD_CUDA_OPS)
       CUDA_ARCHITECTURES "${CLS_CUDA_ARCHITECTURES}"
       CUDA_SEPARABLE_COMPILATION OFF
     )
-    if(CLS_ENABLE_NVTX)
-      target_compile_definitions(custom_linear_solver_run PRIVATE CLS_ENABLE_NVTX=1)
-      target_include_directories(custom_linear_solver_run PRIVATE ${NVTX_INCLUDE_DIR})
-      target_link_libraries(custom_linear_solver_run PRIVATE ${NVTOOLSEXT_LIBRARY})
-      set_target_properties(custom_linear_solver_run PROPERTIES
-        BUILD_RPATH "${NVTOOLSEXT_LIBRARY_DIR}")
-    endif()
 
     if(CLS_BUILD_CUDSS_SCRIPT)
       find_path(CUDSS_INCLUDE_DIR
@@ -264,17 +138,8 @@ if(CLS_BUILD_CUDA_OPS)
         CUDA::cudart
         ${CUDSS_LIBRARY}
       )
-      set(CUDSS_RUN_RPATH "${CUDSS_LIBRARY_DIR}")
-      if(CLS_ENABLE_NVTX)
-        # NVTX include / library are detected once above (next to the
-        # custom_linear_solver_run target). Reuse the cached vars here.
-        target_compile_definitions(cudss_run PRIVATE CLS_ENABLE_NVTX=1)
-        target_include_directories(cudss_run PRIVATE ${NVTX_INCLUDE_DIR})
-        target_link_libraries(cudss_run PRIVATE ${NVTOOLSEXT_LIBRARY})
-        set(CUDSS_RUN_RPATH "${CUDSS_RUN_RPATH};${NVTOOLSEXT_LIBRARY_DIR}")
-      endif()
       set_target_properties(cudss_run PROPERTIES
-        BUILD_RPATH "${CUDSS_RUN_RPATH}"
+        BUILD_RPATH "${CUDSS_LIBRARY_DIR}"
       )
     endif()
   endif()
