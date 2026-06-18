@@ -136,10 +136,23 @@ enum class CustomPrecision {
     TF32,   // TensorCore TF32 factor (Ozaki) — FP32 storage(compute=FP32/Mixed) 위에서만
 };
 
+enum class CustomMatchingMode {
+    None,
+    Structural,
+};
+
+enum class CustomPivotStrategy {
+    None,
+    StaticDiagonalShift,
+    DynamicPartial,
+};
+
 struct CustomSolverConfig {
     CustomPrecision precision           = CustomPrecision::FP32;  // factor 정밀도
+    CustomMatchingMode matching         = CustomMatchingMode::None;
+    CustomPivotStrategy pivot_strategy  = CustomPivotStrategy::StaticDiagonalShift;
     bool            serial_nd           = false;    // 결정적 serial METIS-ND (false = parallel-ND)
-    int             metis_seed          = 42;       // nested-dissection random seed
+    int             metis_seed          = 49;       // nested-dissection random seed
     bool            tier_split          = true;     // occupancy tier-split 디스패치
     int             max_panel_width     = 8;        // supernode amalgamation cap
     bool            enable_shift_retry  = true;     // 특이 pivot 시 diagonal shift 재시도

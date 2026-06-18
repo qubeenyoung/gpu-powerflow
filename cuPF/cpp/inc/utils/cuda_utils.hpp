@@ -65,11 +65,21 @@
   #endif
 #endif
 
+inline cudaStream_t cupf_current_cuda_stream();
+
 // Block until the device is idle — but only in timing builds, so release
 // builds keep kernels asynchronous. Used after launches to attribute time.
 inline void sync_cuda_for_timing()
 {
 #ifdef CUPF_ENABLE_TIMING
+    const cudaStream_t stream = cupf_current_cuda_stream();
+    if (stream != nullptr) {
+        cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+        CUDA_CHECK(cudaStreamIsCapturing(stream, &status));
+        if (status != cudaStreamCaptureStatusNone) {
+            return;
+        }
+    }
     CUDA_CHECK(cudaDeviceSynchronize());
 #endif
 }

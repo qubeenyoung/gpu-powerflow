@@ -14,19 +14,21 @@
 
 namespace {
 
-// Parsed "<backend>-<precision>" spec, e.g. "custom-tf32" / "cudss-fp64". A bare precision
-// ("fp64") defaults to the cuDSS backend (back-compat with the old <compute> arg).
+// Parsed "<backend>-<linear_precision>" spec, e.g. "custom-tf32" / "cudss-fp64".
+// In the paper experiment naming, fp32/tf32 suffixes mean cuPF Mixed compute with
+// the selected linear backend precision. Full-FP32 diagnostic paths must be named
+// explicitly as "<backend>-full-fp32".
 struct BenchSpec {
     CudaLinearSolverKind backend     = CudaLinearSolverKind::CuDSS;
     ComputePolicy        compute     = ComputePolicy::Mixed;
     CustomPrecision      custom_prec = CustomPrecision::FP32;
 };
 
-// Grammar: [<backend>-]<compute>[-<custom_precision>]
+// Grammar: [<backend>-]<precision>
 //   backend          : cudss | custom            (default cudss)
-//   compute          : fp64 | fp32 | mixed        (cuPF ComputePolicy)
-//   custom_precision : fp64 | fp32 | tf32         (custom factor precision; default fp32)
-// e.g. cudss-fp64, custom-fp64, cudss-mixed, custom-mixed-fp32, custom-mixed-tf32.
+//   precision        : fp64 | fp32 | tf32 | mixed | full-fp32
+// e.g. cudss-fp64, cudss-fp32, custom-fp64, custom-fp32, custom-tf32.
+// Legacy spellings custom-mixed-fp32/custom-mixed-tf32 are still accepted.
 BenchSpec parse_spec(const std::string& s)
 {
     std::vector<std::string> t;
@@ -42,15 +44,29 @@ BenchSpec parse_spec(const std::string& s)
         spec.backend = (t[0] == "custom") ? CudaLinearSolverKind::Custom : CudaLinearSolverKind::CuDSS;
         idx = 1;
     }
-    const std::string compute = (idx < t.size()) ? t[idx] : "mixed";
-    const std::string cprec   = (idx + 1 < t.size()) ? t[idx + 1] : "";
-    if      (compute == "fp64") { spec.compute = ComputePolicy::FP64;  spec.custom_prec = CustomPrecision::FP64; }
-    else if (compute == "fp32") { spec.compute = ComputePolicy::FP32;  spec.custom_prec = CustomPrecision::FP32; }
-    else if (compute == "tf32") { spec.compute = ComputePolicy::FP32;  spec.custom_prec = CustomPrecision::TF32; }
-    else                        { spec.compute = ComputePolicy::Mixed; spec.custom_prec = CustomPrecision::FP32; }
-    if      (cprec == "fp64") spec.custom_prec = CustomPrecision::FP64;
-    else if (cprec == "fp32") spec.custom_prec = CustomPrecision::FP32;
-    else if (cprec == "tf32") spec.custom_prec = CustomPrecision::TF32;
+    const std::string precision = (idx < t.size()) ? t[idx] : "fp32";
+    const std::string cprec     = (idx + 1 < t.size()) ? t[idx + 1] : "";
+
+    if (precision == "fp64") {
+        spec.compute = ComputePolicy::FP64;
+        spec.custom_prec = CustomPrecision::FP64;
+    } else if (precision == "fp32") {
+        spec.compute = ComputePolicy::Mixed;
+        spec.custom_prec = CustomPrecision::FP32;
+    } else if (precision == "tf32") {
+        spec.compute = ComputePolicy::Mixed;
+        spec.custom_prec = CustomPrecision::TF32;
+    } else if (precision == "mixed") {
+        spec.compute = ComputePolicy::Mixed;
+        spec.custom_prec = CustomPrecision::FP32;
+    } else if (precision == "full" && cprec == "fp32") {
+        spec.compute = ComputePolicy::FP32;
+        spec.custom_prec = CustomPrecision::FP32;
+    }
+
+    if      (precision == "mixed" && cprec == "fp64") spec.custom_prec = CustomPrecision::FP64;
+    else if (precision == "mixed" && cprec == "fp32") spec.custom_prec = CustomPrecision::FP32;
+    else if (precision == "mixed" && cprec == "tf32") spec.custom_prec = CustomPrecision::TF32;
     return spec;
 }
 
@@ -58,10 +74,10 @@ BenchSpec parse_spec(const std::string& s)
 
 int main(int argc, char** argv)
 {
-    // args: <case_dir> <backend-precision> <B1,B2,...> [repeats] [max_iter] [scale_step]
+    // args: <case_dir> <backend-precision> <B1,B2,...> [repeats] [max_iter] [scale_step] [metis_seed] [matching] [pivot] [pivot_eps] [jacobian]
     if (argc < 4) {
-        std::cerr << "usage: batch_bench <case_dir> <backend-precision> <B1,B2,...> [repeats] [max_iter] [scale_step]\n"
-                  << "  backend-precision: cudss-fp64|cudss-fp32|cudss-mixed|custom-fp64|custom-fp32|custom-tf32\n";
+        std::cerr << "usage: batch_bench <case_dir> <backend-precision> <B1,B2,...> [repeats] [max_iter] [scale_step] [metis_seed] [matching] [pivot] [pivot_eps] [jacobian]\n"
+                  << "  backend-precision: cudss-fp64|cudss-fp32|custom-fp64|custom-fp32|custom-tf32\n";
         return 2;
     }
     const std::string case_dir = argv[1];
@@ -80,6 +96,12 @@ int main(int argc, char** argv)
     const int repeats              = (argc > 4) ? std::stoi(argv[4]) : 5;
     const int max_iter             = (argc > 5) ? std::stoi(argv[5]) : 30;
     const double load_scale_step   = (argc > 6) ? std::stod(argv[6]) : 0.001;
+    const int metis_seed           = (argc > 7) ? std::stoi(argv[7]) : 49;
+    const std::string matching_arg = (argc > 8) ? argv[8] : "none";
+    const std::string pivot_arg    = (argc > 9) ? argv[9] : "shift";
+    const double pivot_epsilon     = (argc > 10) ? std::stod(argv[10]) : 1.0e-8;
+    std::string jacobian_arg       = (argc > 11) ? argv[11] : "edge";
+    if (const char* j = std::getenv("CUPF_BENCH_JACOBIAN")) jacobian_arg = j;
 
     const auto data = cupf::tests::load_dump_case(case_dir);
     const int32_t n = data.rows;
@@ -88,9 +110,35 @@ int main(int argc, char** argv)
     opts.backend            = BackendKind::CUDA;
     opts.compute            = spec.compute;
     opts.cuda_linear_solver = spec.backend;
+    if (jacobian_arg == "edge") {
+        opts.cuda_jacobian = CudaJacobianKind::Edge;
+    } else if (jacobian_arg == "edge_atomic") {
+        opts.cuda_jacobian = CudaJacobianKind::EdgeAtomic;
+    } else if (jacobian_arg == "vertex_warp" || jacobian_arg == "vertex") {
+        opts.cuda_jacobian = CudaJacobianKind::VertexWarp;
+    } else {
+        throw std::invalid_argument("jacobian must be edge, edge_atomic, vertex_warp, or vertex");
+    }
     opts.custom.precision   = spec.custom_prec;   // ignored unless backend = Custom
     opts.custom.serial_nd   = true;               // deterministic ordering for reproducible benchmarking
-    opts.custom.metis_seed  = 1588;               // (matches the standalone sweep)
+    opts.custom.metis_seed  = metis_seed;         // deterministic ordering seed
+    if (matching_arg == "none" || matching_arg == "0") {
+        opts.custom.matching = CustomMatchingMode::None;
+    } else if (matching_arg == "structural" || matching_arg == "1") {
+        opts.custom.matching = CustomMatchingMode::Structural;
+    } else {
+        throw std::invalid_argument("matching must be none|0 or structural|1");
+    }
+    if (pivot_arg == "none" || pivot_arg == "0") {
+        opts.custom.pivot_strategy = CustomPivotStrategy::None;
+    } else if (pivot_arg == "shift" || pivot_arg == "1") {
+        opts.custom.pivot_strategy = CustomPivotStrategy::StaticDiagonalShift;
+    } else if (pivot_arg == "partial") {
+        opts.custom.pivot_strategy = CustomPivotStrategy::DynamicPartial;
+    } else {
+        throw std::invalid_argument("pivot must be none|0, shift|1, or partial");
+    }
+    opts.custom.shift_retry_epsilon = pivot_epsilon;
 
     NRConfig config;
     config.tolerance = 1e-6;
@@ -100,8 +148,9 @@ int main(int argc, char** argv)
 
     std::cout << "case=" << data.case_name << " n_bus=" << n
               << " nnz=" << data.ybus_data.size()
-              << " spec=" << argv[2] << "\n";
-    std::cout << "B,solve_total_us,ibus_us,mismatch_us,mnorm_us,jac_us,prep_us,fac_us,sol_us,vupd_us,upload_us,download_us\n";
+              << " spec=" << argv[2]
+              << " jacobian=" << jacobian_arg << "\n";
+    std::cout << "B,solve_total_us,ibus_us,mismatch_us,mnorm_us,jac_us,prep_us,fac_us,sol_us,vupd_us,upload_us,download_us,converged_count,max_mismatch,max_iterations\n";
 
     for (int32_t B : batches) {
         // Replicate sbus/V0 into B contiguous cases (stride = n). A configurable
@@ -139,6 +188,18 @@ int main(int argc, char** argv)
             }
             return 0.0;
         };
+        int32_t converged_count = 0;
+        double max_mismatch = 0.0;
+        int32_t max_iterations = 0;
+        for (uint8_t c : result.converged) {
+            converged_count += (c != 0);
+        }
+        for (double mismatch : result.final_mismatch) {
+            max_mismatch = std::max(max_mismatch, mismatch);
+        }
+        for (int32_t it : result.iterations) {
+            max_iterations = std::max(max_iterations, it);
+        }
 
         std::cout << B << ","
                   << us("NR.solve.total") << ","
@@ -152,6 +213,10 @@ int main(int argc, char** argv)
                   << us("NR.iteration.voltage_update") << ","
                   << us("NR.solve.upload") << ","
                   << us("NR.solve.download")
+                  << ","
+                  << converged_count << ","
+                  << max_mismatch << ","
+                  << max_iterations
                   << "   (iters=" << (result.iterations.empty() ? -1 : result.iterations[0]) << ")\n";
     }
     return 0;

@@ -4,12 +4,13 @@
 // with CUDA-graph capture); it just times the whole solve_batch with warmup + averaging. solve_batch
 // is synchronous on return (it downloads results), so chrono captures the full GPU time.
 //
-//   usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats] [max_iter] [scale_step] [tol]
+//   usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats] [max_iter] [scale_step] [tol] [custom_precision]
 //
 // backend:
 //   cudss        - cuda_linear_solver=CuDSS
 //   custom       - cuda_linear_solver=Custom, use_cuda_graph=false
 //   custom_graph - cuda_linear_solver=Custom, use_cuda_graph=true (needs a CUPF_ENABLE_CUDA_GRAPH build)
+// custom_precision: fp32 (default) | tf32 | fp64. FP64 is clamped to FP32 for Mixed storage.
 #include "dump_case_loader.hpp"
 #include "newton_solver/core/newton_solver.hpp"
 #include "utils/timer.hpp"
@@ -25,7 +26,7 @@
 int main(int argc, char** argv)
 {
     if (argc < 4) {
-        std::cerr << "usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats] [max_iter] [scale_step] [tol]\n";
+        std::cerr << "usage: graph_bench <case_dir> <cudss|custom|custom_graph> <B1,B2,...> [repeats] [max_iter] [scale_step] [tol] [custom_precision]\n";
         return 2;
     }
     const std::string case_dir = argv[1];
@@ -46,6 +47,7 @@ int main(int argc, char** argv)
     const int max_iter             = (argc > 5) ? std::stoi(argv[5]) : 30;
     const double load_scale_step   = (argc > 6) ? std::stod(argv[6]) : 0.001;
     const double tolerance         = (argc > 7) ? std::stod(argv[7]) : 1e-8;
+    const std::string custom_precision = (argc > 8) ? argv[8] : "fp32";
 
     NewtonOptions opts;
     opts.backend = BackendKind::CUDA;
@@ -61,6 +63,18 @@ int main(int argc, char** argv)
         std::cerr << "unknown backend: " << backend << "\n";
         return 2;
     }
+    if (custom_precision == "fp32") {
+        opts.custom.precision = CustomPrecision::FP32;
+    } else if (custom_precision == "tf32") {
+        opts.custom.precision = CustomPrecision::TF32;
+    } else if (custom_precision == "fp64") {
+        opts.custom.precision = CustomPrecision::FP64;
+    } else {
+        std::cerr << "unknown custom_precision: " << custom_precision << "\n";
+        return 2;
+    }
+    opts.custom.serial_nd = true;
+    opts.custom.metis_seed = 49;
 
     const auto data = cupf::tests::load_dump_case(case_dir);
     const int32_t n = data.rows;
@@ -72,6 +86,7 @@ int main(int argc, char** argv)
 
     std::cout << "case=" << data.case_name << " n_bus=" << n
               << " nnz=" << data.ybus_data.size() << " backend=" << backend
+              << " custom_precision=" << custom_precision
               << " tol=" << config.tolerance << "\n";
     std::cout << "B,init_ms,warmup_ms,solve_ms,ms_per_sys,iters,relmis\n";
 

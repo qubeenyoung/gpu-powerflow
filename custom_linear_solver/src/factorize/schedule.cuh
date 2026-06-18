@@ -1,14 +1,31 @@
 #pragma once
 
-// FACTORIZE — elimination-tree schedule (entry point). Walks the panel-etree level by level,
-// forking independent subtrees onto their own streams, and dispatches each tier-homogeneous range to
-// its dedicated kernel — small / mid / big / large (factorize/{small,mid,big,large}.cuh, one file
-// per tier). Routing is a deterministic function of front size (internal/types.hpp
-// classify_front_tier), not occupancy. issue_factor_levels is wrapped by factorize/factorize.cu.
+// FACTORIZE — elimination-tree schedule (entry point). One decision point,
+// UseSingleSystem(st)
+// (= B == 1, see internal/runtime/state.hpp), splits the two coherent paths:
+//
+//   B == 1  (single-system): the batched front-major schedule's per-level launch
+//            / barrier latency is exposed, so factor each front with one block.
+//            All precisions use the fused single-system kernels (Factorize/
+//            single.cuh): the big-front triple is templated on the front type
+//            (FP32 big fronts get the multi-block path too), and for TF32 the big
+//            trailing runs on the Tensor Cores (FactorSingleBigTrailTf32). The
+//            pivot blocks are then inverted (partitioned inverse) so the single-
+//            system Solve runs parallel GEMVs.
+//
+//   B  > 1  (batched): walk the panel Etree level by level, forking independent
+//   subtrees onto their
+//            own streams, dispatching each tier-homogeneous range to its
+//            dedicated kernel (small / mid / big,
+//            Factorize/{small,mid,big}.cuh). Routing is a deterministic
+//            function of front size (internal/types.hpp ClassifyFrontTier).
+//
+// IssueFactorLevels is wrapped by Factorize/Factorize.cu.
 
-#include "factorize/small.cuh"
-#include "factorize/mid.cuh"
 #include "factorize/big.cuh"
+#include "factorize/mid.cuh"
+#include "factorize/single.cuh"  // B=1 single-system factor schedule + partitioned-inverse
+#include "factorize/small.cuh"
 
 namespace custom_linear_solver {
 
@@ -16,136 +33,147 @@ using custom_linear_solver::plan::MultifrontalPlan;
 
 namespace {
 
-// Per-range dispatcher: scan the panels in plcols[b..e), pick the tier from the level's max front
-// size, and dispatch one right-sized kernel. The big tier delegates to the mid-tier whole-front
-// kernel at B==1 (see dispatch_factor_big).
-static void issue_factor_level_range(const MultifrontalPlan& plan, State& st,
-                                     cudaStream_t stream, int b, int e,
-                                     const int* d_plc, const int* h_plc)
-{
-    if (e <= b) return;
-    const FrontRangeCaps caps = scan_front_range(plan, h_plc, b, e);
-    const bool fp64 = (st.precision == Precision::FP64);
-    // Deterministic tier -> dedicated kernel (boundaries in internal/types.hpp). The range is
-    // tier-homogeneous (analyze grouped it), so classifying by its max front size routes the whole
-    // range to a single kernel — no occupancy/opt-in gate decides which kernel runs.
-    switch (classify_front_tier(caps.max_fsz, fp64)) {
-        case FrontTier::kSmall:  dispatch_factor_small(plan, st, stream, b, e, d_plc, caps);        return;
-        case FrontTier::kMid: dispatch_factor_mid(plan, st, stream, b, e, d_plc, h_plc, caps); return;
-        case FrontTier::kBig: dispatch_factor_big(plan, st, stream, b, e, d_plc, h_plc, caps); return;
+// Per-range dispatcher: scan the panels in plcols[b..e), pick the tier from the
+// level's max front size, and dispatch one right-sized kernel. The big tier
+// delegates to the mid-tier whole-front kernel at B==1 (see
+// DispatchFactorBig).
+static void IssueFactorLevelRange(const MultifrontalPlan& plan, State& st,
+                                  cudaStream_t stream, int b, int e,
+                                  const int* d_plc, const int* h_plc) {
+  if (e <= b) return;
+  const FrontRangeCaps caps = ScanFrontRange(plan, h_plc, b, e);
+  const bool fp64 = (st.precision == Precision::FP64);
+  switch (ClassifyFrontTier(caps.max_fsz, fp64)) {
+    case FrontTier::kSmall: {
+      // Occupancy gate: when the small tier under-fills the GPU (narrow levels)
+      // give each front a whole block (FactorMid); when it saturates, pack
+      // fronts into warps (FactorSmall). fp32 fronts are lighter, so count
+      // their work ×2.
+      const long work = (long)(e - b) * (long)st.batch_count;
+      const long eff_work = fp64 ? work : work * 2;
+      if (!FactorSaturates(eff_work))
+        DispatchFactorMid(plan, st, stream, b, e, d_plc, h_plc, caps);
+      else
+        DispatchFactorSmall(plan, st, stream, b, e, d_plc, caps);
+      return;
     }
+    case FrontTier::kMid:
+      DispatchFactorMid(plan, st, stream, b, e, d_plc, h_plc, caps);
+      return;
+    case FrontTier::kBig:
+      DispatchFactorBig(plan, st, stream, b, e, d_plc, h_plc, caps);
+      return;
+  }
 }
 
-// STRUMPACK/MAGMA-style baseline: no tier routing, no whole-front shared fusion, one block per
-// (front, batch), with LU / U-solve / trailing / extend-add as separate ordered kernels.
-static void issue_factor_one_block_per_front(const MultifrontalPlan& plan, State& st,
-                                             cudaStream_t stream, int b, int e,
-                                             const int* d_plc)
-{
-    if (e <= b) return;
-    constexpr int do_extend = kFactorDoExtend;
-    if (st.precision == Precision::FP64)
-        dispatch_mid_ablation<double>(plan, st, stream, b, e, d_plc, st.d_front_batch, do_extend);
-    else
-        dispatch_mid_ablation<float>(plan, st, stream, b, e, d_plc, st.d_front_batch_f, do_extend);
+// Dispatch one (level- or cell-) range described by its (kNumTiers+1) tier
+// boundaries `tb` into d_plc/h_plc: each non-empty tier sub-range -> its
+// dedicated kernel. Same range = independent fronts, so the small->mid->big
+// sub-launches are order-free and correct.
+static void IssueFactorTiered(const MultifrontalPlan& plan, State& st,
+                              cudaStream_t stream, const int* tb,
+                              const int* d_plc, const int* h_plc) {
+  constexpr int NT = MultifrontalPlan::kNumTiers;
+  for (int t = 0; t < NT; ++t)
+    if (tb[t + 1] > tb[t])
+      IssueFactorLevelRange(plan, st, stream, tb[t], tb[t + 1], d_plc, h_plc);
 }
 
-// Dispatch one (level- or cell-) range described by its (kNumTiers+1) tier boundaries `tb` into
-// d_plc/h_plc. Splits into tier-homogeneous sub-launches when the occupancy gate passes, else
-// dispatches the whole range on the larger kernel (pre-split behaviour). Same range = independent
-// fronts, so the small→mid→big→large sub-launches are order-free and correct.
-static void issue_factor_tiered(const MultifrontalPlan& plan, State& st, cudaStream_t stream,
-                                const int* tb, const int* d_plc, const int* h_plc)
-{
-    constexpr int NT = MultifrontalPlan::kNumTiers;
-    if (st.tier_split) {
-        // Deterministic per-tier dispatch: each non-empty tier sub-range -> its dedicated kernel,
-        // independent of occupancy. (tier_split=false is a debug fallback that merges the whole level
-        // onto its largest front's kernel.)
-        for (int t = 0; t < NT; ++t)
-            if (tb[t + 1] > tb[t])
-                issue_factor_level_range(plan, st, stream, tb[t], tb[t + 1], d_plc, h_plc);
-    } else {
-        issue_factor_level_range(plan, st, stream, tb[0], tb[NT], d_plc, h_plc);
-    }
+// B == 1 single-system factor (all precisions), then partitioned-inverse the
+// pivot blocks for the single-system Solve (invert applied once at the end).
+//   FP64 -> scalar FactorSingleLevel + FP64 big-front triple.
+//   FP32 -> scalar FactorSingleLevel + FT big-front triple (multi-block big).
+//   TF32 -> same, but the multi-block big-front trailing runs on the Tensor Cores
+//           (the dedicated FactorSingleBigTrailTf32: shared-staged Ozaki mma).
+static void IssueFactorSingleSchedule(const MultifrontalPlan& plan, State& st,
+                                      cudaStream_t stream) {
+  IssueFactorSingleLevels(plan, st, stream);
+  IssueFactorSingleInvert(plan, st, stream);
 }
 
-static void issue_factor_levels(const MultifrontalPlan& plan, State& st, cudaStream_t stream)
-{
-    constexpr int NT = MultifrontalPlan::kNumTiers;
-    const bool use_multistream = st.num_subtree_streams > 1 &&
-                                 plan.num_subtrees == st.num_subtree_streams &&
-                                 !plan.h_subtree_level_off.empty();
-    const int* lvl_tb = plan.h_level_tier_off.data();           // single-stream: per-level ranges
-    const int* sub_tb = plan.h_subtree_level_tier_off.data();   // multistream: per-cell ranges
-    const bool have_lvl = !plan.h_level_tier_off.empty() && plan.d_plcols_tier;
-    const bool have_sub = !plan.h_subtree_level_tier_off.empty();
+// B > 1 batched factor: multistream subtree sweep (when the plan exposes
+// independent subtrees) or a single-stream tier-split level walk.
+static void IssueFactorBatched(const MultifrontalPlan& plan, State& st,
+                               cudaStream_t stream) {
+  constexpr int NT = MultifrontalPlan::kNumTiers;
+  const bool use_multistream = st.num_subtree_streams > 1 &&
+                               plan.num_subtrees == st.num_subtree_streams &&
+                               !plan.h_subtree_level_off.empty();
+  const int* lvl_tb =
+      plan.h_level_tier_off.data();  // single-stream: per-level ranges
+  const int* sub_tb =
+      plan.h_subtree_level_tier_off.data();  // multistream: per-cell ranges
+  const bool have_lvl = !plan.h_level_tier_off.empty() && plan.d_plcols_tier;
+  const bool have_sub = !plan.h_subtree_level_tier_off.empty();
 
-    if (use_multistream) {
-        const int spine_lo = (plan.spine_start_level >= 0) ? plan.spine_start_level : plan.num_plevels;
+  if (use_multistream) {
+    const int spine_lo = (plan.spine_start_level >= 0) ? plan.spine_start_level
+                                                       : plan.num_plevels;
 
-        // Fork: record an event on the main stream and have each subtree stream wait on it
-        // so the subtree work cannot start until any prior main-stream work has retired.
-        cudaEventRecord(static_cast<cudaEvent_t>(st.fork_event), stream);
-        for (int k = 0; k < st.num_subtree_streams; ++k) {
-            cudaStreamWaitEvent(static_cast<cudaStream_t>(st.subtree_streams[k]),
-                                static_cast<cudaEvent_t>(st.fork_event), 0);
-        }
+    // Fork: record an event on the main stream and have each subtree stream
+    // wait on it so the subtree work cannot start until any prior main-stream
+    // work has retired.
+    cudaEventRecord(static_cast<cudaEvent_t>(st.fork_event), stream);
+    for (int k = 0; k < st.num_subtree_streams; ++k)
+      cudaStreamWaitEvent(static_cast<cudaStream_t>(st.subtree_streams[k]),
+                          static_cast<cudaEvent_t>(st.fork_event), 0);
 
-        // Each subtree stream sweeps levels 0..spine_lo-1 over its own panel slice, tier-splitting
-        // each (subtree, level) cell under the same occupancy gate as the single-stream walk.
-        for (int k = 0; k < st.num_subtree_streams; ++k) {
-            cudaStream_t ks = static_cast<cudaStream_t>(st.subtree_streams[k]);
-            const int* off = plan.h_subtree_level_off.data() + (long)k * plan.num_plevels;
-            const int* cnt = plan.h_subtree_level_cnt.data() + (long)k * plan.num_plevels;
-            for (int L = 0; L < plan.num_plevels; ++L) {
-                if (L >= spine_lo) break;
-                if (cnt[L] == 0) continue;
-                if (st.one_block_per_front)
-                    issue_factor_one_block_per_front(plan, st, ks, off[L], off[L] + cnt[L],
-                                                     plan.d_plcols);
-                else if (have_sub)
-                    issue_factor_tiered(plan, st, ks,
-                                        sub_tb + ((long)k * plan.num_plevels + L) * (NT + 1),
-                                        plan.d_plcols, plan.h_plcols.data());
-                else
-                    issue_factor_level_range(plan, st, ks, off[L], off[L] + cnt[L],
-                                             plan.d_plcols, plan.h_plcols.data());
-            }
-            cudaEventRecord(static_cast<cudaEvent_t>(st.join_events[k]), ks);
-        }
-
-        // Join: main stream waits on every subtree's join event before issuing the spine.
-        for (int k = 0; k < st.num_subtree_streams; ++k) {
-            cudaStreamWaitEvent(stream, static_cast<cudaEvent_t>(st.join_events[k]), 0);
-        }
-
-        // Spine levels (if any) on the main stream — cnt=1 chain, nothing to tier-split.
-        if (plan.spine_start_level >= 0) {
-            for (int L = plan.spine_start_level; L < plan.num_plevels; ++L) {
-                const int b = plan.panel_level_ptr[L], e = plan.panel_level_ptr[L + 1];
-                if (st.one_block_per_front)
-                    issue_factor_one_block_per_front(plan, st, stream, b, e, plan.d_plcols);
-                else
-                    issue_factor_level_range(plan, st, stream, b, e,
-                                             plan.d_plcols, plan.h_plcols.data());
-            }
-        }
-    } else {
-        // Single stream: tier-split each level under the occupancy gate (see issue_factor_tiered).
-        for (int L = 0; L < plan.num_plevels; ++L) {
-            if (st.one_block_per_front)
-                issue_factor_one_block_per_front(plan, st, stream,
-                                                 plan.panel_level_ptr[L], plan.panel_level_ptr[L + 1],
-                                                 plan.d_plcols);
-            else if (have_lvl)
-                issue_factor_tiered(plan, st, stream, lvl_tb + (long)L * (NT + 1),
-                                    plan.d_plcols_tier, plan.h_plcols_tier.data());
-            else
-                issue_factor_level_range(plan, st, stream, plan.panel_level_ptr[L], plan.panel_level_ptr[L + 1],
-                                         plan.d_plcols, plan.h_plcols.data());
-        }
+    // Each subtree stream sweeps levels 0..spine_lo-1 over its own panel slice,
+    // tier-splitting each (subtree, level) cell.
+    for (int k = 0; k < st.num_subtree_streams; ++k) {
+      cudaStream_t ks = static_cast<cudaStream_t>(st.subtree_streams[k]);
+      const int* off =
+          plan.h_subtree_level_off.data() + (long)k * plan.num_plevels;
+      const int* cnt =
+          plan.h_subtree_level_cnt.data() + (long)k * plan.num_plevels;
+      for (int L = 0; L < plan.num_plevels; ++L) {
+        if (L >= spine_lo) break;
+        if (cnt[L] == 0) continue;
+        if (have_sub)
+          IssueFactorTiered(
+              plan, st, ks,
+              sub_tb + ((long)k * plan.num_plevels + L) * (NT + 1),
+              plan.d_plcols, plan.h_plcols.data());
+        else
+          IssueFactorLevelRange(plan, st, ks, off[L], off[L] + cnt[L],
+                                plan.d_plcols, plan.h_plcols.data());
+      }
+      cudaEventRecord(static_cast<cudaEvent_t>(st.join_events[k]), ks);
     }
+
+    // Join: main stream waits on every subtree's join event before issuing the
+    // spine.
+    for (int k = 0; k < st.num_subtree_streams; ++k)
+      cudaStreamWaitEvent(stream, static_cast<cudaEvent_t>(st.join_events[k]),
+                          0);
+
+    // Spine levels (if any) on the main stream — cnt=1 chain, nothing to
+    // tier-split.
+    if (plan.spine_start_level >= 0)
+      for (int L = plan.spine_start_level; L < plan.num_plevels; ++L)
+        IssueFactorLevelRange(plan, st, stream, plan.panel_level_ptr[L],
+                              plan.panel_level_ptr[L + 1], plan.d_plcols,
+                              plan.h_plcols.data());
+  } else {
+    // Single stream: tier-split each level.
+    for (int L = 0; L < plan.num_plevels; ++L) {
+      if (have_lvl)
+        IssueFactorTiered(plan, st, stream, lvl_tb + (long)L * (NT + 1),
+                          plan.d_plcols_tier, plan.h_plcols_tier.data());
+      else
+        IssueFactorLevelRange(plan, st, stream, plan.panel_level_ptr[L],
+                              plan.panel_level_ptr[L + 1], plan.d_plcols,
+                              plan.h_plcols.data());
+    }
+  }
+}
+
+static void IssueFactorLevels(const MultifrontalPlan& plan, State& st,
+                              cudaStream_t stream) {
+  if (UseSingleSystem(st))
+    IssueFactorSingleSchedule(plan, st, stream);
+  else
+    IssueFactorBatched(plan, st, stream);
 }
 
 }  // namespace

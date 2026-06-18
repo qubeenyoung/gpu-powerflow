@@ -197,6 +197,19 @@ PYBIND11_MODULE(_cupf, m)
         .value("TF32", CustomPrecision::TF32)
         .export_values();
 
+    py::enum_<CustomMatchingMode>(m, "CustomMatchingMode",
+        "custom 솔버 structural matching 모드.")
+        .value("None", CustomMatchingMode::None)
+        .value("Structural", CustomMatchingMode::Structural)
+        .export_values();
+
+    py::enum_<CustomPivotStrategy>(m, "CustomPivotStrategy",
+        "custom 솔버 pivot stabilization 전략.")
+        .value("None", CustomPivotStrategy::None)
+        .value("StaticDiagonalShift", CustomPivotStrategy::StaticDiagonalShift)
+        .value("DynamicPartial", CustomPivotStrategy::DynamicPartial)
+        .export_values();
+
     py::enum_<CpuLinearSolverKind>(m, "CpuLinearSolverKind",
         "CPU sparse linear solver backend.")
         .value("KLU", CpuLinearSolverKind::KLU)
@@ -257,6 +270,10 @@ PYBIND11_MODULE(_cupf, m)
         .def(py::init<>())
         .def_readwrite("precision", &CustomSolverConfig::precision,
             "factor 정밀도 (CustomPrecision.FP64/FP32/TF32). TF32 는 FP32 storage(compute=FP32/Mixed)에서만")
+        .def_readwrite("matching", &CustomSolverConfig::matching,
+            "custom structural row/column matching")
+        .def_readwrite("pivot_strategy", &CustomSolverConfig::pivot_strategy,
+            "custom pivot stabilization strategy")
         .def_readwrite("serial_nd", &CustomSolverConfig::serial_nd,
             "True이면 결정적 serial METIS-ND (재현용), False이면 parallel-ND")
         .def_readwrite("metis_seed", &CustomSolverConfig::metis_seed,

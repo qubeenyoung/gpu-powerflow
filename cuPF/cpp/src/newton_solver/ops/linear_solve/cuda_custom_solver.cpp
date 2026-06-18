@@ -50,6 +50,27 @@ cls::SolverConfig make_solver_config(const CustomSolverConfig* c, cls::Precision
         case CustomPrecision::FP32: config.precision = cls::Precision::FP32; break;
         case CustomPrecision::TF32: config.precision = cls::Precision::TF32; break;
     }
+    switch (c->matching) {
+        case CustomMatchingMode::None:
+            config.matching = cls::MatchingMode::None;
+            config.use_matching = false;
+            break;
+        case CustomMatchingMode::Structural:
+            config.matching = cls::MatchingMode::Structural;
+            config.use_matching = true;
+            break;
+    }
+    switch (c->pivot_strategy) {
+        case CustomPivotStrategy::None:
+            config.pivot_strategy = cls::PivotStrategy::None;
+            break;
+        case CustomPivotStrategy::StaticDiagonalShift:
+            config.pivot_strategy = cls::PivotStrategy::StaticDiagonalShift;
+            break;
+        case CustomPivotStrategy::DynamicPartial:
+            config.pivot_strategy = cls::PivotStrategy::DynamicPartial;
+            break;
+    }
     if (storage_dflt == cls::Precision::FP64) {
         config.precision = cls::Precision::FP64;          // FP64 storage factors FP64 only
     } else if (config.precision == cls::Precision::FP64) {
@@ -72,7 +93,7 @@ void check_status(cls::Status status, const char* where)
     }
     throw std::runtime_error(std::string("CudaLinearSolveCustomFp64::") +
                              where + ": custom solver " +
-                             cls::status_string(status));
+                             cls::StatusString(status));
 }
 
 // Wrap the device-resident CSR Jacobian as the library's matrix view (no copy).
@@ -176,13 +197,13 @@ void CudaLinearSolveCustomFp64::initialize(CudaFp64Storage& buf, const Initializ
     // Bind J / F / dx views into the solver, then run symbolic analysis once.
     auto state = std::make_unique<State>();
     state->solver = cls::Solver(make_solver_config(ctx.custom, cls::Precision::FP64));
-    check_status(state->solver.set_data(make_matrix_view(buf)), "set_data");
-    check_status(state->solver.set_rhs(make_vector_view(buf.dimF, buf.d_F.data())), "set_rhs");
-    check_status(state->solver.set_solution(make_vector_view(buf.dimF, buf.d_dx.data())),
+    check_status(state->solver.SetData(make_matrix_view(buf)), "set_data");
+    check_status(state->solver.SetRhs(make_vector_view(buf.dimF, buf.d_F.data())), "set_rhs");
+    check_status(state->solver.SetSolution(make_vector_view(buf.dimF, buf.d_dx.data())),
                  "set_solution");
     {
         newton_solver::utils::ScopedTimer timer("NR.initialize.custom_analyze");
-        check_status(state->solver.analyze(), "analyze");
+        check_status(state->solver.Analyze(), "analyze");
     }
     sync_cuda_for_timing();
     state->analyzed = true;
@@ -211,11 +232,11 @@ void CudaLinearSolveCustomFp64::factorize(CudaFp64Storage& buf, IterationContext
     state_->factorized = false;
     const int batch = buf.batch_size;
     if (state_->batch != batch) {                 // skipped in graph mode (graph_prepare already set it up)
-        check_status(state_->solver.setup(batch), "setup");
+        check_status(state_->solver.Setup(batch), "setup");
         state_->batch = batch;
     }
-    check_status(state_->solver.set_values(buf.d_J_values.data(), cls::ValueType::kFloat64), "set_values");
-    check_status(state_->solver.factorize(), "factorize");
+    check_status(state_->solver.SetValues(buf.d_J_values.data(), cls::ValueType::kFloat64), "set_values");
+    check_status(state_->solver.Factorize(), "factorize");
     if (!state_->graph_mode) sync_cuda_for_timing();
     state_->factorized = true;
 }
@@ -230,9 +251,9 @@ void CudaLinearSolveCustomFp64::solve(CudaFp64Storage& buf, IterationContext& ct
     if (!state_->factorized) {
         throw std::runtime_error("CudaLinearSolveCustomFp64::solve: factorize() must be called first");
     }
-    check_status(state_->solver.set_rhs(make_vector_view(state_->batch * buf.dimF, buf.d_F.data())), "set_rhs");
-    check_status(state_->solver.set_solution(make_vector_view(state_->batch * buf.dimF, buf.d_dx.data())), "set_solution");
-    check_status(state_->solver.solve(), "solve");
+    check_status(state_->solver.SetRhs(make_vector_view(state_->batch * buf.dimF, buf.d_F.data())), "set_rhs");
+    check_status(state_->solver.SetSolution(make_vector_view(state_->batch * buf.dimF, buf.d_dx.data())), "set_solution");
+    check_status(state_->solver.Solve(), "solve");
     if (!state_->graph_mode) sync_cuda_for_timing();
 }
 
@@ -243,11 +264,11 @@ void CudaLinearSolveCustomFp64::graph_prepare(CudaFp64Storage& buf, void* stream
         throw std::runtime_error("CudaLinearSolveCustomFp64::graph_prepare: initialize() must be called first");
     }
     const int batch = buf.batch_size;
-    check_status(state_->solver.setup(batch), "setup");
+    check_status(state_->solver.Setup(batch), "setup");
     state_->batch = batch;
     state_->graph_mode = true;
     state_->factorized = false;
-    check_status(state_->solver.set_stream(stream), "set_stream");
+    check_status(state_->solver.SetStream(stream), "set_stream");
 }
 #endif
 
@@ -332,16 +353,16 @@ void CudaLinearSolveCustomFp32::initialize(CudaFp32Storage& buf, const Initializ
 
     auto state = std::make_unique<State>();
     state->solver = cls::Solver(make_solver_config(ctx.custom, cls::Precision::FP32));
-    check_status(state->solver.set_data(make_float_matrix_view(
+    check_status(state->solver.SetData(make_float_matrix_view(
                      buf.dimF, buf.nnz_J, buf.d_J_row_ptr.data(), buf.d_J_col_idx.data(),
                      buf.d_J_values.data())),
                  "set_data");
-    check_status(state->solver.set_rhs(make_vector_view(buf.dimF, buf.d_F.data())), "set_rhs");
-    check_status(state->solver.set_solution(make_vector_view(buf.dimF, buf.d_dx.data())),
+    check_status(state->solver.SetRhs(make_vector_view(buf.dimF, buf.d_F.data())), "set_rhs");
+    check_status(state->solver.SetSolution(make_vector_view(buf.dimF, buf.d_dx.data())),
                  "set_solution");
     {
         newton_solver::utils::ScopedTimer timer("NR.initialize.custom_analyze");
-        check_status(state->solver.analyze(), "analyze");
+        check_status(state->solver.Analyze(), "analyze");
     }
     sync_cuda_for_timing();
     state->analyzed = true;
@@ -370,11 +391,11 @@ void CudaLinearSolveCustomFp32::factorize(CudaFp32Storage& buf, IterationContext
     state_->factorized = false;
     const int batch = buf.batch_size;
     if (state_->batch != batch) {                 // skipped in graph mode (graph_prepare already set it up)
-        check_status(state_->solver.setup(batch), "setup");
+        check_status(state_->solver.Setup(batch), "setup");
         state_->batch = batch;
     }
-    check_status(state_->solver.set_values(buf.d_J_values.data(), cls::ValueType::kFloat32), "set_values");
-    check_status(state_->solver.factorize(), "factorize");
+    check_status(state_->solver.SetValues(buf.d_J_values.data(), cls::ValueType::kFloat32), "set_values");
+    check_status(state_->solver.Factorize(), "factorize");
     if (!state_->graph_mode) sync_cuda_for_timing();
     state_->factorized = true;
 }
@@ -389,9 +410,9 @@ void CudaLinearSolveCustomFp32::solve(CudaFp32Storage& buf, IterationContext& ct
     if (!state_->factorized) {
         throw std::runtime_error("CudaLinearSolveCustomFp32::solve: factorize() must be called first");
     }
-    check_status(state_->solver.set_rhs(make_vector_view(state_->batch * buf.dimF, buf.d_F.data())), "set_rhs");
-    check_status(state_->solver.set_solution(make_vector_view(state_->batch * buf.dimF, buf.d_dx.data())), "set_solution");
-    check_status(state_->solver.solve(), "solve");
+    check_status(state_->solver.SetRhs(make_vector_view(state_->batch * buf.dimF, buf.d_F.data())), "set_rhs");
+    check_status(state_->solver.SetSolution(make_vector_view(state_->batch * buf.dimF, buf.d_dx.data())), "set_solution");
+    check_status(state_->solver.Solve(), "solve");
     if (!state_->graph_mode) sync_cuda_for_timing();
 }
 
@@ -402,11 +423,11 @@ void CudaLinearSolveCustomFp32::graph_prepare(CudaFp32Storage& buf, void* stream
         throw std::runtime_error("CudaLinearSolveCustomFp32::graph_prepare: initialize() must be called first");
     }
     const int batch = buf.batch_size;
-    check_status(state_->solver.setup(batch), "setup");
+    check_status(state_->solver.Setup(batch), "setup");
     state_->batch = batch;
     state_->graph_mode = true;
     state_->factorized = false;
-    check_status(state_->solver.set_stream(stream), "set_stream");
+    check_status(state_->solver.SetStream(stream), "set_stream");
 }
 #endif
 
@@ -503,10 +524,10 @@ void CudaLinearSolveCustomMixed::initialize(CudaMixedStorage& buf, const Initial
 
     auto state = std::make_unique<State>();
     state->solver = cls::Solver(make_solver_config(ctx.custom, cls::Precision::FP32));
-    check_status(state->solver.set_data(matrix), "set_data");
+    check_status(state->solver.SetData(matrix), "set_data");
     {
         newton_solver::utils::ScopedTimer timer("NR.initialize.custom_analyze");
-        check_status(state->solver.analyze(), "analyze");
+        check_status(state->solver.Analyze(), "analyze");
     }
     sync_cuda_for_timing();
     state->analyzed = true;
@@ -535,11 +556,11 @@ void CudaLinearSolveCustomMixed::factorize(CudaMixedStorage& buf, IterationConte
     state_->factorized = false;
     const int batch = buf.batch_size;
     if (state_->batch != batch) {                 // skipped in graph mode (graph_prepare already set it up)
-        check_status(state_->solver.setup(batch), "setup");
+        check_status(state_->solver.Setup(batch), "setup");
         state_->batch = batch;
     }
-    check_status(state_->solver.set_values(buf.d_J_values.data(), cls::ValueType::kFloat32), "set_values");
-    check_status(state_->solver.factorize(), "factorize");
+    check_status(state_->solver.SetValues(buf.d_J_values.data(), cls::ValueType::kFloat32), "set_values");
+    check_status(state_->solver.Factorize(), "factorize");
     if (!state_->graph_mode) sync_cuda_for_timing();
     state_->factorized = true;
 }
@@ -554,9 +575,9 @@ void CudaLinearSolveCustomMixed::solve(CudaMixedStorage& buf, IterationContext& 
     if (!state_->factorized) {
         throw std::runtime_error("CudaLinearSolveCustomMixed::solve: factorize() must be called first");
     }
-    check_status(state_->solver.set_rhs(make_vector_view(state_->batch * buf.dimF, buf.d_F.data())), "set_rhs");
-    check_status(state_->solver.set_solution(make_vector_view(state_->batch * buf.dimF, buf.d_dx.data())), "set_solution");
-    check_status(state_->solver.solve(), "solve");
+    check_status(state_->solver.SetRhs(make_vector_view(state_->batch * buf.dimF, buf.d_F.data())), "set_rhs");
+    check_status(state_->solver.SetSolution(make_vector_view(state_->batch * buf.dimF, buf.d_dx.data())), "set_solution");
+    check_status(state_->solver.Solve(), "solve");
     if (!state_->graph_mode) sync_cuda_for_timing();
 }
 
@@ -567,11 +588,11 @@ void CudaLinearSolveCustomMixed::graph_prepare(CudaMixedStorage& buf, void* stre
         throw std::runtime_error("CudaLinearSolveCustomMixed::graph_prepare: initialize() must be called first");
     }
     const int batch = buf.batch_size;
-    check_status(state_->solver.setup(batch), "setup");
+    check_status(state_->solver.Setup(batch), "setup");
     state_->batch = batch;
     state_->graph_mode = true;
     state_->factorized = false;
-    check_status(state_->solver.set_stream(stream), "set_stream");
+    check_status(state_->solver.SetStream(stream), "set_stream");
 }
 #endif
 

@@ -7,84 +7,102 @@
 namespace custom_linear_solver::plan {
 
 struct MultifrontalPlan {
-    int num_rows = 0, num_panels = 0, num_plevels = 0;
-    int nnz = 0, asm_total = 0;
-    long front_total = 0;
-    void* arena = nullptr;
-    double* d_front = nullptr;
-    float* d_front_f = nullptr;
-    int *d_front_off = nullptr, *d_front_ptr = nullptr, *d_ncols = nullptr;
-    int *d_plcols = nullptr, *d_panel_parent = nullptr;
-    int *d_asm_ptr = nullptr, *d_asm_local = nullptr;
-    int* d_a_pos = nullptr;
-    int* d_sing = nullptr;
-    int* d_front_rows = nullptr;
-    double* d_y = nullptr;
-    float* d_y_f = nullptr;
-    int front_store = 0;
-    bool a_pos_unique = false;  // true when numeric scatter can store instead of atomic-add
-    std::vector<int> panel_level_ptr;
-    std::vector<int> h_front_ptr;  // host copy of front_ptr (per-panel front size), for kernel dispatch
-    std::vector<int> h_ncols;      // host copy of panel ncols, for tensor-core shared sizing
-    std::vector<int> h_plcols;     // host copy of panels-by-level order (indexes into h_front_ptr)
-    std::vector<int> h_front_off;  // host copy of front_off (per-panel arena offset), for per-panel cuBLAS dispatch
-    std::vector<int> h_panel_parent;  // host copy of panel_parent, for analyze/debug dumps
-    std::vector<int> h_asm_ptr;       // host copy of asm_ptr, for analyze/debug dumps
+  int num_rows = 0, num_panels = 0, num_plevels = 0;
+  int nnz = 0, asm_total = 0;
+  long front_total = 0;
+  void* arena = nullptr;
+  double* d_front = nullptr;
+  float* d_front_f = nullptr;
+  int *d_front_off = nullptr, *d_front_ptr = nullptr, *d_ncols = nullptr;
+  int *d_plcols = nullptr, *d_panel_parent = nullptr;
+  int *d_asm_ptr = nullptr, *d_asm_local = nullptr;
+  int* d_a_pos = nullptr;
+  int* d_sing = nullptr;
+  int* d_front_rows = nullptr;
+  double* d_y = nullptr;
+  float* d_y_f = nullptr;
+  int front_store = 0;
+  bool a_pos_unique =
+      false;  // true when numeric scatter can store instead of atomic-add
+  std::vector<int> panel_level_ptr;
+  std::vector<int> h_front_ptr;  // host copy of front_ptr (per-panel front
+                                 // size), for kernel dispatch
+  std::vector<int>
+      h_ncols;  // host copy of panel ncols, for tensor-core shared sizing
+  std::vector<int> h_plcols;     // host copy of panels-by-level order (indexes
+                                 // into h_front_ptr)
+  std::vector<int> h_front_off;  // host copy of front_off (per-panel arena
+                                 // offset), for per-panel cuBLAS dispatch
+  std::vector<int>
+      h_panel_parent;  // host copy of panel_parent, for Analyze/debug dumps
+  std::vector<int> h_asm_ptr;  // host copy of asm_ptr, for Analyze/debug dumps
 
-    // Tier-homogeneous dispatch order. Same panels as h_plcols, but within each level the panels
-    // are grouped by kernel tier (see classify_front_tier) so the single-stream factor walk can
-    // launch one right-sized kernel per (level, tier) instead of promoting a whole mixed level to
-    // its largest front's tier. h_level_tier_off has stride (kNumTiers+1) per level: entry
-    // [L*(kNumTiers+1)+t] is the absolute start in h_plcols_tier of tier t at level L;
-    // [...+kNumTiers] is the level end.
-    static constexpr int kNumTiers = kNumFrontBuckets;  // dispatch tiers: small | mid | big
-    std::vector<int> h_plcols_tier;     // P entries: level-major, tier-contiguous within level
-    std::vector<int> h_level_tier_off;  // num_plevels * (kNumTiers+1) CSR offsets
-    int* d_plcols_tier = nullptr;       // device mirror of h_plcols_tier
+  // Tier-homogeneous dispatch order. Same panels as h_plcols, but within each
+  // level the panels are grouped by kernel tier (see ClassifyFrontTier) so
+  // the single-stream factor walk can launch one right-sized kernel per (level,
+  // tier) instead of promoting a whole mixed level to its largest front's tier.
+  // h_level_tier_off has stride (kNumTiers+1) per level: entry
+  // [L*(kNumTiers+1)+t] is the absolute start in h_plcols_tier of tier t at
+  // level L;
+  // [...+kNumTiers] is the level end.
+  static constexpr int kNumTiers =
+      kNumFrontBuckets;  // dispatch tiers: small | mid | big
+  std::vector<int>
+      h_plcols_tier;  // P entries: level-major, tier-contiguous within level
+  std::vector<int> h_level_tier_off;  // num_plevels * (kNumTiers+1) CSR offsets
+  int* d_plcols_tier = nullptr;       // device mirror of h_plcols_tier
 
-    // Phase Σ.8 — within-panel partial pivoting infrastructure (CLS_USE_PIVOTING=1).
-    // pivot_offset[p] = prefix sum of ncols[0..p-1], giving the start of panel p's pivots in
-    // the per-system pivot array (length = sum_p ncols[p] = n). Total per-batch pivot storage
-    // is therefore B * n ints. Allocated/owned by per-state (per State allocation).
-    std::vector<int> h_pivot_offset;  // P+1 entries
-    int* d_pivot_offset = nullptr;    // device mirror
-    int total_pivots = 0;             // = h_pivot_offset[P] = n
+  // Phase Σ.8 — within-panel partial pivoting infrastructure
+  // (CLS_USE_PIVOTING=1). pivot_offset[p] = prefix sum of ncols[0..p-1], giving
+  // the start of panel p's pivots in the per-system pivot array (length = sum_p
+  // ncols[p] = n). Total per-batch pivot storage is therefore B * n ints.
+  // Allocated/owned by per-state (per State allocation).
+  std::vector<int> h_pivot_offset;  // P+1 entries
+  int* d_pivot_offset = nullptr;    // device mirror
+  int total_pivots = 0;             // = h_pivot_offset[P] = n
 
-    // Tree-restructuring metadata (computed at analyze time, used by tree-restructured dispatch).
-    // The spine is the contiguous "cnt=1 chain" at the top of the panel etree -- a sequential chain
-    // of single-panel levels. The K subtree roots are the panels immediately below the spine; each
-    // rooted subtree is independent and can be factored in parallel (Phase 3). The spine itself
-    // gets fused into a single persistent kernel (Phase 4).
-    std::vector<int> h_spine_panels;        // panel IDs in the spine, in factorization order (bottom -> top)
-    int spine_start_level = -1;             // lowest L of the spine (top of the non-spine region)
-    int num_subtrees = 0;                   // K (= cnt at the level just below the spine)
-    std::vector<int> h_subtree_roots;       // K panel IDs of subtree roots (children of the spine bottom)
-    std::vector<int> h_subtree_of_panel;    // per-panel subtree id (0..K-1) or -1 if panel is in the spine
+  // Tree-restructuring metadata (computed at Analyze time, used by
+  // tree-restructured dispatch). The spine is the contiguous "cnt=1 chain" at
+  // the top of the panel Etree -- a sequential chain of single-panel levels.
+  // The K subtree roots are the panels immediately below the spine; each rooted
+  // subtree is independent and can be factored in parallel (Phase 3). The spine
+  // itself gets fused into a single persistent kernel (Phase 4).
+  std::vector<int> h_spine_panels;  // panel IDs in the spine, in factorization
+                                    // order (bottom -> top)
+  int spine_start_level =
+      -1;                // lowest L of the spine (top of the non-spine region)
+  int num_subtrees = 0;  // K (= cnt at the level just below the spine)
+  std::vector<int> h_subtree_roots;  // K panel IDs of subtree roots (children
+                                     // of the spine bottom)
+  std::vector<int> h_subtree_of_panel;  // per-panel subtree id (0..K-1) or -1
+                                        // if panel is in the spine
 
-    // Device copy of h_spine_panels for Phase 4 spine kernel.
-    int* d_spine_panels = nullptr;
+  // Device copy of h_spine_panels for Phase 4 spine kernel.
+  int* d_spine_panels = nullptr;
 
-    // Per-(subtree, level) ranges in h_plcols / d_plcols. After analyze re-sorts plcols within
-    // each level so all subtree-0 panels come first, then subtree-1, etc. Then for subtree k at
-    // level L: dispatch range = [subtree_level_off[k * num_plevels + L], + subtree_level_cnt[..]).
-    // Spine panels are NOT included in any subtree's range — they are handled separately by the
-    // spine kernel (Phase 4). Sized K * num_plevels.
-    std::vector<int> h_subtree_level_off;
-    std::vector<int> h_subtree_level_cnt;
-    // Per-(subtree, level) tier boundaries into h_plcols/d_plcols. Each subtree-level cell in
-    // h_plcols is tier-sorted internally (same tier classes as h_level_tier_off), so the multistream
-    // factor/solve dispatch can tier-split each cell exactly like the single-stream walk. Stride
-    // (kNumTiers+1) per (k, L): entry [(k*num_plevels+L)*(kNumTiers+1)+t] is the absolute start in
-    // h_plcols of tier t within that cell; [...+kNumTiers] is the cell end. Empty when no subtrees.
-    std::vector<int> h_subtree_level_tier_off;
+  // Per-(subtree, level) ranges in h_plcols / d_plcols. After Analyze re-sorts
+  // plcols within each level so all subtree-0 panels come first, then
+  // subtree-1, etc. Then for subtree k at level L: dispatch range =
+  // [subtree_level_off[k * num_plevels + L], + subtree_level_cnt[..]). Spine
+  // panels are NOT included in any subtree's range — they are handled
+  // separately by the spine kernel (Phase 4). Sized K * num_plevels.
+  std::vector<int> h_subtree_level_off;
+  std::vector<int> h_subtree_level_cnt;
+  // Per-(subtree, level) tier boundaries into h_plcols/d_plcols. Each
+  // subtree-level cell in h_plcols is tier-sorted internally (same tier classes
+  // as h_level_tier_off), so the multistream factor/Solve dispatch can
+  // tier-split each cell exactly like the single-stream walk. Stride
+  // (kNumTiers+1) per (k, L): entry [(k*num_plevels+L)*(kNumTiers+1)+t] is the
+  // absolute start in h_plcols of tier t within that cell; [...+kNumTiers] is
+  // the cell end. Empty when no subtrees.
+  std::vector<int> h_subtree_level_tier_off;
 
-
-    MultifrontalPlan() = default;
-    ~MultifrontalPlan();
-    MultifrontalPlan(const MultifrontalPlan&) = delete;
-    MultifrontalPlan& operator=(const MultifrontalPlan&) = delete;
-    MultifrontalPlan(MultifrontalPlan&&) noexcept;
-    MultifrontalPlan& operator=(MultifrontalPlan&&) noexcept;
+  MultifrontalPlan() = default;
+  ~MultifrontalPlan();
+  MultifrontalPlan(const MultifrontalPlan&) = delete;
+  MultifrontalPlan& operator=(const MultifrontalPlan&) = delete;
+  MultifrontalPlan(MultifrontalPlan&&) noexcept;
+  MultifrontalPlan& operator=(MultifrontalPlan&&) noexcept;
 };
 
 }  // namespace custom_linear_solver::plan

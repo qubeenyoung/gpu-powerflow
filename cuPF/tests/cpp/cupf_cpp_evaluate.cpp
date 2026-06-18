@@ -37,8 +37,11 @@ struct Args {
     std::string cuda_jacobian = "edge";
     std::string cuda_linear_solver = "cudss";
     std::string custom_precision = "fp32";   // custom 백엔드 factor 정밀도: fp64|fp32|tf32
+    std::string custom_matching = "none";    // none|structural
+    std::string custom_pivot = "shift";      // none|shift|partial
     bool custom_serial_nd = false;           // custom 결정적 serial METIS-ND
     int32_t custom_seed = 42;                // custom nested-dissection seed
+    double custom_pivot_epsilon = 1e-8;
     double tolerance = 1e-8;
     int32_t max_iter = 50;
     int32_t warmup = 1;
@@ -66,6 +69,9 @@ Args parse_args(int argc, char** argv)
         else if (key == "--cuda-jacobian") args.cuda_jacobian = require_value(i, argc, argv, key);
         else if (key == "--cuda-linear-solver") args.cuda_linear_solver = require_value(i, argc, argv, key);
         else if (key == "--custom-precision") args.custom_precision = require_value(i, argc, argv, key);
+        else if (key == "--custom-matching") args.custom_matching = require_value(i, argc, argv, key);
+        else if (key == "--custom-pivot") args.custom_pivot = require_value(i, argc, argv, key);
+        else if (key == "--custom-pivot-epsilon") args.custom_pivot_epsilon = std::stod(require_value(i, argc, argv, key));
         else if (key == "--custom-serial-nd") args.custom_serial_nd = (std::stoi(require_value(i, argc, argv, key)) != 0);
         else if (key == "--custom-seed") args.custom_seed = std::stoi(require_value(i, argc, argv, key));
         else if (key == "--tolerance") args.tolerance = std::stod(require_value(i, argc, argv, key));
@@ -207,8 +213,16 @@ NewtonOptions make_options(const Args& args)
     else if (args.custom_precision == "fp32") options.custom.precision = CustomPrecision::FP32;
     else if (args.custom_precision == "tf32") options.custom.precision = CustomPrecision::TF32;
     else throw std::invalid_argument("custom-precision must be fp64, fp32, or tf32");
+    if (args.custom_matching == "none") options.custom.matching = CustomMatchingMode::None;
+    else if (args.custom_matching == "structural") options.custom.matching = CustomMatchingMode::Structural;
+    else throw std::invalid_argument("custom-matching must be none or structural");
+    if (args.custom_pivot == "none") options.custom.pivot_strategy = CustomPivotStrategy::None;
+    else if (args.custom_pivot == "shift") options.custom.pivot_strategy = CustomPivotStrategy::StaticDiagonalShift;
+    else if (args.custom_pivot == "partial") options.custom.pivot_strategy = CustomPivotStrategy::DynamicPartial;
+    else throw std::invalid_argument("custom-pivot must be none, shift, or partial");
     options.custom.serial_nd  = args.custom_serial_nd;
     options.custom.metis_seed = args.custom_seed;
+    options.custom.shift_retry_epsilon = args.custom_pivot_epsilon;
     return options;
 }
 
