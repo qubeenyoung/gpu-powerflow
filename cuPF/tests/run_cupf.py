@@ -73,14 +73,17 @@ def parse_args(argv=None):
 
 
 def validate(args):
-    if args.precision == "tf32" and args.backend != "cuda-custom":
+    # tf32 is a CUDA-custom factor precision; CPU ignores precision (always FP64).
+    if args.precision == "tf32" and args.backend != "cuda-custom" and not args.backend.startswith("cpu-"):
         sys.exit("tf32 is a custom-solver factor precision; use --backend cuda-custom.")
     if args.mode == "operators" and args.path != "cpp":
         sys.exit("--mode operators is cpp-only (the pybind module exposes no per-operator timers).")
-    if args.path in ("cpp", "torch") and args.backend.startswith("cpu-"):
-        sys.exit(f"--path {args.path} is CUDA-only; use --path python for CPU klu/umfpack.")
+    if args.path == "torch" and args.backend.startswith("cpu-"):
+        sys.exit("--path torch is CUDA-only; use --path python or cpp for CPU klu/umfpack.")
     if args.path == "torch" and args.mode != "solve":
         sys.exit("--path torch supports --mode solve only (forward/backward timing).")
+    if args.path == "cpp" and args.backend.startswith("cpu-") and args.batch > 1:
+        sys.exit("CPU backend supports batch=1 only; use --batch 1.")
 
 
 def resolve_cases(args):
@@ -106,8 +109,11 @@ def run_cpp(args, cases):
         sys.exit(f"{CPP_BENCH} not built. Run with --build, or:\n"
                  f"  cmake -S cuPF -B cuPF/build -DWITH_CUDA=ON -DENABLE_TIMING=ON "
                  f"-DCUPF_ENABLE_CUSTOM_SOLVER=ON -DBUILD_EVALUATORS=ON && cmake --build cuPF/build -j")
-    solver = "custom" if args.backend == "cuda-custom" else "cudss"
-    spec = f"{solver}-{args.precision}"
+    if args.backend.startswith("cpu-"):
+        spec = args.backend                       # cpu-klu / cpu-umfpack (FP64; precision ignored)
+    else:
+        solver = "custom" if args.backend == "cuda-custom" else "cudss"
+        spec = f"{solver}-{args.precision}"
     with tempfile.TemporaryDirectory(prefix="cupf-dump-") as tmp:
         for case_path in cases:
             case = matpower_data.load_case(case_path)

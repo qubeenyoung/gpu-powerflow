@@ -39,6 +39,8 @@ Mode parse_mode(const std::string& s)
 // precision. fp64 -> FP64/FP64; fp32 -> Mixed/FP32; tf32 -> Mixed/TF32 (custom only);
 // mixed -> Mixed/FP32. (cuDSS ignores the custom factor precision.)
 struct BenchSpec {
+    bool                 cpu         = false;               // CPU backend (KLU/UMFPACK)?
+    CpuLinearSolverKind  cpu_solver  = CpuLinearSolverKind::KLU;
     CudaLinearSolverKind backend     = CudaLinearSolverKind::CuDSS;
     ComputePolicy        compute     = ComputePolicy::Mixed;
     CustomPrecision      custom_prec = CustomPrecision::FP32;
@@ -51,9 +53,18 @@ BenchSpec parse_spec(const std::string& s)
     const std::string precision = (dash == std::string::npos) ? s : s.substr(dash + 1);
 
     BenchSpec spec;
+    // CPU backend: "cpu-klu" / "cpu-umfpack" (FP64; per-operator timing incl. Jacobian).
+    if (backend == "cpu") {
+        spec.cpu = true;
+        spec.compute = ComputePolicy::FP64;
+        if (precision == "klu")           spec.cpu_solver = CpuLinearSolverKind::KLU;
+        else if (precision == "umfpack")  spec.cpu_solver = CpuLinearSolverKind::UMFPACK;
+        else throw std::invalid_argument("cpu solver must be klu or umfpack (cpu-klu | cpu-umfpack)");
+        return spec;
+    }
     if (backend == "custom")      spec.backend = CudaLinearSolverKind::Custom;
     else if (backend == "cudss")  spec.backend = CudaLinearSolverKind::CuDSS;
-    else throw std::invalid_argument("backend must be cudss or custom");
+    else throw std::invalid_argument("backend must be cpu, cudss, or custom");
 
     if (precision == "fp64") {
         spec.compute = ComputePolicy::FP64; spec.custom_prec = CustomPrecision::FP64;
@@ -81,7 +92,7 @@ int main(int argc, char** argv)
     if (argc < 4) {
         std::cerr << "usage: cupf_bench <case_dir> <backend-precision> <B1,B2,...> "
                      "[mode] [repeats] [max_iter] [scale_step] [matching] [pivot] [pivot_eps] [jacobian]\n"
-                     "  backend-precision: cudss-fp64|cudss-fp32|custom-fp64|custom-fp32|custom-tf32\n"
+                     "  backend-precision: cpu-klu|cpu-umfpack|cudss-fp64|cudss-fp32|custom-fp64|custom-fp32|custom-tf32\n"
                      "  mode: solve (default) | operators | debug\n";
         return 2;
     }
@@ -112,9 +123,16 @@ int main(int argc, char** argv)
     const int32_t n = data.rows;
 
     NewtonOptions opts;
-    opts.backend            = BackendKind::CUDA;
-    opts.compute            = spec.compute;
-    opts.cuda_linear_solver = spec.backend;
+    opts.compute = spec.compute;
+    if (spec.cpu) {
+        // CPU backend: per-operator timing (incl. Jacobian) still flows through the
+        // ENABLE_TIMING collector; cuda_jacobian / custom.* are ignored here.
+        opts.backend            = BackendKind::CPU;
+        opts.cpu_linear_solver  = spec.cpu_solver;
+    } else {
+        opts.backend            = BackendKind::CUDA;
+        opts.cuda_linear_solver = spec.backend;
+    }
     if (jacobian_arg == "edge")              opts.cuda_jacobian = CudaJacobianKind::Edge;
     else if (jacobian_arg == "edge_atomic")  opts.cuda_jacobian = CudaJacobianKind::EdgeAtomic;
     else if (jacobian_arg == "vertex_warp" || jacobian_arg == "vertex")
