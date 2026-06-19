@@ -13,12 +13,14 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 # Load repository-local settings without requiring users to export every value
 # before running the script. The .env file is git-ignored and may contain local
 # MATLAB/MATPOWER paths or online licensing credentials.
-if [[ -f "${repo_root}/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "${repo_root}/.env"
-  set +a
-fi
+for env_file in "${repo_root}/.env" "${script_dir}/.env"; do
+  if [[ -f "${env_file}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${env_file}"
+    set +a
+  fi
+done
 
 matlab_bin="${MATLAB_BIN:-matlab}"
 case_name="${1:-${MATPOWER_CASE:-case9}}"

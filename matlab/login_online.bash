@@ -11,14 +11,17 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
-# Local credentials and MATLAB paths may live in the repository root .env file.
-# The file is ignored by git; do not commit real MathWorks credentials.
-if [[ -f "${repo_root}/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "${repo_root}/.env"
-  set +a
-fi
+# Local credentials and MATLAB paths may live in the repository root .env file
+# or beside this script as matlab/.env.  These files are ignored by git; do not
+# commit real MathWorks credentials.
+for env_file in "${repo_root}/.env" "${script_dir}/.env"; do
+  if [[ -f "${env_file}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${env_file}"
+    set +a
+  fi
+done
 
 matlab_bin="${MATLAB_BIN:-matlab}"
 
