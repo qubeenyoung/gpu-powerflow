@@ -62,21 +62,24 @@ __global__ void FactorBigTrailTf32(
   const int pfsz = (par >= 0) ? (front_ptr[par + 1] - front_ptr[par]) : 0;
   const int abase = asm_ptr[p];
 
-  const int nc_pad_max = ((level_max_nc + 7) / 8) * 8;  // shared stride (fixed)
+  const int nc_pad_max = ((level_max_nc + 7) / 8) * 8;  // K padding (fixed)
   const int nc_pad = ((nc + 7) / 8) * 8;                // per-front K padding
   const int k_tiles = nc_pad / 8;
-  const int UshStride = kBigTcN + 4;  // +4 pad → conflict-free B-read banks
+  const int LshStride = nc_pad_max + 1;  // +1 pad → conflict-free A-read banks
+                                         // (row stride coprime to 32; 8·laneR
+                                         // would otherwise alias banks)
+  const int UshStride = kBigTcN + 4;     // +4 pad → conflict-free B-read banks
 
   // Stage this tile's L rows (kBigTcM × nc) and U cols (nc × kBigTcN) into
   // shared, zero-padded past nc and past the front edge.
   extern __shared__ float smem_big_tf32[];
-  float* Lsh = smem_big_tf32;                     // [kBigTcM][nc_pad_max]
-  float* Ush = Lsh + (long)kBigTcM * nc_pad_max;  // [nc_pad_max][UshStride]
+  float* Lsh = smem_big_tf32;                    // [kBigTcM][LshStride]
+  float* Ush = Lsh + (long)kBigTcM * LshStride;  // [nc_pad_max][UshStride]
   const int t = threadIdx.x, nt = blockDim.x;
   for (int e = t; e < kBigTcM * nc_pad; e += nt) {
     const int r = e / nc_pad, k = e % nc_pad;
     const int gr = row0 + r;
-    Lsh[r * nc_pad_max + k] =
+    Lsh[r * LshStride + k] =
         (gr < fsz && k < nc) ? F[(long)gr * fsz + k] : 0.0f;
   }
   for (int e = t; e < nc_pad * kBigTcN; e += nt) {
@@ -95,10 +98,10 @@ __global__ void FactorBigTrailTf32(
   float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
   for (int kc = 0; kc < k_tiles; ++kc) {
     const int kb = kc * 8;
-    const Tf32Pair a0 = Tf32OzakiPair(Lsh[r_top * nc_pad_max + kb + laneC]);
-    const Tf32Pair a1 = Tf32OzakiPair(Lsh[r_bot * nc_pad_max + kb + laneC]);
-    const Tf32Pair a2 = Tf32OzakiPair(Lsh[r_top * nc_pad_max + kb + laneC + 1]);
-    const Tf32Pair a3 = Tf32OzakiPair(Lsh[r_bot * nc_pad_max + kb + laneC + 1]);
+    const Tf32Pair a0 = Tf32OzakiPair(Lsh[r_top * LshStride + kb + laneC]);
+    const Tf32Pair a1 = Tf32OzakiPair(Lsh[r_bot * LshStride + kb + laneC]);
+    const Tf32Pair a2 = Tf32OzakiPair(Lsh[r_top * LshStride + kb + laneC + 1]);
+    const Tf32Pair a3 = Tf32OzakiPair(Lsh[r_bot * LshStride + kb + laneC + 1]);
     const Tf32Pair b0 =
         Tf32OzakiPair(Ush[(kb + laneC) * UshStride + ncol + laneR]);
     const Tf32Pair b1 =
@@ -365,7 +368,8 @@ static void DispatchFactorBig(const MultifrontalPlan& plan, State& st,
     const dim3 tcgrid(nrt * nct > 0 ? nrt * nct : 1, e - b, st.batch_count);
     const int nc_pad_max = ((level_max_nc + 7) / 8) * 8;
     const size_t tc_sh =
-        ((size_t)M * nc_pad_max + (size_t)nc_pad_max * (N + 4)) * sizeof(float);
+        ((size_t)M * (nc_pad_max + 1) + (size_t)nc_pad_max * (N + 4)) *
+        sizeof(float);
     FactorBigTrailTf32<<<tcgrid, 256, tc_sh, stream>>>(
         b, e, d_plc, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
         plan.d_panel_parent, plan.d_asm_ptr, plan.d_asm_local,
