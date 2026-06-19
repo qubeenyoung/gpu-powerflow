@@ -1,0 +1,21 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case3120sp",
+  "dump_iteration": 2,
+  "jacobian_nnz": 37040,
+  "jacobian_shape": [
+    5890,
+    5890
+  ],
+  "matrix_market_files": {
+    "jacobian": "J.mtx",
+    "mismatch": "F.mtx"
+  },
+  "mismatch_inf_norm": 47.19204944495025,
+  "n_bus": 3120,
+  "n_pq": 2771,
+  "n_pv": 348,
+  "n_ref": 1,
+  "source_path": "/opt/matpower/data/case3120sp.m",
+  "ybus_nnz": 10488
+}

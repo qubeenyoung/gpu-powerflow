@@ -1,0 +1,21 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case118",
+  "dump_iteration": 2,
+  "jacobian_nnz": 1051,
+  "jacobian_shape": [
+    181,
+    181
+  ],
+  "matrix_market_files": {
+    "jacobian": "J.mtx",
+    "mismatch": "F.mtx"
+  },
+  "mismatch_inf_norm": 0.024184089503252876,
+  "n_bus": 118,
+  "n_pq": 64,
+  "n_pv": 53,
+  "n_ref": 1,
+  "source_path": "/opt/matpower/data/case118.m",
+  "ybus_nnz": 476
+}

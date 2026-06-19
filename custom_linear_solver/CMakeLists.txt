@@ -89,11 +89,11 @@ if(CLS_BUILD_CUDA_OPS)
 
   if(CLS_BUILD_SCRIPTS)
     add_executable(custom_linear_solver_run
-      tests/io.cpp
-      tests/run_custom_solver.cu
+      tests/runners/io.cpp
+      tests/runners/run_custom_solver.cu
     )
     target_include_directories(custom_linear_solver_run PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/runners
     )
     target_link_libraries(custom_linear_solver_run PRIVATE
       custom_linear_solver_api

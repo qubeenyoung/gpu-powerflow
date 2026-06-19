@@ -1,0 +1,21 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case_SyntheticUSA",
+  "dump_iteration": 2,
+  "jacobian_nnz": 1040157,
+  "jacobian_shape": [
+    154703,
+    154703
+  ],
+  "matrix_market_files": {
+    "jacobian": "J.mtx",
+    "mismatch": "F.mtx"
+  },
+  "mismatch_inf_norm": 14.494801294639487,
+  "n_bus": 82000,
+  "n_pq": 72706,
+  "n_pv": 9291,
+  "n_ref": 3,
+  "source_path": "/opt/matpower/data/case_SyntheticUSA.m",
+  "ybus_nnz": 278406
+}

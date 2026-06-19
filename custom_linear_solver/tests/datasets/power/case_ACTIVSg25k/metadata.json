@@ -1,0 +1,21 @@
+{
+  "base_mva": 100.0,
+  "case_name": "case_ACTIVSg25k",
+  "dump_iteration": 2,
+  "jacobian_nnz": 314914,
+  "jacobian_shape": [
+    46764,
+    46764
+  ],
+  "matrix_market_files": {
+    "jacobian": "J.mtx",
+    "mismatch": "F.mtx"
+  },
+  "mismatch_inf_norm": 3.105394077235162,
+  "n_bus": 25000,
+  "n_pq": 21765,
+  "n_pv": 3234,
+  "n_ref": 1,
+  "source_path": "/opt/matpower/data/case_ACTIVSg25k.m",
+  "ybus_nnz": 85220
+}
