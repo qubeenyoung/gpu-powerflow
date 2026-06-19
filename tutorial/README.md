@@ -4,7 +4,7 @@ This directory is a narrative tutorial, not just a benchmark launcher. The
 notebooks move from the power-flow equation to Newton-Raphson internals, then
 to baseline implementations and cuPF acceleration choices.
 
-Fresh benchmark outputs are written under `python/tutorial/_runs/`, which is
+Fresh benchmark outputs are written under `tutorial/_runs/`, which is
 ignored by git.
 
 ## Reading Order
@@ -52,12 +52,12 @@ The notebooks report whether these keys are set, but never print secret values.
 ## Execute
 
 ```bash
-jupyter nbconvert --execute python/tutorial/01_power_system_basics_case9.ipynb --to notebook --inplace
-jupyter nbconvert --execute python/tutorial/02_newton_raphson_and_jacobian.ipynb --to notebook --inplace
-jupyter nbconvert --execute python/tutorial/03_matpower_pandapower_baseline.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=9000
-jupyter nbconvert --execute python/tutorial/04_cupf_cpu_acceleration.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=9000
-jupyter nbconvert --execute python/tutorial/05_cupf_gpu_acceleration.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=12000
-jupyter nbconvert --execute python/tutorial/06_batch_torch_and_research_direction.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=12000
+jupyter nbconvert --execute tutorial/01_power_system_basics_case9.ipynb --to notebook --inplace
+jupyter nbconvert --execute tutorial/02_newton_raphson_and_jacobian.ipynb --to notebook --inplace
+jupyter nbconvert --execute tutorial/03_matpower_pandapower_baseline.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=9000
+jupyter nbconvert --execute tutorial/04_cupf_cpu_acceleration.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=9000
+jupyter nbconvert --execute tutorial/05_cupf_gpu_acceleration.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=12000
+jupyter nbconvert --execute tutorial/06_batch_torch_and_research_direction.ipynb --to notebook --inplace --ExecutePreprocessor.timeout=12000
 ```
 
 The benchmark notebooks default to `case6468rte`, `warmup=0`, and `repeats=1`.

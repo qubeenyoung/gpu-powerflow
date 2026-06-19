@@ -31,7 +31,7 @@ from pandapower.pypower.idx_brch import F_BUS, T_BUS, BR_R, BR_X
 from pandapower.pypower.idx_bus import PD, QD
 from pandapower.pypower.idx_gen import GEN_BUS, PG, QG, GEN_STATUS
 
-from python.tests import matpower_data
+from benchmark.common import matpower_data
 
 
 DEFAULT_DATASET_ROOT = matpower_data.DEFAULT_DATASET_ROOT
@@ -216,7 +216,7 @@ def tutorial_benchmark_command(
     command = [
         sys.executable,
         "-m",
-        "python.tests.run_benchmark",
+        "benchmark.common.run_benchmark",
         "--output-root",
         str(output),
         "--run-name",
@@ -481,7 +481,7 @@ def solver_path_table() -> pd.DataFrame:
                 "Path": "tutorial C++ reference",
                 "Jacobian": "pandapower-style dSbus_dV sparse block assembly",
                 "Linear solver": "not a cuPF production path",
-                "Benchmark ID": "python/tutorial/cpp/pandapower_jacobian_reference.cpp",
+                "Benchmark ID": "tutorial/cpp/pandapower_jacobian_reference.cpp",
             },
             {
                 "Path": "cuPF GPU",

@@ -1,4 +1,4 @@
-# python.prepare — dataset preparation
+# prepare — dataset preparation
 
 Build the **power-grid benchmark matrices** for the custom_linear_solver from
 MATPOWER `.m` cases (pure pandapower + scipy; no MATLAB/Julia).
@@ -10,7 +10,7 @@ MATPOWER `.m` cases (pure pandapower + scipy; no MATLAB/Julia).
 
 ```sh
 # from the repo root
-python3 -m python.prepare.convert_linear_system \
+python3 -m prepare_datasets.convert_linear_system \
     --dataset-root <MATPOWER .m root> \
     --output-root  custom_linear_solver/tests/datasets/power \
     --cases case118 case1354pegase case_ACTIVSg25k case_SyntheticUSA

@@ -1,8 +1,8 @@
 """Build Newton-Raphson Jacobian linear systems (`J.mtx` / `F.mtx`) from MATPOWER
 `.m` cases, for consumption by the custom_linear_solver. Reuses the pandapower
-case loader in :mod:`python.tests.matpower_data` (no standalone `pypower`).
+case loader in :mod:`benchmark.common.matpower_data` (no standalone `pypower`).
 
-    python3 -m python.prepare.convert_linear_system --dataset-root /datasets/matpower --cases case9
+    python3 -m prepare_datasets.convert_linear_system --dataset-root /datasets/matpower --cases case9
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from scipy.io import mmwrite
 from scipy.sparse import hstack, vstack
 from scipy.sparse.linalg import spsolve
 
-from python.tests.matpower_data import DEFAULT_DATASET_ROOT, PreprocessedCase, load_case, resolve_case_paths
+from benchmark.common.matpower_data import DEFAULT_DATASET_ROOT, PreprocessedCase, load_case, resolve_case_paths
 
 DEFAULT_OUTPUT_ROOT = Path("/datasets/matpower_linear_systems")
 

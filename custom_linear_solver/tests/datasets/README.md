@@ -4,7 +4,7 @@ Input matrices for the benchmark runners. Two groups:
 
 | dir | what | git | how to (re)create |
 |---|---|---|---|
-| `power/` | Newton–Raphson power-flow Jacobians — the primary target domain | **tracked** (small) | `python/prepare/convert_linear_system.py` (see below) |
+| `power/` | Newton–Raphson power-flow Jacobians — the primary target domain | **tracked** (small) | `prepare_datasets/convert_linear_system.py` (see below) |
 | `suitesparse/` | out-of-domain SuiteSparse matrices (circuit, 2D/3D FEM) | **git-ignored** (large) | `./fetch_suitesparse.sh` (see below) |
 
 Each case is a directory holding two MatrixMarket files:
@@ -15,11 +15,11 @@ dense `n×1` RHS). The custom runner also accepts `--matrix J.mtx --rhs F.mtx`.
 
 These are committed (case118 … case_SyntheticUSA). To regenerate or add cases,
 build them from MATPOWER `.m` cases with the prepare CLI (pure pandapower + scipy,
-no MATLAB/Julia) — see [`python/prepare/`](../../../python/prepare/):
+no MATLAB/Julia) — see [`prepare_datasets/`](../../../prepare_datasets/):
 
 ```sh
 # from the repo root
-python3 -m python.prepare.convert_linear_system \
+python3 -m prepare_datasets.convert_linear_system \
     --dataset-root <MATPOWER .m root> \
     --output-root  custom_linear_solver/tests/datasets/power \
     --cases case118 case1354pegase case_ACTIVSg25k case_SyntheticUSA

@@ -2,7 +2,7 @@
 SciPy reference Newton PF, and write cuPF dump directories. Pure pandapower side;
 no cuPF extension is imported.
 
-    python3 -m python.prepare.prepare --dataset-root /datasets/matpower --cases case9
+    python3 -m prepare_datasets.prepare --dataset-root /datasets/matpower --cases case9
 """
 from __future__ import annotations
 
@@ -10,22 +10,22 @@ import argparse
 import json
 from pathlib import Path
 
-from python.tests.eval_common import (
+from benchmark.common.eval_common import (
     add_common_args,
     load_case_and_reference,
     manifest,
-    output_dir,
     selected_case_paths,
+    variant_dir,
 )
-from python.tests.matpower_data import save_dump_case, write_manifest_csv
+from benchmark.common.matpower_data import save_dump_case, write_manifest_csv
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_ROOT = REPO_ROOT / "python" / "prepare" / "results"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUTPUT_ROOT = REPO_ROOT / "prepare_datasets" / "results"
 
 
 def prepare_command(args: argparse.Namespace) -> None:
     cases = selected_case_paths(args)
-    out = output_dir(args, "prepare", DEFAULT_OUTPUT_ROOT)
+    out = variant_dir(args, "prepare")
     dump_root = args.dump_root if args.dump_root is not None else out / "dumps"
     rows: list[dict[str, object]] = []
     for path in cases:
@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Convert MATPOWER .m cases to cuPF dump directories.")
     add_common_args(parser)
     parser.add_argument("--dump-root", type=Path, default=None, help="Override the dump output directory.")
-    parser.set_defaults(func=prepare_command)
+    parser.set_defaults(func=prepare_command, output_root=DEFAULT_OUTPUT_ROOT)
     return parser
 
 
