@@ -37,6 +37,29 @@ cmake --build build -j
 주요 플래그: `WITH_CUDA`, `BUILD_PYTHON_BINDINGS`, `CUPF_WITH_TORCH`, `ENABLE_TIMING`,
 `CUPF_ENABLE_CUSTOM_SOLVER`. 자세히는 [docs/system_architecture.md](docs/system_architecture.md) §6.
 
+## 통합 벤치 러너 (`tests/run_cupf.py`)
+
+세 실행 경로(C++ bench / Python pybind / PyTorch)를 한 진입점에서 같은 옵션으로 측정한다.
+케이스는 `/datasets/matpower`에서 자동 로드(pandapower) → dump 생성(cpp) 또는 직접 행렬 주입(python/torch).
+
+측정 모드(`--mode`): **solve**(최적화 initialize+solve 시간) · **operators**(연산자별 분해, cpp 전용) · **debug**(시스템별 수렴·잔차).
+
+```bash
+# C++ 벤치 — 최적화 init+solve 시간
+python3 cuPF/tests/run_cupf.py --path cpp    --backend cuda-custom --precision tf32 --mode solve
+# 연산자별 분해 (ibus/mismatch/jacobian/factor/solve/vupd) — cpp 전용
+python3 cuPF/tests/run_cupf.py --path cpp    --backend cuda-custom --precision tf32 --mode operators
+# Python pybind (CPU klu/umfpack + GPU cudss/custom), 디버깅(시스템별 잔차)
+python3 cuPF/tests/run_cupf.py --path python --backend cpu-klu     --precision fp64 --mode debug
+# PyTorch autograd (GPU; --grad 로 backward 까지)
+python3 cuPF/tests/run_cupf.py --path torch  --backend cuda-cudss  --precision mixed --grad
+```
+
+옵션: `--path {cpp,python,torch}`, `--backend {cuda-custom,cuda-cudss,cpu-klu,cpu-umfpack}`,
+`--precision {fp64,fp32,mixed,tf32}`(tf32=custom 전용), `--mode {solve,operators,debug}`,
+`--jacobian {edge,edge_atomic,vertex_warp}`, custom 솔버용 `--matching/--pivot/--pivot-eps`,
+그리고 `--cases --batch --repeats --max-iter --tol`. 처음이면 `--build`로 바인딩 포함 빌드. `--help` 참조.
+
 ## 빠른 사용 (Python)
 
 ```python

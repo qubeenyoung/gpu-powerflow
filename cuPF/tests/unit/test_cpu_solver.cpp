@@ -93,9 +93,12 @@ NRResult run_two_bus_solver(const NewtonOptions& options,
     EXPECT_TRUE(result.converged);
     EXPECT_TRUE(std::isfinite(result.final_mismatch));
     EXPECT_LE(result.final_mismatch, cfg.tolerance);
-    ASSERT_EQ(result.V.size(), data.expected_v.size());
-    EXPECT_LE(std::abs(result.V[0] - data.expected_v[0]), voltage_tolerance);
-    EXPECT_LE(std::abs(result.V[1] - data.expected_v[1]), voltage_tolerance);
+    // EXPECT (not ASSERT): this helper returns NRResult, so it can't early-return void.
+    EXPECT_EQ(result.V.size(), data.expected_v.size());
+    if (result.V.size() >= 2) {
+        EXPECT_LE(std::abs(result.V[0] - data.expected_v[0]), voltage_tolerance);
+        EXPECT_LE(std::abs(result.V[1] - data.expected_v[1]), voltage_tolerance);
+    }
     return result;
 }
 

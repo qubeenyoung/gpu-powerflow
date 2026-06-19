@@ -207,7 +207,6 @@ PYBIND11_MODULE(_cupf, m)
         "custom 솔버 pivot stabilization 전략.")
         .value("None", CustomPivotStrategy::None)
         .value("StaticDiagonalShift", CustomPivotStrategy::StaticDiagonalShift)
-        .value("DynamicPartial", CustomPivotStrategy::DynamicPartial)
         .export_values();
 
     py::enum_<CpuLinearSolverKind>(m, "CpuLinearSolverKind",
@@ -276,14 +275,8 @@ PYBIND11_MODULE(_cupf, m)
             "custom pivot stabilization strategy")
         .def_readwrite("serial_nd", &CustomSolverConfig::serial_nd,
             "True이면 결정적 serial METIS-ND (재현용), False이면 parallel-ND")
-        .def_readwrite("metis_seed", &CustomSolverConfig::metis_seed,
-            "nested-dissection random seed")
-        .def_readwrite("tier_split", &CustomSolverConfig::tier_split,
-            "occupancy tier-split 디스패치 활성화")
         .def_readwrite("max_panel_width", &CustomSolverConfig::max_panel_width,
             "supernode amalgamation cap (열 수)")
-        .def_readwrite("enable_shift_retry", &CustomSolverConfig::enable_shift_retry,
-            "특이 pivot 시 diagonal shift 재시도")
         .def_readwrite("shift_retry_epsilon", &CustomSolverConfig::shift_retry_epsilon,
             "shift 재시도 epsilon");
 

@@ -51,6 +51,9 @@ def main() -> None:
     options = cupf.NewtonOptions()
     options.backend = cupf.BackendKind.CUDA
     options.compute = cupf.ComputePolicy.Mixed
+    # The adjoint/transpose solve (backward pass) is implemented for cuDSS only;
+    # the custom solver — the default under CUPF_ENABLE_CUSTOM_SOLVER — lacks it.
+    options.cuda_linear_solver = cupf.CudaLinearSolverKind.CuDSS
     solver = cupf.NewtonSolver(options)
     solver.initialize(
         data["indptr"],

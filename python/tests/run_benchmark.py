@@ -1,4 +1,8 @@
-"""Orchestrate the representative benchmark matrix from ``python/tests``."""
+"""Cross-tool baseline comparison matrix (pypower + MATPOWER).
+
+cuPF itself is run via ``cuPF/tests/run_cupf.py`` (the single cuPF entry point);
+this harness runs the CPU/MATLAB baselines and aggregates them into runs.csv.
+"""
 from __future__ import annotations
 
 import argparse
@@ -6,17 +10,13 @@ import subprocess
 import sys
 
 from . import eval_common
-from .cupf_variants import variants_for_entrypoint
 
 PYPPOWER_VARIANT = "pypower-pandapower"
 MATPOWER_VARIANTS = ["matpower-default", "matpower-lu5"]
 
 
-def default_variants(include_diagnostic_fp32: bool = False) -> list[str]:
-    variants = [PYPPOWER_VARIANT, *MATPOWER_VARIANTS]
-    variants += [v["variant"] for v in variants_for_entrypoint(include_diagnostic_fp32, "pybind")]
-    variants += [v["variant"] for v in variants_for_entrypoint(include_diagnostic_fp32, "native")]
-    return variants
+def default_variants() -> list[str]:
+    return [PYPPOWER_VARIANT, *MATPOWER_VARIANTS]
 
 
 def _base_args(args: argparse.Namespace) -> list[str]:
@@ -57,7 +57,7 @@ def _run_module(module: str, extra: list[str], args: argparse.Namespace) -> None
 def run_benchmark(args: argparse.Namespace) -> None:
     run_dir = eval_common.run_root(args)
     run_dir.mkdir(parents=True, exist_ok=True)
-    requested = set(args.variants or default_variants(args.include_diagnostic_fp32))
+    requested = set(args.variants or default_variants())
     eval_common.write_json(
         run_dir / "run.json",
         {
@@ -86,14 +86,6 @@ def run_benchmark(args: argparse.Namespace) -> None:
         for variant in matpower:
             eval_common.write_skip(run_dir / variant, "skipped by --skip-matlab")
 
-    pybind = sorted(v for v in requested if v.endswith("-pybind"))
-    if pybind and not args.skip_cupf:
-        _run_module("python.tests.run_cupf_pybind", ["--variants", *pybind], args)
-
-    native = sorted(v for v in requested if v.endswith("-native"))
-    if native and not args.skip_cupf:
-        _run_module("python.tests.run_cupf_native", ["--variants", *native], args)
-
     if not args.no_aggregate:
         from .aggregate_results import aggregate
 
@@ -104,11 +96,9 @@ def run_benchmark(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run representative benchmark variants and aggregate results.")
     eval_common.add_common_args(parser)
-    parser.add_argument("--variants", nargs="*", help="Variant IDs. Defaults to the representative matrix.")
-    parser.add_argument("--include-diagnostic-fp32", action="store_true")
+    parser.add_argument("--variants", nargs="*", help="Variant IDs. Defaults to the baseline matrix.")
     parser.add_argument("--skip-pypower", action="store_true")
     parser.add_argument("--skip-matlab", action="store_true")
-    parser.add_argument("--skip-cupf", action="store_true")
     parser.add_argument("--matlab-bin", default=None)
     parser.add_argument("--matpower-home", default=None)
     parser.add_argument("--matlab-timeout-sec", type=int, default=7200)

@@ -53,11 +53,9 @@ cls::SolverConfig make_solver_config(const CustomSolverConfig* c, cls::Precision
     switch (c->matching) {
         case CustomMatchingMode::None:
             config.matching = cls::MatchingMode::None;
-            config.use_matching = false;
             break;
         case CustomMatchingMode::Structural:
             config.matching = cls::MatchingMode::Structural;
-            config.use_matching = true;
             break;
     }
     switch (c->pivot_strategy) {
@@ -67,9 +65,6 @@ cls::SolverConfig make_solver_config(const CustomSolverConfig* c, cls::Precision
         case CustomPivotStrategy::StaticDiagonalShift:
             config.pivot_strategy = cls::PivotStrategy::StaticDiagonalShift;
             break;
-        case CustomPivotStrategy::DynamicPartial:
-            config.pivot_strategy = cls::PivotStrategy::DynamicPartial;
-            break;
     }
     if (storage_dflt == cls::Precision::FP64) {
         config.precision = cls::Precision::FP64;          // FP64 storage factors FP64 only
@@ -78,7 +73,6 @@ cls::SolverConfig make_solver_config(const CustomSolverConfig* c, cls::Precision
     }
     config.use_parallel_nested_dissection = !c->serial_nd;
     config.max_panel_width                = c->max_panel_width;
-    config.enable_shift_retry             = c->enable_shift_retry;
     config.shift_retry_epsilon            = c->shift_retry_epsilon;
     return config;
 }

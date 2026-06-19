@@ -1,50 +1,28 @@
+# ===========================================================================
+# cuPF/tests layout
+#   run_cupf.py            the runner (measurement) — the one you run
+#   cupf_bench.cpp         C++ benchmark that run_cupf.py drives (cpp path)
+#   dump_case_loader.*     shared dump-case loader (bench + gtest)
+#   unit/                  C++ correctness tests (fixtures + minimal smoke + gtest)
+#   smoke/                 Python smoke tests (ctest)
+#   scripts/build_cupf.sh  thin cmake build wrapper
+# ===========================================================================
+
 # ---------------------------------------------------------------------------
-# C++ evaluator executable (shares dump_case_loader with the gtest target)
+# cupf_bench: the single cuPF C++ benchmark (solve / operators / debug modes).
 # ---------------------------------------------------------------------------
 if(BUILD_EVALUATORS)
-  add_executable(cupf_cpp_evaluate
-    cpp/cupf_cpp_evaluate.cpp
+  add_executable(cupf_bench
+    cupf_bench.cpp
     dump_case_loader.cpp
   )
-  target_link_libraries(cupf_cpp_evaluate PRIVATE cupf)
-  target_include_directories(cupf_cpp_evaluate PRIVATE
+  target_link_libraries(cupf_bench PRIVATE cupf)
+  if(WITH_CUDA)
+    target_link_libraries(cupf_bench PRIVATE CUDA::cudart)  # cudaDeviceSynchronize for clean timing
+  endif()
+  target_include_directories(cupf_bench PRIVATE
     ${PROJECT_SOURCE_DIR}/cpp/inc
     ${CMAKE_CURRENT_SOURCE_DIR})   # so #include "dump_case_loader.hpp" resolves
-
-  # Batch-scaling micro-benchmark: replicate one dump case into a B-case batch and time each NR
-  # stage. The second CLI arg selects backend/compute/factor precision (for example
-  # cudss-mixed, custom-mixed-fp32, custom-mixed-tf32).
-  add_executable(cupf_batch_bench
-    batch_bench.cpp
-    dump_case_loader.cpp
-  )
-  target_link_libraries(cupf_batch_bench PRIVATE cupf)
-  target_include_directories(cupf_batch_bench PRIVATE
-    ${PROJECT_SOURCE_DIR}/cpp/inc
-    ${CMAKE_CURRENT_SOURCE_DIR})
-
-  # End-to-end wall-clock bench (no per-stage timing -> compatible with CUDA-graph capture).
-  add_executable(cupf_graph_bench
-    graph_bench.cpp
-    dump_case_loader.cpp
-  )
-  target_link_libraries(cupf_graph_bench PRIVATE cupf)
-  target_include_directories(cupf_graph_bench PRIVATE
-    ${PROJECT_SOURCE_DIR}/cpp/inc
-    ${CMAKE_CURRENT_SOURCE_DIR})
-
-  # First-solve lifecycle benchmark: fresh solver per trial, reporting initialize + first solve.
-  if(WITH_CUDA)
-    add_executable(cupf_lifecycle_bench
-      lifecycle_bench.cpp
-      dump_case_loader.cpp
-    )
-    target_link_libraries(cupf_lifecycle_bench PRIVATE cupf)
-    target_link_libraries(cupf_lifecycle_bench PRIVATE CUDA::cudart)
-    target_include_directories(cupf_lifecycle_bench PRIVATE
-      ${PROJECT_SOURCE_DIR}/cpp/inc
-      ${CMAKE_CURRENT_SOURCE_DIR})
-  endif()
 endif()
 
 # Evaluator-only configure (BUILD_EVALUATORS=ON, BUILD_TESTING=OFF): stop here.
@@ -53,28 +31,32 @@ if(NOT BUILD_TESTING)
 endif()
 
 # ---------------------------------------------------------------------------
-# Dependency-free smoke test
+# unit/ — dependency-free C++ smoke test (no GoogleTest)
 # ---------------------------------------------------------------------------
 add_executable(cupf_minimal_tests
-  small_cases.cpp
-  test_minimal_solver.cpp
+  unit/small_cases.cpp
+  unit/test_minimal_solver.cpp
 )
-
 target_link_libraries(cupf_minimal_tests PRIVATE cupf)
-target_include_directories(cupf_minimal_tests PRIVATE ${PROJECT_SOURCE_DIR}/cpp/inc)
+target_include_directories(cupf_minimal_tests PRIVATE
+  ${PROJECT_SOURCE_DIR}/cpp/inc
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit)   # small_cases.hpp
 add_test(NAME cupf_minimal_tests COMMAND cupf_minimal_tests)
 
+# ---------------------------------------------------------------------------
+# smoke/ — Python binding + torch autograd smoke tests
+# ---------------------------------------------------------------------------
 if(BUILD_PYTHON_BINDINGS)
   find_package(Python COMPONENTS Interpreter QUIET)
   if(Python_Interpreter_FOUND)
     add_test(NAME cupf_python_bindings_smoke
-      COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/test_bindings.py")
+      COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/smoke/test_bindings.py")
     set_tests_properties(cupf_python_bindings_smoke PROPERTIES
       ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:_cupf>:${CMAKE_SOURCE_DIR}/python")
 
     if(CUPF_WITH_TORCH)
       add_test(NAME cupf_python_torch_autograd_smoke
-        COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/test_torch_autograd.py")
+        COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/smoke/test_torch_autograd.py")
       set_tests_properties(cupf_python_torch_autograd_smoke PROPERTIES
         ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:_cupf>:${CMAKE_SOURCE_DIR}/python")
     endif()
@@ -83,6 +65,9 @@ if(BUILD_PYTHON_BINDINGS)
   endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# unit/ — GoogleTest C++ unit tests (built only when GoogleTest is available)
+# ---------------------------------------------------------------------------
 option(CUPF_REQUIRE_GTEST
   "Fail configure when BUILD_TESTING=ON but GoogleTest is unavailable" OFF)
 
@@ -96,24 +81,16 @@ if(NOT GTest_FOUND)
   return()
 endif()
 
-set(CUPF_TEST_SOURCES
+add_executable(cupf_tests
   dump_case_loader.cpp
-  small_cases.cpp
-  test_cpu_solver.cpp
+  unit/small_cases.cpp
+  unit/test_cpu_solver.cpp
 )
-
-if(NOT CUPF_TEST_SOURCES)
-  message(STATUS "cuPF: test skeleton present but no C++ test sources are registered yet")
-  return()
-endif()
-
-# ---------------------------------------------------------------------------
-# C++ unit tests
-# ---------------------------------------------------------------------------
-add_executable(cupf_tests ${CUPF_TEST_SOURCES})
-
 target_link_libraries(cupf_tests PRIVATE cupf GTest::gtest_main)
-target_include_directories(cupf_tests PRIVATE ${PROJECT_SOURCE_DIR}/cpp/inc)
+target_include_directories(cupf_tests PRIVATE
+  ${PROJECT_SOURCE_DIR}/cpp/inc
+  ${CMAKE_CURRENT_SOURCE_DIR}        # dump_case_loader.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit)  # small_cases.hpp
 
 include(GoogleTest)
 gtest_discover_tests(cupf_tests)

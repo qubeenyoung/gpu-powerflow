@@ -144,19 +144,18 @@ enum class CustomMatchingMode {
 enum class CustomPivotStrategy {
     None,
     StaticDiagonalShift,
-    DynamicPartial,
 };
 
+// Mirrors custom_linear_solver::SolverConfig exactly — fields the library no longer
+// supports (metis_seed, tier_split, enable_shift_retry, DynamicPartial pivot) were
+// dropped so this struct can't expose options that silently do nothing.
 struct CustomSolverConfig {
     CustomPrecision precision           = CustomPrecision::FP32;  // factor 정밀도
     CustomMatchingMode matching         = CustomMatchingMode::None;
     CustomPivotStrategy pivot_strategy  = CustomPivotStrategy::StaticDiagonalShift;
     bool            serial_nd           = false;    // 결정적 serial METIS-ND (false = parallel-ND)
-    int             metis_seed          = 49;       // nested-dissection random seed
-    bool            tier_split          = true;     // occupancy tier-split 디스패치
     int             max_panel_width     = 8;        // supernode amalgamation cap
-    bool            enable_shift_retry  = true;     // 특이 pivot 시 diagonal shift 재시도
-    double          shift_retry_epsilon = 1.0e-8;
+    double          shift_retry_epsilon = 1.0e-8;   // static diagonal-shift 임계/크기 (0 = 비활성)
 };
 
 

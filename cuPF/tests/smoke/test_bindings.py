@@ -36,7 +36,8 @@ def main() -> None:
 
     options = cupf.NewtonOptions()
     assert options.backend == cupf.BackendKind.CPU
-    assert options.compute == cupf.ComputePolicy.FP64
+    # Default compute is build-dependent: Mixed when CUPF_ENABLE_CUSTOM_SOLVER, else FP64.
+    assert options.compute in (cupf.ComputePolicy.FP64, cupf.ComputePolicy.Mixed)
     assert options.cpu_linear_solver == cupf.CpuLinearSolverKind.KLU
     assert options.cuda_jacobian == cupf.CudaJacobianKind.Edge
     options.compute = cupf.ComputePolicy.FP32
