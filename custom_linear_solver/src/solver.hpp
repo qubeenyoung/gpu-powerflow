@@ -16,7 +16,6 @@ enum class MatchingMode {
 enum class PivotStrategy {
   None,
   StaticDiagonalShift,
-  DynamicPartial,
 };
 
 enum class Status {
@@ -35,19 +34,22 @@ enum class Status {
 // the build because every measured off-default regressed at least one case.
 struct SolverConfig {
   // ---- Symbolic analysis ----
-  bool use_matching = false;  // compatibility alias for Structural matching
   MatchingMode matching =
       MatchingMode::None;  // optional row/column structural matching
   bool use_parallel_nested_dissection =
-      true;                 // multi-threaded METIS-ND ordering
+      true;  // multi-threaded METIS-ND ordering
+  // Parallel-ND tuning (used only when use_parallel_nested_dissection): recursion
+  // depth + base-case thresholds (small for n < ~20k, large for bigger graphs).
+  // Former CLS_PAR_ND_* compile-time defaults.
+  int parallel_nd_depth = 4;
+  int parallel_nd_base_small = 4000;
+  int parallel_nd_base_large = 20000;
   int max_panel_width = 8;  // max columns amalgamated into one supernode
-                            // panel (1..64). Width 8 is the fair-tuned
-                            // optimum for all sizes (report §08, 2026-06-17).
+                            // panel (1..64); 8 is the tuned optimum.
   // ---- Numeric factorization ----
-  bool enable_shift_retry =
-      true;  // enables StaticDiagonalShift compatibility path
   double shift_retry_epsilon =
       1.0e-8;  // pivot threshold and replacement magnitude
+               // (StaticDiagonalShift; 0 disables shifting)
   PivotStrategy pivot_strategy = PivotStrategy::StaticDiagonalShift;
   Precision precision =
       Precision::FP64;  // FP64 / FP32 / TF32 (TF32 Ozaki mma, recommended)

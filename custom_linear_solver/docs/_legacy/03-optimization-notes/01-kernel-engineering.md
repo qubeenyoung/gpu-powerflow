@@ -7,8 +7,8 @@
 별도 문서 [`02-tf32-trailing-gemm.md`](02-tf32-trailing-gemm.md),
 [`03-tensor-core-investigation.md`](03-tensor-core-investigation.md),
 [`../02-design-analysis/04-gemm-fraction-tc-ceiling.md`](../02-design-analysis/04-gemm-fraction-tc-ceiling.md) 으로 분리되어 있고,
-전체 흐름은 [`../main-report.md`](../main-report.md) 가 묶는다. tier 임계값 근거는
-[`../02-design-analysis/05-tier-thresholds.md`](../02-design-analysis/05-tier-thresholds.md).
+전체 흐름은 [`../main-report.md`](../main-report.md) 가 묶는다. tier 임계값 근거(small\|mid=32 / mid\|big=64)는
+`src/internal/types.hpp` 주석이 canonical.
 
 대상 HW 는 전부 RTX 3090 (GA102, sm_86), CUDA 12.8. 핵심 워크로드는 동일 sparsity 를 공유하는
 B 개 power-grid Newton Jacobian 의 multi-batch factor/solve (한 번 analyze, B 번 numeric).
@@ -29,17 +29,20 @@ COALESCED staging, block barrier 대신 `__syncwarp()`, L/U-only write-back. 기
 (¾ idle + block barrier)을 대체. 지배 bottom level 이 **2.47 → 1.12 ms** 로 떨어지고 compute-bound(76%)로
 전환. solve 도 동형(`mf_{fwd,bwd}_small_warp_b`, 8 warps/block) — solve −30~41%.
 
-### 1.2 mid = shared-resident (32 < fsz ≤ 159)
+### 1.2 mid = shared-resident (33 ≤ fsz ≤ 64)
 
 front 전체를 dynamic shared 로 staging(level 의 max fsz² 로 sizing, sm_86 의 99 KB opt-in cap), panel
 LU / U-solve / trailing / extend-add 를 매 ~nc 패스마다 global 재독 없이 shared 에서 수행. write-back 은
 **L/U 만**(uc×uc CB 는 shared 에 남겨 extend-add 에 재사용 → DRAM-bound level 의 write traffic 대부분 절감).
-block thread 는 front size 에 따라 64/128/256.
+block thread 는 front size 에 따라 64/128/256. mid|big 경계 64 는 whole-front staging(`fsz²·elem`)이 SM 당
+~2 block 점유를 유지하는 교차점(`kMidFrontMax`, `src/internal/types.hpp`).
 
-### 1.3 big = 1024-thread (fsz > 159)
+### 1.3 big = multi-block global-resident (fsz > 64)
 
-shared 예산 초과라 global 커널 유지, 단 **1024 thread/block**. top level 은 front 가 9–25개뿐이라 occupancy 가
-near-zero — 많은 warp 를 한 block 에 packing 해 긴 순차 의존을 hide. 70k factor **0.87 → 0.77**.
+whole-front staging 이 점유를 굶기는 영역이라 front 를 global 에 두고 작은 L/U 패널 타일만 staging하며 **한 front 를
+여러 블록에 분산**(pivot + 패널 + trailing multi-block). top level 은 front 가 9–25개뿐이라 single-block occupancy 가
+near-zero — multi-block 분산으로 GPU 를 채우고 긴 순차 의존을 hide. 70k factor **0.87 → 0.77**.
+(159(float)/111(double) = big 커널 내부 bounded-shared staging 상한 `WholeFrontSharedMax`, 티어 경계 아님.)
 
 ### 1.4 analyze: GPU graph build + 데드패스 제거
 
@@ -353,4 +356,4 @@ parent 재설계는 거기서 시작해야. `CLS_DISABLE_EXTEND_ADD` upper-bound
 - [`../main-report.md`](../main-report.md) — 전체 흐름
 - [`02-tf32-trailing-gemm.md`](02-tf32-trailing-gemm.md), [`03-tensor-core-investigation.md`](03-tensor-core-investigation.md) — TC novelty 축
 - [`../02-design-analysis/04-gemm-fraction-tc-ceiling.md`](../02-design-analysis/04-gemm-fraction-tc-ceiling.md) — GEMM 비중 / TC ceiling
-- [`../02-design-analysis/05-tier-thresholds.md`](../02-design-analysis/05-tier-thresholds.md) — tier 임계값 근거
+- tier 임계값 근거(small\|mid=32 / mid\|big=64) — `src/internal/types.hpp` 주석

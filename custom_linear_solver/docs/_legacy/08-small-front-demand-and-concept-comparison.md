@@ -72,7 +72,7 @@
 
 **custom**:
 - **전 과정 GPU-resident**: factor·solve를 CUDA graph로 캡처해 replay, host↔device는 수렴 스칼라뿐.
-- **4-tier 결정적 라우팅**(front 크기 함수): small(sub-group packing+full fusion) / small·big(whole-front 또는 panel-resident shared) / large(blocked-LU: pivot + L21/U12 multi-block + trailing multi-block — 이번 세션).
+- **3-tier 결정적 라우팅**(front 크기 함수): small(fsz≤32, sub-group packing+full fusion) / mid(33–64, whole-front shared, 1 block/front) / big(>64, global-resident: pivot + L21/U12 multi-block + trailing multi-block).
 - **factor + extend-add 융합**(atomicAdd로 부모에 scatter), 별도 조립 단계 없음.
 - **no-pivot**(대각우세 가정), **B개 same-symbolic 배치**(한 symbolic 공유).
 - 결과: small-front에서 packing(occupancy)과 fusion(메모리 재사용)을 *동시에* → occupancy 2%→30–59%. 단 일반성↓
@@ -199,11 +199,10 @@ analyze (패턴당 1회):
     symbolic(front_ptr, extend-add 맵) → device arena + factor/solve CUDA graph 캡처
 factorize (매 반복): scatter 값 → factor graph replay:
     for level L (graph node 1개):
-        그 레벨 front들을 크기로 4-tier 라우팅, tier별 전용 커널 1회(× B 배치):
-          small  : sub-group이 front 하나의 [4단계 전체]를 shared에서 융합 실행, 32/SG front/warp packing
-          small : whole-front shared
-          big   : L/U 패널만 shared(CB는 global) — 배치 점유 회복
-          large : blocked-LU (pivot → L21/U12 multi-block → trailing multi-block)
+        그 레벨 front들을 크기로 3-tier 라우팅, tier별 전용 커널 1회(× B 배치):
+          small (fsz≤32) : sub-group이 front 하나의 [4단계 전체]를 shared에서 융합 실행, 32/SG front/warp packing
+          mid   (33–64)  : whole-front shared-resident, 1 block/front
+          big   (>64)    : global-resident multi-block — blocked-LU (pivot → L21/U12 multi-block → trailing multi-block)
         extend-add는 trailing 끝에 atomicAdd로 부모에 바로 scatter (별도 단계 없음)
 solve: 전진/후진대입도 GPU graph, tier별(spine은 전용 커널)
 ```
@@ -247,7 +246,7 @@ solve: 전진/후진대입도 GPU graph, tier별(spine은 전용 커널)
 - *왜*: 얕은 트리(레벨↓ = solve launch↓)를 *낮은 fill로* 얻는다. STRUMPACK은 얕게 하려면 fill 6–9× 폭증.
 - *효과*: 전력망 ~26레벨을 metis의 ~2× fill로(STRUMPACK 78레벨). solve의 순차 의존 축소.
 
-**⑦ blocked-LU large tier — 큰 front를 GPU 전체로 분산 (이번 세션)**
+**⑦ blocked-LU big tier (옛 large) — 큰 front를 GPU 전체로 분산**
 - *문제*: 큰 front(circuit/2D-FEM separator, uc 수백)는 처음에 ① shared 한도 초과로 launch 실패("OOM" 오진),
   ② one-block-per-front로 under-fill(occupancy 8~17%).
 - *해결 단계*:
@@ -261,7 +260,7 @@ solve: 전진/후진대입도 GPU graph, tier별(spine은 전용 커널)
 
 - *예시로 따라가기*: 큰 front 하나(nc=2, uc=6 → front 8×8)를 생각하자. small tier처럼 "front 하나=sub-group
   하나"로 하면 그 sub-group이 8×8 전체를 혼자 처리 → 큰 front엔 일거리 과다, GPU엔 블록 부족(under-fill).
-  대신 large tier는 한 front의 일을 *작은 조각으로 쪼개 여러 블록*에 뿌린다:
+  대신 big tier는 한 front의 일을 *작은 조각으로 쪼개 여러 블록*에 뿌린다:
   - **pivot**: nc×nc=2×2 블록만 한 블록이 LU (작음, front당 1회).
   - **L21/U12 패널**: L21은 uc=6개 *행*이 서로 독립(각 행은 U11에 대한 삼각 solve), U12는 uc=6개 *열*이 독립.
     → 6개 행/열을 **여러 스레드/블록에 나눠** 동시에 solve. (예: 한 블록이 row0..2, 다른 블록이 row3..5)

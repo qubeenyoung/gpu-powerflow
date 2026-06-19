@@ -1,5 +1,10 @@
 # 2026-06-12 Lab Meeting
 
+> **동결 스냅샷(2026-06-12)**: 이 폴더는 발표 시점 그대로 보존한다. **2026-06-18 tier 통합(4→3) 이전**이라
+> 일부 자료(`etree-characteristics.md`, `small-tier-no-tensorcore.md` 등)는 옛 tier 경계 **mid 33–159 / big ≥160**
+> 으로 비닝돼 있다. 현재 경계는 **mid 33–64 / big >64** 다 — [`../main-report.md`](../main-report.md),
+> [`../05-reports/10-tier-consolidation-2026-06-18.md`](../05-reports/10-tier-consolidation-2026-06-18.md) 참조.
+
 오늘(2026-06-11) 재측정한 **결정적**(Ozaki TF32 + serial-ND seed 1588 + GPU 클럭 고정) 데이터 기준.
 이전 2026-06-10 스냅샷은 새 자료로 대체했고, 별도 old 사본은 두지 않는다.
 

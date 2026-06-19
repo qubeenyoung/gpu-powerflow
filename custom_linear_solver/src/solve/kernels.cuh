@@ -37,16 +37,15 @@ namespace {
 // =======================================================================================
 //
 // The bottom Etree levels (tens of thousands of small fronts) dominate the
-// batched Solve the same way they dominate factor. Block-per-front would launch
-// one 32-thread block per (front, batch) → block-launch / scheduling overhead +
-// poor SM packing. SolveFwdSmall / SolveBwdSmall pack W warps per block
-// (one (front, batch) per warp) and use __syncwarp.
+// batched Solve. Block-per-front would launch one 32-thread block per
+// (front, batch): high launch/scheduling overhead and poor SM packing. These
+// kernels pack W warps per block (one (front, batch) per warp) and sync with
+// __syncwarp.
 
-// sub_group_size = sub-group lane count (8 / 16 / 32). One sub-group of
-// sub_group_size lanes owns one (front, batch); fronts_per_warp =
-// 32/sub_group_size fronts pack per warp (same small-front-packing idea as
-// FactorSmall). sub_group_size=32 is the classic one-warp-per-front form. The
-// dispatcher picks sub_group_size from the level's max_fsz.
+// sub_group_size = sub-group lane count (8 / 16 / 32). One sub-group owns one
+// (front, batch); fronts_per_warp = 32/sub_group_size fronts pack per warp.
+// sub_group_size=32 is the classic one-warp-per-front form. The dispatcher
+// picks sub_group_size from the level's max_fsz.
 template <typename T, int sub_group_size>
 __global__ void SolveFwdSmall(int lbegin, int level_size, int B, int slab,
                               const int* __restrict__ plcols,
@@ -79,8 +78,11 @@ __global__ void SolveFwdSmall(int lbegin, int level_size, int B, int slab,
   const int* fr = front_rows + s;
   T* sh_piv = slabs + (long)(warp_in_blk * fronts_per_warp + sg) * slab;
 
+  // 1. Forward substitution: solve L_pp * sh_piv = b for this front's pivots.
   FwdSubstitute<T, sub_group_size>(F, fsz, nc, fr, y, sh_piv, sl, mask);
   __syncwarp(mask);
+
+  // 2. Push the contribution-block rows into the parent RHS (atomicAdd).
   FwdCbUpdate<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, sl,
                  /*nt=*/sub_group_size);
 }
@@ -120,11 +122,16 @@ __global__ void SolveBwdSmall(int lbegin, int level_size, int B, int slab,
       slabs + (long)(warp_in_blk * fronts_per_warp + sg) * slab;  // [0, nc)
   T* xsh = rhs + kMaxPivotColumns;                                // [0, cb)
 
+  // 1. Gather rhs[] and the x cache from y.
   BwdLoadRhsAndX<T>(y, fr, nc, cb, rhs, xsh, sl, /*nt=*/sub_group_size);
   __syncwarp(mask);
+
+  // 2. Subtract the contribution-block product from rhs.
   BwdCbSubtract<T, sub_group_size>(F, fsz, nc, cb, xsh, rhs, sl,
                                    /*width=*/sub_group_size, mask);
   __syncwarp(mask);
+
+  // 3. Back-substitute U_pp * x = rhs, writing x back to y.
   BwdSubstitute<T, sub_group_size>(F, fsz, nc, fr, y, rhs, sl, mask);
 }
 
@@ -189,19 +196,20 @@ __global__ void SolveFwd(int lbegin, int lend, const int* __restrict__ plcols,
   const int t = threadIdx.x, nt = blockDim.x;
   __shared__ T sh_piv[kMaxPivotColumns];
 
-  // P3: stage the L panel (rows [0,fsz) × cols [0,nc), compact stride nc) into
-  // shared with a coalesced load, then run both phases from shared. ncu showed
-  // the direct F[lane*fsz+k] access at ~12% load-coalescing; the compact load
-  // packs nc-contiguous runs and the phases read shared.
+  // Phase 1 — stage the L panel (rows [0,fsz) x cols [0,nc), compact stride nc)
+  // into shared with a coalesced load; the compact load packs nc-contiguous
+  // runs so both phases read bank-friendly shared instead of strided global.
   extern __shared__ unsigned char fwd_smem_raw[];
   T* Lsh = reinterpret_cast<T*>(fwd_smem_raw);
   for (int e = t; e < fsz * nc; e += nt)
     Lsh[e] = F[(long)(e / nc) * fsz + (e % nc)];
   __syncthreads();
-  // Phase 1 — panel substitution (one warp).
+
+  // Phase 2 — panel substitution (one warp).
   if (t < 32) FwdSubstituteSh<T>(Lsh, /*ld=*/nc, nc, fr, y, sh_piv, /*lane=*/t);
   __syncthreads();
-  // Phase 2 — CB rows update across all threads.
+
+  // Phase 3 — CB rows update across all threads.
   FwdCbUpdateSh<T>(Lsh, /*ld=*/nc, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, t,
                    nt);
 }
@@ -226,8 +234,8 @@ __global__ void SolveBwd(int lbegin, int lend, const int* __restrict__ plcols,
   const int t = threadIdx.x, nt = blockDim.x;
   const int cb = fsz - nc;
 
-  // P3: stage the top nc rows of F (the U pivot block + U panel — F[0, nc*fsz)
-  // is contiguous, so the load is fully coalesced) into shared, then run both
+  // Stage the top nc rows of F (the U pivot block + U panel; F[0, nc*fsz) is
+  // contiguous, so the load is fully coalesced) into shared, then run both
   // U-using phases from shared. xsh (x cache, cb entries) follows it in dynamic
   // shared; rhs is a static shared.
   extern __shared__ unsigned char bwd_smem_raw[];
@@ -247,10 +255,10 @@ __global__ void SolveBwd(int lbegin, int lend, const int* __restrict__ plcols,
   if (t < 32) BwdSubstitute<T>(Ush, fsz, nc, fr, y, rhs, /*lane=*/t);
 }
 
-// Non-staged fwd for large fronts whose L panel (fsz×nc) would exceed the
-// default shared cap if staged. Reads F directly (the staging is only a
-// small-front coalescing win; large fronts have enough work to coalesce
-// anyway). Same math as SolveFwd, only without the Lsh copy. sh = 0.
+// Non-staged fwd for large fronts whose L panel (fsz x nc) would exceed the
+// default shared cap if staged. Reads F directly: staging is only a small-front
+// coalescing win, and large fronts coalesce anyway. Same math as SolveFwd
+// without the Lsh copy (shared = 0).
 template <typename T>
 __global__ void SolveFwdNostage(
     int lbegin, int lend, const int* __restrict__ plcols,
@@ -269,13 +277,17 @@ __global__ void SolveFwdNostage(
   const int* fr = front_rows + s;
   const int t = threadIdx.x, nt = blockDim.x;
   __shared__ T sh_piv[kMaxPivotColumns];
+
+  // 1. Panel substitution (one warp).
   if (t < 32) FwdSubstitute<T>(F, fsz, nc, fr, y, sh_piv, /*lane=*/t);
   __syncthreads();
+
+  // 2. CB rows update across all threads.
   FwdCbUpdate<T>(F, fsz, nc, /*cb=*/fsz - nc, fr, y, sh_piv, t, nt);
 }
 
-// Non-staged bwd counterpart (shared = x cache only, bounded by cb — the
-// U-panel stays in global).
+// Non-staged bwd counterpart (shared = x cache only, bounded by cb; the U-panel
+// stays in global).
 template <typename T>
 __global__ void SolveBwdNostage(
     int lbegin, int lend, const int* __restrict__ plcols,
@@ -297,10 +309,16 @@ __global__ void SolveBwdNostage(
   extern __shared__ unsigned char bwd_nostage_raw[];
   T* xsh = reinterpret_cast<T*>(bwd_nostage_raw);  // cb entries
   __shared__ T rhs[kMaxPivotColumns];
+
+  // 1. Gather rhs[] and x cache from y.
   BwdLoadRhsAndX<T>(y, fr, nc, cb, rhs, xsh, t, nt);
   __syncthreads();
+
+  // 2. CB contribution to rhs.
   BwdCbSubtract<T>(F, fsz, nc, cb, xsh, rhs, t, /*width=*/nt);
   __syncthreads();
+
+  // 3. Panel substitution (one warp), writes x back to y.
   if (t < 32) BwdSubstitute<T>(F, fsz, nc, fr, y, rhs, /*lane=*/t);
 }
 
@@ -323,6 +341,8 @@ __global__ void SolveFwdFixedNc(
   const int t = threadIdx.x, nt = blockDim.x;
   __shared__ T sh_piv[kMaxPivotColumns];
 
+  // Compile-time-unrolled path when this front's nc matches NC; otherwise the
+  // generic runtime-nc path.
   if (nc == NC) {
     FwdSubstituteFixedRegular<T, NC>(F, fsz, fr, y, sh_piv, t);
     __syncthreads();
@@ -382,6 +402,8 @@ __global__ void SolveBwdFixedNc(
   T* xsh = reinterpret_cast<T*>(xsh_raw);
   __shared__ T rhs[kMaxPivotColumns];
 
+  // Compile-time-unrolled path when this front's nc matches NC; otherwise the
+  // generic runtime-nc path.
   if (nc == NC) {
     BwdLoadRhsAndXFixed<T, NC>(y, fr, fsz - NC, rhs, xsh, t, nt);
     __syncthreads();
@@ -506,6 +528,7 @@ __global__ void SolveSpine(int n_spine, const int* __restrict__ spine_panels,
   extern __shared__ unsigned char xsh_raw[];
   T* xsh = reinterpret_cast<T*>(xsh_raw);
 
+  // Forward pass: walk the spine chain leaves->root.
   for (int idx = 0; idx < n_spine; ++idx) {
     const int p = spine_panels[idx];
     const int s = front_ptr[p];
@@ -520,6 +543,7 @@ __global__ void SolveSpine(int n_spine, const int* __restrict__ spine_panels,
     __syncthreads();
   }
 
+  // Backward pass: walk the spine chain root->leaves.
   for (int idx = n_spine - 1; idx >= 0; --idx) {
     const int p = spine_panels[idx];
     const int s = front_ptr[p];

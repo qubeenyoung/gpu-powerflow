@@ -8,19 +8,20 @@
 대상: case8387 (n=14908), USA (n=156255). batch size 1 ~ 256.
 방법: 이론 FLOPS 분석 + nsys per-kernel 실측 + skip-trailing variant 직접 측정.
 
-**크기 분류 기준** (`src/batched/multifrontal_batched.cu`):
+**현재 크기 분류 기준** (`src/internal/types.hpp` `ClassifyFrontTier`):
 ```cpp
-SMALL_THRESH = 32                              // small_warp kernel 경계
-MID_THRESH   = (TC32) ? 128 : 159              // mid vs big 경계 (path 별 다름)
+kSmallFrontMax = 32   // small|mid 경계 (warp 폭)
+kMidFrontMax   = 64   // mid|big 경계 (whole-front 점유 교차점, 2026-06-18 통합)
 ```
 LEVEL 의 max_fsz 기준 routing:
-- **small**: `max_fsz ≤ 32` → small_warp
-- **mid**: `32 < max_fsz ≤ 159` (FP32) → mid_tc32 / mid_tiled (shared-resident block kernel)
-- **big**: `max_fsz > 159` → extend_level (global-mem 1024-thread)
+- **small**: `max_fsz ≤ 32` → FactorSmall (warp-packed sub-group)
+- **mid**: `33 ≤ max_fsz ≤ 64` → FactorMid (whole-front shared-resident, 1 block/front)
+- **big**: `max_fsz > 64` → FactorBig (global-resident multi-block)
 
-case8387 max_fsz = 80 → BIG 0개. USA max_fsz = 254 → BIG 25개.
-
-자세한 임계값 근거는 [`05-tier-thresholds.md`](05-tier-thresholds.md).
+> **주의(측정 맥락)**: 아래 §2 의 panel 분포 표는 **측정 시점(2026-06-10)의 옛 4-tier 분류**(mid 33–159 / big >159)로
+> 비닝됐다 — 그때는 mid 가 159 까지였다. 표의 FLOP 비중·총 trailing% 결론은 small/mid/big 분할과 무관하므로
+> 그대로 유효하지만, 행 라벨의 `159` 경계는 현재 코드(64)와 다른 옛 값임에 유의. tier 통합 경위는
+> [`../05-reports/10-tier-consolidation-2026-06-18.md`](../05-reports/10-tier-consolidation-2026-06-18.md).
 
 ---
 
@@ -351,7 +352,7 @@ Sum of kernel μs/sys ≠ wall (multistream concurrency factor).
 
 ## 관련 문서
 - `../main-report.md` — 전체 서사 맥락
-- [`05-tier-thresholds.md`](05-tier-thresholds.md) — SMALL_THRESH/MID_THRESH 근거
+- tier 경계 근거(small\|mid=32 / mid\|big=64) — `src/internal/types.hpp` 주석 (옛 MID=128 문서는 `../archive/`)
 - [`../03-optimization-notes/03-tensor-core-investigation.md`](../03-optimization-notes/03-tensor-core-investigation.md) — TC32 negative result + 디자인
 - [`../04-benchmarks-profiling/03-gemm-fraction-front-distribution.md`](../04-benchmarks-profiling/03-gemm-fraction-front-distribution.md) — front 분포 + tier별 wall
 - [`01-why-custom-fast.md`](01-why-custom-fast.md) — GPU compute 가 leverage 아님 (TC ceiling 작은 이유의 상위 맥락)

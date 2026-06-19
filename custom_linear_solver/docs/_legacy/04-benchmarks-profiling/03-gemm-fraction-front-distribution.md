@@ -1,7 +1,12 @@
 # Trailing GEMM 분율과 front 크기 분포 (case8387 / USA)
 
-> **상태**: reference   **갱신**: 2026-06-10
+> **상태**: reference (2026-06-10 측정 스냅샷)   **갱신**: 2026-06-10
 > **한 줄**: trailing GEMM은 이론 FLOP의 71–86%지만 실측 wall은 11–43%뿐 (비-GEMM이 per-FLOP 3–7배 느림); front 분포는 극단적 small-heavy지만 FLOP은 mid/big에 집중; TF32 K=8이 FP16 K=16 대비 padding 0–17% vs 37–50%.
+>
+> **⚠ tier 경계 주의**: 아래 §1 의 dispatch 의사코드·표는 **측정 시점(2026-06-10)의 옛 4-tier 경계**
+> (`MID_THRESH=128`, big `>128`)로 비닝됐다. **현재 코드는 mid\|big=64**(`kMidFrontMax`, `src/internal/types.hpp`)이고
+> 심볼은 `FactorSmall/FactorMid/FactorBig` 다. FLOP 분율·trailing wall 결론은 분할과 무관하므로 그대로 유효하다.
+> 통합 경위: [`../05-reports/10-tier-consolidation-2026-06-18.md`](../05-reports/10-tier-consolidation-2026-06-18.md).
 
 **대상**: refactored `custom_linear_solver` (`41897cd`), panel_cap=8, RTX 3090, CUDA 12.8, fp32.
 **측정 데이터**: `src/solver.cpp`의 `CLS_DUMP_FRONTS` hook → `/home/claude/prof/fronts_{8387,USA}.csv`. 스크립트 `analyze_flops.py`, `front_gemm_hist.py`.

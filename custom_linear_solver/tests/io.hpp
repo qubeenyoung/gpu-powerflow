@@ -6,16 +6,18 @@
 
 namespace custom_linear_solver::scripts {
 
+// Host CSR matrix read from a Matrix Market file.
 struct CsrMatrix {
   int rows = 0;
   int cols = 0;
-  std::vector<int> row_ptr;
-  std::vector<int> col_idx;
-  std::vector<double> values;
+  std::vector<int> row_ptr;     // CSR row pointers (rows+1)
+  std::vector<int> col_idx;     // CSR column indices
+  std::vector<double> values;   // CSR values
 
   int64_t nnz() const { return static_cast<int64_t>(values.size()); }
 };
 
+// Host dense vector read from a Matrix Market file.
 struct DenseVector {
   int rows = 0;
   int cols = 0;

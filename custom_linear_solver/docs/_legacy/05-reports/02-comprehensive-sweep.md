@@ -3,7 +3,7 @@
 > **상태**: canonical   **갱신**: 2026-06-10
 > **한 줄**: full benchmark table의 기준 문서 — B ≤ 16 작은 batch에서는 TC, B ≥ 64 큰 batch에서는 FP32 우세, USA B=4가 TC sweet spot (−17.5%).
 
-이 문서는 full benchmark table의 canonical source다. 요약 결론과 권장 mode는 [`01-final-report.md`](01-final-report.md)를 우선 참고한다.
+이 문서는 full benchmark table의 canonical source다. 요약 결론과 권장 mode는 [`main-report.md`](../main-report.md)를 우선 참고한다.
 
 - 측정 일자: 2026-06-05
 - GPU: RTX 3090 (sm_86)
@@ -170,7 +170,7 @@ batch=256 기준 (large batch):
 
 | 문서 | 내용 |
 |---|---|
-| [`01-final-report.md`](01-final-report.md) | canonical master report (요약 + 최적 경로) |
+| [`main-report.md`](../main-report.md) | canonical master report (요약 + 최적 경로) |
 | [`03-bench-vs-cudss.md`](03-bench-vs-cudss.md) | cuDSS 대비 벤치마크 |
 | [`04-factorize-progress.md`](04-factorize-progress.md) | factorize 최적화 progress |
 | [`../optimal-configuration.md`](../optimal-configuration.md) | optimal dispatch 구성 결정 |

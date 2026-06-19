@@ -2,8 +2,7 @@
 
 Test harnesses and analysis scripts for the solver. **`run_custom_solver.cu` is the
 canonical runner** — build it and use it to exercise / time / validate the solver. The
-other C++ file is an optional cuDSS comparison baseline; the Python files are offline
-analysis tooling (not part of the build).
+Python files are offline analysis tooling (not part of the build).
 
 ## Files
 
@@ -11,7 +10,6 @@ analysis tooling (not part of the build).
 |------|--------------|------|
 | `run_custom_solver.cu` | `custom_linear_solver_run` | **Canonical runner**: analyze → factorize → solve on a MatrixMarket case, prints timings + residual. The B=1 single-system and B>1 batched paths both run from here. |
 | `io.cpp` / `io.hpp` | (linked into the runners) | MatrixMarket CSR / dense-vector read & write. Shared. |
-| `run_cudss_solver.cpp` | `cudss_run` (opt-in) | cuDSS comparison baseline. Built only with `-DCLS_BUILD_CUDSS_SCRIPT=ON` **and** the cuDSS library present; not built by default. |
 | `*.py` | — | Offline analysis (elimination-tree depth, GEMM-fraction, front-size distributions, no-pivot stability proof). Standalone; run with `python3 <script>.py`. Not part of CMake. |
 
 ## Build & run (canonical)
@@ -24,23 +22,6 @@ cmake --build build -j
 # A case directory holds J.mtx (the matrix) and F.mtx (the RHS).
 ./build/custom_linear_solver_run ../exp/cases/case_ACTIVSg25k \
     --precision tf32 --repeat 7 --warmup 3
-```
-
-### cuDSS comparison baseline (`cudss_run`, opt-in)
-
-Not built by default. On this machine the cuDSS 12 runtime lives in a `/12/` subdir
-that is not on the default linker path, so point CMake at it explicitly and add it to
-`LD_LIBRARY_PATH` at run time:
-
-```sh
-# from custom_linear_solver/  (paths are this-environment-specific)
-cmake -S . -B build -DCLS_BUILD_CUDSS_SCRIPT=ON \
-    -DCUDSS_INCLUDE_DIR=/usr/include/libcudss/12 \
-    -DCUDSS_LIBRARY=/usr/lib/x86_64-linux-gnu/libcudss/12/libcudss.so
-cmake --build build -j --target cudss_run
-
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libcudss/12:$LD_LIBRARY_PATH \
-    ./build/cudss_run ../exp/cases/case_ACTIVSg25k --precision fp32 --repeat 7
 ```
 
 ## Test matrices
@@ -147,7 +128,5 @@ inside the timed region). `batch_*_per_sys_ms` is the batch median divided by B.
   (e.g. `case_ACTIVSg70k` ≈ 3e-3..6e-3). That 1e-3..1e-2 on big ill-conditioned cases is
   the TF32/Ozaki floor, **not** a bug. Ozaki actually being off looks far worse —
   relres ≈ 1e-1 or outright divergence (>1), not 1e-3.
-- **`cudss_run` is not built by default** and needs the cuDSS library; don't assume it
-  compiles in every environment.
 - **`exp/cases/...` is relative to the repo, not to `tests/`.** Run from
   `custom_linear_solver/` (or pass absolute paths).

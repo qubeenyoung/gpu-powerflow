@@ -4,7 +4,11 @@
 > **한 줄**: B=1·배치 factorize 가속(채택 변경·tier-split gate·non-GEMM 예산·구조적 한계)의 측정 종합.
 
 원본 진행 보고서(`08`, `09`, `07`, `11`, `12-investigation`, `12-spine`)를 하나로 병합한 reference 문서.
-관련: [`01-final-report.md`](01-final-report.md), [`02-comprehensive-sweep.md`](02-comprehensive-sweep.md), [`../03-optimization-notes/01-kernel-engineering.md`](../03-optimization-notes/01-kernel-engineering.md).
+관련: [`main-report.md`](../main-report.md), [`02-comprehensive-sweep.md`](02-comprehensive-sweep.md), [`../03-optimization-notes/01-kernel-engineering.md`](../03-optimization-notes/01-kernel-engineering.md).
+
+> **⚠ tier 경계 주의(2026-06-10 스냅샷)**: 본문의 `MID_THRESH=128`·`fsz>128 big` 비닝은 **측정 시점 옛 4-tier** 기준이다.
+> 현재 코드는 small\|mid=32 / **mid\|big=64**(`kMidFrontMax`)이고 panel-resident big 티어는 제거됐다
+> ([`10-tier-consolidation-2026-06-18.md`](10-tier-consolidation-2026-06-18.md)). FLOP/시간 결론은 분할과 무관하게 유효.
 
 기준선: baseline commit `7394c28`, RTX 3090(sm_86, 82 SM), CUDA 12.8/12.x, fp32/fp16, `--single-precision fp64`. skip-trailing·incomplete factorization·solve로의 작업 이동은 채택 수치에 포함하지 않는다.
 

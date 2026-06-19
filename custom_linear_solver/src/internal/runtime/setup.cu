@@ -20,6 +20,7 @@ static bool AllocateState(const MultifrontalPlan& plan, int B,
   st.static_pivoting = static_pivoting;
   st.pivot_threshold = pivot_threshold;
   st.pivot_shift = pivot_shift;
+  // Allocate the front + Solve-vector arenas in the front precision.
   const bool float_front = IsFp32Front(precision);
   const long front_elements = (long)B * plan.front_total;
   if (float_front) {

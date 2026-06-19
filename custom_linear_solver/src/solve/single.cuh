@@ -48,10 +48,12 @@ __global__ void SolveSingleFwd(int lbegin, int lend,
   const FT* F = front + front_off[p];
   const int* fr = front_rows + s;
   const int t = threadIdx.x, nt = blockDim.x;
-  // Accumulate in the front precision (FT): double for FP64, float for FP32/TF32.
-  // The front + inverted pivots are already FT, so a double accumulate buys no
-  // accuracy here, only float->double conversions; FT keeps the FP32 path all-float.
+  // Accumulate in the front precision FT (double for FP64, float for FP32/TF32):
+  // the front + inverted pivots are already FT, so a double accumulate buys no
+  // accuracy, only conversions, and FT keeps the FP32 path all-float.
   __shared__ FT sh_piv[64];
+
+  // Step 1: pivot block via inverted-pivot GEMV (sh_piv = Linv @ rhs).
   for (int k = t; k < nc; k += nt) {
     FT v = y[fr[k]];
     for (int i = 0; i < k; ++i)
@@ -59,6 +61,9 @@ __global__ void SolveSingleFwd(int lbegin, int lend,
     sh_piv[k] = v;
   }
   __syncthreads();
+
+  // Step 2: write pivots back, then apply the L panel to the CB rows
+  // (atomicAdd because siblings scatter into the same parent y entries).
   for (int k = t; k < nc; k += nt) y[fr[k]] = sh_piv[k];
   for (int i = nc + t; i < fsz; i += nt) {
     FT upd = 0;
@@ -88,12 +93,15 @@ __global__ void SolveSingleBwd(int lbegin, int lend,
   const int* fr = front_rows + s;
   const int t = threadIdx.x, nt = blockDim.x;
   const int cb = fsz - nc;
-  // Accumulate in the front precision (FT): the front + inverted pivots are
+  // Accumulate in the front precision FT: the front + inverted pivots are
   // already FT, so a double accumulate buys no accuracy on the FP32 path, only
-  // float->double conversions. FT keeps the FP32 solve all-float (and halves the
-  // shared rhs/wsum footprint).
+  // conversions; FT keeps the FP32 solve all-float and halves the shared
+  // rhs/wsum footprint.
   __shared__ FT rhs[kSingleMaxNc];
   __shared__ FT wsum[(256 / 32) * kSingleBwdRegNc];
+
+  // Step 1: load rhs[] from y, then reduce the CB-column product into nc
+  // register partials per thread.
   for (int k = t; k < nc; k += nt) rhs[k] = __ldg(&y[fr[k]]);
   FT part[kSingleBwdRegNc];
   for (int k = 0; k < nc; ++k) part[k] = 0;
@@ -102,7 +110,10 @@ __global__ void SolveSingleBwd(int lbegin, int lend,
     for (int k = 0; k < nc; ++k) part[k] += F[(long)k * fsz + (nc + j)] * xj;
   }
   const int lane = t & 31, warp = t >> 5;
-  if (nt <= 32) {  // single-warp fast path: no wsum staging, no block barrier
+
+  // Single-warp fast path: warp-reduce partials into rhs, then the nc x nc
+  // upper back-solve as the inverted-pivot GEMV. No wsum staging, no block sync.
+  if (nt <= 32) {
     __syncwarp();
     for (int k = 0; k < nc; ++k) {
       FT v = part[k];
@@ -118,6 +129,8 @@ __global__ void SolveSingleBwd(int lbegin, int lend,
     }
     return;
   }
+
+  // Step 2: multi-warp reduce of partials through wsum into rhs.
   for (int k = 0; k < nc; ++k) {
     FT v = part[k];
     for (int off = 16; off > 0; off >>= 1)
@@ -134,6 +147,8 @@ __global__ void SolveSingleBwd(int lbegin, int lend,
     }
   }
   __syncthreads();
+
+  // Step 3: nc x nc upper back-solve as the inverted-pivot GEMV (x = Uinv @ rhs).
   for (int k = t; k < nc; k += nt) {
     FT v = 0;
     for (int j = k; j < nc; ++j) v += F[(long)k * fsz + j] * rhs[j];
@@ -163,6 +178,7 @@ static int SingleSolveBlockSize(const MultifrontalPlan& plan, int L) {
 template <typename FT>
 static void IssueSolveSingleTyped(const MultifrontalPlan& plan, State& st,
                                   const FT* front, FT* y, cudaStream_t stream) {
+  // Forward sweep leaves->root, one front per block, per panel level.
   for (int L = 0; L < plan.num_plevels; ++L) {
     const int b = plan.panel_level_ptr[L], e = plan.panel_level_ptr[L + 1];
     if (e <= b) continue;
@@ -170,6 +186,8 @@ static void IssueSolveSingleTyped(const MultifrontalPlan& plan, State& st,
         b, e, plan.d_plcols, plan.d_front_off, plan.d_front_ptr, plan.d_ncols,
         plan.d_front_rows, front, y);
   }
+
+  // Backward sweep root->leaves.
   for (int L = plan.num_plevels - 1; L >= 0; --L) {
     const int b = plan.panel_level_ptr[L], e = plan.panel_level_ptr[L + 1];
     if (e <= b) continue;

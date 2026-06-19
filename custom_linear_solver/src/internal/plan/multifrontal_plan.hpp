@@ -6,24 +6,28 @@
 
 namespace custom_linear_solver::plan {
 
+// Symbolic + numeric multifrontal plan: device arena, per-panel layout, and
+// host mirrors used to size and order the factor/Solve kernel launches. Owns its
+// device allocations (freed in the destructor); move-only.
 struct MultifrontalPlan {
   int num_rows = 0, num_panels = 0, num_plevels = 0;
   int nnz = 0, asm_total = 0;
-  long front_total = 0;
-  void* arena = nullptr;
-  double* d_front = nullptr;
-  float* d_front_f = nullptr;
+  long front_total = 0;  // front elements per batch system
+  void* arena = nullptr;  // single device allocation backing the pointers below
+  double* d_front = nullptr;  // FP64 front storage (FP64 mode)
+  float* d_front_f = nullptr;  // FP32 front storage (FP32 / TF32)
   int *d_front_off = nullptr, *d_front_ptr = nullptr, *d_ncols = nullptr;
   int *d_plcols = nullptr, *d_panel_parent = nullptr;
   int *d_asm_ptr = nullptr, *d_asm_local = nullptr;
   int* d_a_pos = nullptr;
   int* d_sing = nullptr;
   int* d_front_rows = nullptr;
-  double* d_y = nullptr;
-  float* d_y_f = nullptr;
+  double* d_y = nullptr;  // FP64 Solve vector
+  float* d_y_f = nullptr;  // FP32 Solve vector
   int front_store = 0;
   bool a_pos_unique =
       false;  // true when numeric scatter can store instead of atomic-add
+
   std::vector<int> panel_level_ptr;
   std::vector<int> h_front_ptr;  // host copy of front_ptr (per-panel front
                                  // size), for kernel dispatch
@@ -51,15 +55,6 @@ struct MultifrontalPlan {
       h_plcols_tier;  // P entries: level-major, tier-contiguous within level
   std::vector<int> h_level_tier_off;  // num_plevels * (kNumTiers+1) CSR offsets
   int* d_plcols_tier = nullptr;       // device mirror of h_plcols_tier
-
-  // Phase Σ.8 — within-panel partial pivoting infrastructure
-  // (CLS_USE_PIVOTING=1). pivot_offset[p] = prefix sum of ncols[0..p-1], giving
-  // the start of panel p's pivots in the per-system pivot array (length = sum_p
-  // ncols[p] = n). Total per-batch pivot storage is therefore B * n ints.
-  // Allocated/owned by per-state (per State allocation).
-  std::vector<int> h_pivot_offset;  // P+1 entries
-  int* d_pivot_offset = nullptr;    // device mirror
-  int total_pivots = 0;             // = h_pivot_offset[P] = n
 
   // Tree-restructuring metadata (computed at Analyze time, used by
   // tree-restructured dispatch). The spine is the contiguous "cnt=1 chain" at

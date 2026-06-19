@@ -32,13 +32,16 @@ static constexpr int FullSolveTypeTag() {
 }  // namespace
 
 // Shared Solve body, templated on the RHS type RhsT and the solution type
-// SolutionT. gather casts RhsT → (FP32 / FP64) working vector; scatter casts
-// working vector → SolutionT.
+// SolutionT. Gather casts RhsT into the (FP32 / FP64) working vector; scatter
+// casts the working vector into SolutionT.
 template <typename RhsT, typename SolutionT>
 static bool SolveImpl(const MultifrontalPlan& plan, State& st,
                       const RhsT* d_rhs_batch, SolutionT* d_solution_batch,
                       const int* d_perm, const int* d_iperm) {
   cudaStream_t stream = static_cast<cudaStream_t>(st.stream);
+
+  // Permutation launch geometry: scalar grid (one row per thread) and a batched
+  // grid that tiles rows x batches when the batch is large enough to amortize it.
   const int n = plan.num_rows;
   constexpr int threads_per_block = 256;
   const dim3 permute_grid((n + threads_per_block - 1) / threads_per_block,
@@ -52,6 +55,8 @@ static bool SolveImpl(const MultifrontalPlan& plan, State& st,
       (st.batch_count + batched_permute_batches - 1) / batched_permute_batches);
   const bool use_batched_permute = st.batch_count >= 16;
   const bool float_front = IsFp32Front(st.precision);
+
+  // Gather the permuted RHS into the working vector (orig -> ND order).
   auto issue_gather = [&]() {
     if (use_batched_permute) {
       if (float_front)
@@ -71,6 +76,8 @@ static bool SolveImpl(const MultifrontalPlan& plan, State& st,
             n, d_rhs_batch, d_perm, st.d_y_batch);
     }
   };
+
+  // Scatter the working vector back to the solution (ND order -> orig).
   auto issue_scatter_sol = [&]() {
     if (use_batched_permute) {
       if (float_front)
@@ -93,6 +100,8 @@ static bool SolveImpl(const MultifrontalPlan& plan, State& st,
     }
   };
 #ifdef CLS_INTERNAL_GRAPH
+  // Reuse the captured graph only when the buffers and I/O precision tag match;
+  // any mismatch means the captured pointers are stale.
   const int type_tag = FullSolveTypeTag<RhsT, SolutionT>();
   const bool cache_hit =
       st.full_solve_graph_exec &&
@@ -101,6 +110,8 @@ static bool SolveImpl(const MultifrontalPlan& plan, State& st,
       st.full_solve_perm == d_perm && st.full_solve_iperm == d_iperm &&
       st.FullSolveTypeTag == type_tag;
 
+  // On a miss, capture the whole Solve (gather + levels + scatter) into one
+  // graph and cache the exec keyed on the buffers / tag.
   if (!cache_hit) {
     DestroyFullSolveGraph(st);
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
@@ -124,6 +135,7 @@ static bool SolveImpl(const MultifrontalPlan& plan, State& st,
                   stream);
   return cudaGetLastError() == cudaSuccess;
 #else
+  // No graph: issue the three stages directly on the stream.
   issue_gather();
   IssueSolveLevels(plan, st, stream);
   issue_scatter_sol();

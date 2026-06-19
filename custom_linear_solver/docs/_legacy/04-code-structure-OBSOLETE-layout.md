@@ -276,27 +276,31 @@ cmake --build gpu-powerflow/custom_linear_solver/build-refactor -j
 
 ```cpp
 inline constexpr int kWarpSize = 32;
-inline constexpr int kSmallFrontMax = 32;
-inline constexpr int kMidFrontMax = 128;
-inline constexpr int kNumFrontTiers = 3;
-inline constexpr int kSmallTierCount = 1;
+inline constexpr int kSmallFrontMax = kWarpSize;  // 32  (small|mid 경계)
+inline constexpr int kMidFrontMax = 64;           // mid|big = whole-front 점유 교차점
 inline constexpr int kSmallTierWarpsPerBlock = 8;
 inline constexpr int kMaxPivotColumns = 64;
 inline constexpr int kTensorCorePivotColumnCap = 32;
-inline constexpr std::size_t kMidSharedMemoryBudgetBytes = 96 * 1024;
-inline constexpr std::size_t kDynamicSharedMemoryOptInBytes = 99 * 1024;
+inline constexpr int kFusedMidFrontMax = 48;      // mid kernel 의 fused(P1+2+3) 경로 상한
+inline constexpr std::size_t kDynamicSharedMemoryOptInBytes = 99 * 1024;  // sm_86 opt-in shared
+inline constexpr int kNumFrontBuckets = 3;        // small/mid/big
 inline constexpr int kMaxSubtreeStreams = 8;
 inline constexpr int kArenaAlignmentBytes = 256;
+// big 커널의 내부 bounded-shared staging 상한(티어 경계 아님): 159(float)/111(double).
+constexpr int WholeFrontSharedMax(bool fp64);
 ```
 
-공통 API는 repo 함수명 관례에 맞춰 `snake_case`로 둔다.
+> tier 경계는 `kMidFrontMax=64`(2026-06-18 통합). 옛 4-tier 의 `MID_THRESH=128`·`MID_SHARED_BUDGET=96KB` 는
+> 더 이상 없다 — `159/111` 은 이제 big 커널 내부 staging 상한으로만 남았다(`WholeFrontSharedMax`).
+
+공통 API는 `src/internal/types.hpp` 의 실제 시그니처를 따른다(Google C++ 스타일, `PascalCase`).
 
 ```cpp
 enum class FrontTier { kSmall, kMid, kBig };
 
-constexpr FrontTier classify_front_tier(int front_size);
-constexpr int front_tier_index(FrontTier tier);
-constexpr int round_up_to_multiple(int value, int alignment);
+FrontTier ClassifyFrontTier(int front_size, bool fp64);
+int FrontBucket(int front_size, bool fp64);
+constexpr int RoundUpToMultiple(int value, int alignment);
 ```
 
 `plan/analyze.cu`, `factorize/dispatch.cuh`, `solve/dispatch.cuh`는 같은 classifier를 사용한다. "must match" 주석은 제거한다.

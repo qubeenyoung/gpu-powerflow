@@ -1,24 +1,20 @@
 #pragma once
 
-// FACTORIZE — elimination-tree schedule (entry point). One decision point,
-// UseSingleSystem(st)
-// (= B == 1, see internal/runtime/state.hpp), splits the two coherent paths:
+// FACTORIZE — elimination-tree schedule (entry point). UseSingleSystem(st)
+// (B == 1, see internal/runtime/state.hpp) selects one of two coherent paths:
 //
-//   B == 1  (single-system): the batched front-major schedule's per-level launch
-//            / barrier latency is exposed, so factor each front with one block.
-//            All precisions use the fused single-system kernels (Factorize/
-//            single.cuh): the big-front triple is templated on the front type
-//            (FP32 big fronts get the multi-block path too), and for TF32 the big
-//            trailing runs on the Tensor Cores (FactorSingleBigTrailTf32). The
-//            pivot blocks are then inverted (partitioned inverse) so the single-
-//            system Solve runs parallel GEMVs.
+//   B == 1 (single-system): the batched schedule's per-level launch/barrier
+//     latency is exposed, so factor each front with one block. All precisions
+//     use the fused single.cuh kernels: the big-front triple is templated on
+//     the front type (FP32 big fronts also take the multi-block path), and TF32
+//     runs the big trailing on the Tensor Cores (FactorSingleBigTrailTf32). The
+//     pivot blocks are then partitioned-inverted so the Solve runs parallel
+//     GEMVs.
 //
-//   B  > 1  (batched): walk the panel Etree level by level, forking independent
-//   subtrees onto their
-//            own streams, dispatching each tier-homogeneous range to its
-//            dedicated kernel (small / mid / big,
-//            Factorize/{small,mid,big}.cuh). Routing is a deterministic
-//            function of front size (internal/types.hpp ClassifyFrontTier).
+//   B > 1 (batched): walk the panel Etree level by level, forking independent
+//     subtrees onto their own streams, and dispatch each tier-homogeneous range
+//     to its dedicated small/mid/big kernel. Routing is a deterministic
+//     function of front size (internal/types.hpp ClassifyFrontTier).
 //
 // IssueFactorLevels is wrapped by Factorize/Factorize.cu.
 
@@ -106,6 +102,8 @@ static void IssueFactorBatched(const MultifrontalPlan& plan, State& st,
   const bool have_lvl = !plan.h_level_tier_off.empty() && plan.d_plcols_tier;
   const bool have_sub = !plan.h_subtree_level_tier_off.empty();
 
+  // Multistream: fork independent subtrees, sweep each, join, then run the
+  // shared spine on the main stream.
   if (use_multistream) {
     const int spine_lo = (plan.spine_start_level >= 0) ? plan.spine_start_level
                                                        : plan.num_plevels;

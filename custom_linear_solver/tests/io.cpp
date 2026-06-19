@@ -119,6 +119,7 @@ CsrMatrix read_matrix_market_csr(const std::filesystem::path& path) {
   const int cols = checked_int(cols64, "column count");
   const int declared_nnz = checked_int(declared64, "nonzero count");
 
+  // Read coordinate entries, mirroring the off-diagonal for symmetric input.
   std::vector<CoordinateEntry> entries;
   entries.reserve(static_cast<std::size_t>(declared_nnz) *
                   (mirror_triangle ? 2u : 1u));
@@ -155,6 +156,7 @@ CsrMatrix read_matrix_market_csr(const std::filesystem::path& path) {
     }
   }
 
+  // Sort row-major, then merge duplicate coordinates by summing values.
   std::sort(entries.begin(), entries.end(),
             [](const CoordinateEntry& lhs, const CoordinateEntry& rhs) {
               if (lhs.row != rhs.row) return lhs.row < rhs.row;
@@ -172,6 +174,7 @@ CsrMatrix read_matrix_market_csr(const std::filesystem::path& path) {
     }
   }
 
+  // Build CSR: count per-row, prefix-sum into row_ptr, then fill col/values.
   CsrMatrix matrix;
   matrix.rows = rows;
   matrix.cols = cols;

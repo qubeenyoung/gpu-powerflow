@@ -23,13 +23,11 @@ SupernodePartition Supernodes(int n, const std::vector<int>& parent,
                               const std::vector<int>& colcount);
 
 // Relaxed-amalgamation panel partition (the dense-panel multifrontal
-// foundation, PLAN §M3 large-path). Fundamental Supernodes here average ~2
-// columns, too small for dense BLAS; RELAXED amalgamation merges Etree chains
-// into wider panels (mean ~3.4 cols at cap=8), each treated as one dense
-// trapezoidal block padded to the panel's widest column structure. The
-// padded-fill cost stays modest
-// (~1.2x at cap=8 on power-grid Jacobians, amalg_stats), making dense GPU
-// panels viable where the per-op atomicAdd scatter is contention-bound.
+// foundation). Fundamental Supernodes are often too small for dense BLAS;
+// relaxed amalgamation merges Etree chains into wider panels, each treated as
+// one dense trapezoidal block padded to the panel's widest column structure.
+// Padding keeps the dense GPU panels viable where the per-op atomicAdd scatter
+// is contention-bound, at a modest padded-fill cost.
 // `parent` and `colcount` must be in Postorder index space (Etree chains are
 // consecutive), as produced after an AMD/METIS reorder; a chain merges while it
 // stays a single-child path (parent[j]==j+1) and the panel stays <= cap

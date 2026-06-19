@@ -6,16 +6,18 @@
 namespace custom_linear_solver::symbolic {
 
 // Elimination tree of a symmetric pattern: parent[j] = the node that inherits
-// column j's fill
-// (-1 for roots). Liu 1986, path-compressed. In: CSC pattern. Out: parent[n].
+// column j's fill (-1 for roots). Path-compressed. In: CSC pattern. Out:
+// parent[n].
 std::vector<int> Etree(int n, const int* col_ptr, const int* row_idx) {
   std::vector<int> parent(n, -1);
   std::vector<int> ancestor(n, -1);  // path-compressed ancestor of each node
 
+  // Process columns in order; each entry below the diagonal links a subtree.
   for (int k = 0; k < n; ++k) {
     for (int p = col_ptr[k]; p < col_ptr[k + 1]; ++p) {
       int i = row_idx[p];
-      // Walk from i up to the root, attaching the path to k (Liu 1986).
+
+      // Walk from i up to the root, attaching the path to k.
       while (i != -1 && i < k) {
         const int inext = ancestor[i];
         ancestor[i] = k;
@@ -34,10 +36,8 @@ std::vector<int> Etree(int n, const int* col_ptr, const int* row_idx) {
 void SymmetricPattern(int n, const int* col_ptr, const int* row_idx,
                       std::vector<int>& sym_col_ptr,
                       std::vector<int>& sym_row_idx) {
-  // Flat CSR two-pass (no per-node vector<vector> allocations): count adjacency
-  // degrees (with duplicates — symmetric input double-counts), bucket-fill,
-  // then sort + unique each node's slice into the compacted output. Same result
-  // as the old adjacency-list build, much faster on large matrices.
+  // 1. Count adjacency degrees (with duplicates; symmetric input double-counts)
+  //    into a flat CSR offset array, then prefix-sum it.
   std::vector<int> off(static_cast<std::size_t>(n) + 1, 0);
   auto valid = [&](int row, int col) {
     return row >= 0 && row < n && row != col;
@@ -50,6 +50,8 @@ void SymmetricPattern(int n, const int* col_ptr, const int* row_idx,
       ++off[col + 1];
     }
   for (int i = 0; i < n; ++i) off[i + 1] += off[i];
+
+  // 2. Bucket-fill both directed edges of each off-diagonal entry.
   std::vector<int> adj(off[n]);
   std::vector<int> next(off.begin(), off.end());
   for (int col = 0; col < n; ++col)
@@ -59,10 +61,10 @@ void SymmetricPattern(int n, const int* col_ptr, const int* row_idx,
       adj[next[row]++] = col;
       adj[next[col]++] = row;
     }
-  // Parallelize the per-node sort+dedup+compact. On large power-grid Jacobians
-  // the serial pass is non-trivial (tens of ms on n ~ 10^6). Each node's slice
-  // is independent → output is byte-identical to serial (sort+dedup per col,
-  // concatenated in col order via prefix-sum).
+
+  // Parallelize the per-node sort+dedup+compact. Each node's slice is
+  // independent, so the output is identical regardless of threading (sort+dedup
+  // per col, concatenated in col order via prefix-sum).
   auto ParFor = [](int lo, int hi, auto&& fn) {
     unsigned hw = std::thread::hardware_concurrency();
     const int nth = static_cast<int>(std::max(1u, std::min(hw ? hw : 1u, 12u)));
@@ -78,9 +80,11 @@ void SymmetricPattern(int n, const int* col_ptr, const int* row_idx,
     }
     for (auto& x : th) x.join();
   };
+
+  // 3. Sort each slice in place and count uniques per node.
   std::vector<int> ucnt(n, 0);
   ParFor(0, n,
-         [&](int lo, int hi) {  // sort each slice in place + count uniques
+         [&](int lo, int hi) {
            for (int col = lo; col < hi; ++col) {
              const int b = off[col], e = off[col + 1];
              std::sort(adj.begin() + b, adj.begin() + e);
@@ -93,12 +97,16 @@ void SymmetricPattern(int n, const int* col_ptr, const int* row_idx,
              ucnt[col] = u;
            }
          });
+
+  // 4. Prefix-sum the unique counts into the output column pointers.
   sym_col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
   for (int col = 0; col < n; ++col)
     sym_col_ptr[col + 1] = sym_col_ptr[col] + ucnt[col];
   sym_row_idx.resize(sym_col_ptr[n]);
+
+  // 5. Compact uniques into the prefix-summed slots.
   ParFor(0, n,
-         [&](int lo, int hi) {  // compact uniques into the prefix-summed slots
+         [&](int lo, int hi) {
            for (int col = lo; col < hi; ++col) {
              int w = sym_col_ptr[col], last = -1;
              for (int k = off[col]; k < off[col + 1]; ++k)
@@ -113,7 +121,7 @@ void SymmetricPattern(int n, const int* col_ptr, const int* row_idx,
 // Postorder of the Etree (children emitted before parents). In: parent[n]. Out:
 // post[n].
 std::vector<int> Postorder(const std::vector<int>& parent, int n) {
-  // Build reversed child lists, then iterative DFS (mirrors CXSparse cs_post).
+  // Build reversed per-parent child lists.
   std::vector<int> head(n, -1), next(n, -1), stack(n), post(n);
   for (int j = n - 1; j >= 0; --j) {
     if (parent[j] == -1) {
@@ -122,6 +130,8 @@ std::vector<int> Postorder(const std::vector<int>& parent, int n) {
     next[j] = head[parent[j]];
     head[parent[j]] = j;
   }
+
+  // Iterative DFS from each root, emitting a node once its children are done.
   int k = 0;
   for (int j = 0; j < n; ++j) {
     if (parent[j] != -1) {
@@ -146,7 +156,7 @@ std::vector<int> Postorder(const std::vector<int>& parent, int n) {
 
 namespace {
 
-// Least-common-ancestor / Leaf detection helper (CXSparse cs_leaf).
+// Least-common-ancestor / Leaf detection helper for the column-count pass.
 int Leaf(int i, int j, const std::vector<int>& first,
          std::vector<int>& maxfirst, std::vector<int>& prevleaf,
          std::vector<int>& ancestor, int& jleaf) {
@@ -175,15 +185,15 @@ int Leaf(int i, int j, const std::vector<int>& first,
 
 }  // namespace
 
-// Exact nonzero count of each column of the Cholesky factor L (CXSparse
-// cs_counts). In: CSC pattern + Etree parent + Postorder. Out: colcount[n] (=
-// |struct(j)|).
+// Exact nonzero count of each column of the Cholesky factor L. In: CSC pattern
+// + Etree parent + Postorder. Out: colcount[n] (= |struct(j)|).
 std::vector<int> ColumnCounts(int n, const int* col_ptr, const int* row_idx,
                               const std::vector<int>& parent,
                               const std::vector<int>& post) {
   std::vector<int> delta(n, 0);
   std::vector<int> ancestor(n), maxfirst(n, -1), prevleaf(n, -1), first(n, -1);
 
+  // 1. Record the first Postorder time each node is reached and seed leaf deltas.
   for (int k = 0; k < n; ++k) {
     int j = post[k];
     delta[j] =
@@ -192,6 +202,8 @@ std::vector<int> ColumnCounts(int n, const int* col_ptr, const int* row_idx,
       first[j] = k;
     }
   }
+
+  // 2. Accumulate per-column deltas via leaf detection over each column's rows.
   for (int i = 0; i < n; ++i) {
     ancestor[i] = i;
   }
@@ -215,8 +227,9 @@ std::vector<int> ColumnCounts(int n, const int* col_ptr, const int* row_idx,
       ancestor[j] = parent[j];
     }
   }
-  // Accumulate subtree contributions: parent[j] > j holds for an Etree, so a
-  // simple node-order pass sums children into parents.
+
+  // 3. Roll subtree contributions up: parent[j] > j in an Etree, so a single
+  //    node-order pass sums children into parents.
   for (int j = 0; j < n; ++j) {
     if (parent[j] != -1) {
       delta[parent[j]] += delta[j];
@@ -230,12 +243,16 @@ long PredictedFill(int n, const int* col_ptr, const int* row_idx) {
   if (n <= 0) {
     return 0;
   }
+
+  // Build the symmetric pattern, its Etree, postorder, and column counts.
   std::vector<int> sym_cp, sym_ri;
   SymmetricPattern(n, col_ptr, row_idx, sym_cp, sym_ri);
   const std::vector<int> parent = Etree(n, sym_cp.data(), sym_ri.data());
   const std::vector<int> post = Postorder(parent, n);
   const std::vector<int> colcount =
       ColumnCounts(n, sym_cp.data(), sym_ri.data(), parent, post);
+
+  // Sum column counts into nnz(L) and return the L+U proxy.
   long lnz = 0;
   for (int c : colcount) {
     lnz += c;
@@ -249,10 +266,13 @@ long PredictedFill(int n, const int* col_ptr, const int* row_idx) {
 void PermutePattern(int n, const int* col_ptr, const int* row_idx,
                     const std::vector<int>& perm, std::vector<int>& out_col_ptr,
                     std::vector<int>& out_row_idx) {
+  // Invert the permutation to map each old node to its new index.
   std::vector<int> iperm(n);
   for (int k = 0; k < n; ++k) {
     iperm[perm[k]] = k;  // new index of old node perm[k]
   }
+
+  // Size and prefix-sum the new column pointers from per-column nnz.
   out_col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
   for (int c = 0; c < n; ++c) {
     out_col_ptr[iperm[c] + 1] += col_ptr[c + 1] - col_ptr[c];
@@ -260,6 +280,8 @@ void PermutePattern(int n, const int* col_ptr, const int* row_idx,
   for (int c = 0; c < n; ++c) {
     out_col_ptr[c + 1] += out_col_ptr[c];
   }
+
+  // Scatter each old column's relabeled rows into its new column slot.
   out_row_idx.assign(static_cast<std::size_t>(col_ptr[n]), 0);
   std::vector<int> next(out_col_ptr.begin(), out_col_ptr.end());
   for (int c = 0; c < n; ++c) {
@@ -295,14 +317,12 @@ void FillPattern(int n, const int* col_ptr, const int* row_idx,
 
   // Symbolic Cholesky (column-merge form): struct(j) = {j} ∪ {i>j : S(i,j)≠0}
   // ∪ over Etree-children c of (struct(c) \ {c}). parent[j] > j, so children
-  // are computed before j.
-  //
-  // Write the merge DIRECTLY into a FLAT Li (no vector<vector> col/head with
-  // per-column small-vector allocs + regrowth). ColumnCounts (proven
-  // cs_counts) gives the EXACT per-column size (|L(:,j)| == |struct(j)|), so Lp
-  // is prefix-summed up front and each column's slice [Lp[j],Lp[j+1]) is filled
-  // in place. Consumers re-sort the pattern, so per-column order is free ->
-  // output is set-identical to the old version.
+  // are computed before j. ColumnCounts gives the exact per-column size
+  // (|L(:,j)| == |struct(j)|), so Lp is prefix-summed up front and each
+  // column's slice [Lp[j],Lp[j+1]) is filled in place in a flat Li. Consumers
+  // re-sort, so per-column order is irrelevant.
+
+  // 1. Postorder + exact column counts, prefix-summed into Lp.
   auto flap = [](const char*) {};
   const std::vector<int> post = Postorder(parent, n);
   flap("Postorder");
@@ -311,8 +331,7 @@ void FillPattern(int n, const int* col_ptr, const int* row_idx,
   for (int j = 0; j < n; ++j) Lp[j + 1] = Lp[j] + cc[j];
   Li.assign(static_cast<std::size_t>(Lp[n]), 0);
 
-  // Flat-CSR Etree children (replaces the head vector<vector>; child order is
-  // irrelevant to the set union).
+  // 2. Flat-CSR Etree children (child order is irrelevant to the set union).
   std::vector<int> choff(static_cast<std::size_t>(n) + 1, 0);
   for (int j = 0; j < n; ++j)
     if (parent[j] != -1) ++choff[parent[j] + 1];
@@ -324,11 +343,14 @@ void FillPattern(int n, const int* col_ptr, const int* row_idx,
       if (parent[j] != -1) chl[cnext[parent[j]]++] = j;
   }
 
+  // 3. Merge each column's own rows and its children's structures into its slice.
   std::vector<int> mark(n, -1);
   for (int j = 0; j < n; ++j) {
     int w = Lp[j];
     mark[j] = j;
     Li[w++] = j;  // diagonal
+
+    // Below-diagonal entries of column j from the input pattern.
     for (int p = col_ptr[j]; p < col_ptr[j + 1]; ++p) {
       const int i = row_idx[p];
       if (i > j && mark[i] != j) {
@@ -336,6 +358,8 @@ void FillPattern(int n, const int* col_ptr, const int* row_idx,
         Li[w++] = i;
       }
     }
+
+    // Union in each Etree child's structure (minus the child itself).
     for (int t = choff[j]; t < choff[j + 1]; ++t) {
       const int c = chl[t];
       // Li[Lp[c]] is the child's diagonal c, and struct(c) \ {c} is what parent

@@ -115,17 +115,14 @@ cudaGraphLaunch(factor_graph_exec, stream);        // replay 1회 (한 줄)
 
 ### D2. 3-tier 커널 라우팅 (front 분포에 맞춤)
 
-**가정**: max fsz < 160 — 본 도메인 측정 사실 (§1).
+**가정**: 작은 power-grid 케이스는 거의 모든 front 가 fsz ≤ 32 — 본 도메인 측정 사실 (§1).
 
-**결정**: front 의 fsz 에 따라 세 가지 GPU kernel 중 하나로 dispatch (`docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`):
-- **fsz ≤ 32**: warp-per-front kernel `mf_factor_mid_warp_b` — 1 warp/front, 8 warps/block, per-warp shared memory, `__syncwarp()` 만 사용. block barrier 없음.
-- **32 < fsz ≤ 159**: shared-resident mid-front kernel `mf_factor_mid_tc32_b` — 프론트 전체를 dynamic shared memory(레벨별 최대 fsz²에 맞춰 sized) 에 한 번 로드, panel LU/U-solve/trailing/extend-add 가 모두 shared 위, L/U 만 write-back.
-- **fsz > 159**: 1024-thread/block big-separator kernel — 큰 separator (9~25 fronts/level) 에 다수 warp packing 으로 sequential dependency 은닉.
+**결정**: front 의 fsz 에 따라 세 가지 GPU kernel 중 하나로 dispatch (`src/internal/types.hpp` `ClassifyFrontTier`, `src/factorize/{small,mid,big}.cuh`):
+- **fsz ≤ 32**: warp-packed sub-group kernel `FactorSmall` — 1 warp/front, 8 warps/block, per-warp shared memory, `__syncwarp()` 만 사용. block barrier 없음. (좁은 레벨 under-fill 시 FactorMid 로 돌리는 occupancy 게이트.)
+- **33 ≤ fsz ≤ 64**: shared-resident whole-front kernel `FactorMid` — 프론트 전체를 dynamic shared memory(레벨별 최대 fsz²에 맞춰 sized) 에 한 번 로드, panel LU/U-solve/trailing/extend-add 가 모두 shared 위, L/U 만 write-back. 1 block/front.
+- **fsz > 64**: global-resident multi-block kernel `FactorBig` — 큰 separator 를 여러 블록에 분산(pivot + L/U 패널 + trailing multi-block), L/U 패널 타일만 staging.
 
-case8387pegase 에서:
-- fsz ≤ 32 fronts: 7,359 / 7,421 (99.2%) → warp-per-front 경로
-- 32 < fsz ≤ 96 fronts: 62 / 7,421 (0.8%) → shared-resident 경로
-- fsz > 159: 0 (사용 안 됨)
+case8387pegase 에서: front 의 ~99% 가 fsz ≤ 32 → small 경로, 나머지 소수만 mid/big.
 
 **측정 증거**:
 - ACTIVSg25k 의 dominant bottom level (fsz ≤ 16, 4114 fronts): 2.47 → **1.12 ms (compute-bound 76%)**
@@ -137,7 +134,7 @@ case8387pegase 에서:
 
 **가정**: etree 의 부모 panel 이 자식보다 strictly 높은 level 에 있음 — multifrontal LU 의 정의.
 
-**결정** (`src/factorize/multifrontal.cu`): 한 block 안에서 (a) 프론트의 panel LU, (b) trailing update, (c) 부모 front 로 `atomicAdd` extend-add 를 모두 수행. 부모가 strictly 위 level 이라 race-free.
+**결정** (`src/factorize/front_ops.cuh` extend-add, `src/factorize/{small,mid,big}.cuh`): 한 block 안에서 (a) 프론트의 panel LU, (b) trailing update, (c) 부모 front 로 `atomicAdd` extend-add 를 모두 수행. 부모가 strictly 위 level 이라 race-free.
 
 이전 디자인: factor kernel + extend kernel = level 당 2 launch + 1 inter-kernel sync.
 
@@ -330,7 +327,7 @@ STRUMPACK 은 *general-purpose sparse direct* 로서 이 모든 가정을 깨야
 - [`02-no-pivoting-proof.md`](02-no-pivoting-proof.md) — 무피벗 가정의 정당성 (H1~H4)
 - [`03-multifrontal-vs-strumpack.md`](03-multifrontal-vs-strumpack.md) — 소스 레벨 STRUMPACK 비교
 - [`04-gemm-fraction-tc-ceiling.md`](04-gemm-fraction-tc-ceiling.md) — trailing GEMM 비중 + TC ceiling
-- [`05-tier-thresholds.md`](05-tier-thresholds.md) — tier 임계값 근거
+- tier 임계값 근거(small\|mid=32 / mid\|big=64) — `src/internal/types.hpp` 주석
 - [`../03-optimization-notes/03-tensor-core-investigation.md`](../03-optimization-notes/03-tensor-core-investigation.md) — TC32 negative result
 - [`../04-benchmarks-profiling/03-gemm-fraction-front-distribution.md`](../04-benchmarks-profiling/03-gemm-fraction-front-distribution.md) — front 분포
 - `docs/04-benchmarks-profiling/04-nsys-three-solvers-nr-loop-profile.md` — 3-way NR profile (cudaLaunchKernel / cudaMalloc / cudaGraphLaunch 측정 출처)

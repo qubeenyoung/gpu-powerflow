@@ -8,7 +8,7 @@
 1. `custom_linear_solver`의 베이스라인이 STRUMPACK인가? **`external/lin_solver` 자체가 STRUMPACK 베이스인가?**
 2. 그렇지 않다면, STRUMPACK과 비교했을 때 무엇이 다르고 무엇이 발전한 것인가?
 
-분석 출처: 본 디렉터리 `src/` + git history (`gpu-powerflow` + 워크스페이스의 `sparse_direct_solver`) + 워크스페이스의 STRUMPACK 소스(`/opt/third_party/src/strumpack`). 논문 Table 2 재현 측정은 `docs/04-benchmarks-profiling/01-strumpack-paper-table2-reproduction.md` 참고.
+분석 출처: 본 디렉터리 `src/` + git history (`gpu-powerflow` + 워크스페이스의 `sparse_direct_solver`) + 워크스페이스의 STRUMPACK 소스(`/opt/third_party/src/strumpack`). 논문 Table 2 재현 측정은 `docs/04-benchmarks-profiling/01-strumpack-paper-reproduction.md` 참고.
 
 ---
 
@@ -123,27 +123,33 @@ src/
 | **L4** | 레벨당 다중 커널 launch (factor → extend 분리) | Ghysels & Synk 2022 |
 | **L5** | 단일 시스템 API — B개의 시스템(같은 symbolic, 다른 값) batched 지원 없음 | Claus et al. 2025 (SuperLU_DIST가 batched 있으나 FP64-only — Boukaram et al. 2024) |
 | **L6** | FP64 중심 (template로 FP32 가능하나 GPU 경로 튜닝은 FP64에 맞음) | Claus et al. 2025 |
-| **L7** | 큰 대칭 행렬에서 METIS ND 스택 오버플로우. NodeNDP 권장하나 MPI 의존 | STRUMPACK stderr 경고 — 본 측정 Hook_1498 SIGKILL에서 직접 관찰 (`docs/04-benchmarks-profiling/01-strumpack-paper-table2-reproduction.md` §3.2) |
-| **L8** | 일률적 블록 크기 — 큰 separator front (fsz>159, occupancy 낮음)에 맞는 별도 커널 없음 | 함수 시그니처 검사 |
+| **L7** | 큰 대칭 행렬에서 METIS ND 스택 오버플로우. NodeNDP 권장하나 MPI 의존 | STRUMPACK stderr 경고 — 본 측정 Hook_1498 SIGKILL에서 직접 관찰 (`docs/04-benchmarks-profiling/01-strumpack-paper-reproduction.md` §3.2) |
+| **L8** | 일률적 블록 크기 — 큰 separator front (fsz>64, occupancy 낮음)에 맞는 별도 커널 없음 | 함수 시그니처 검사 |
 | **L9** | CUDA Graph capture 미사용 (또는 제한적) | Claus et al. 2025 |
 
 ### 3.2 `custom_linear_solver`의 대응 매핑
 
+> **경로 주의**: 아래 "위치" 열의 일부 경로·심볼은 **import 시점/중간 리팩토링 시절 이름**(`src/batched/`, `src/tc/`,
+> `src/reordering/`, `*multifrontal.cu`, `mf_factor_*`)이다. **현재 canonical 레이아웃**은 `src/{analyze,factorize,solve,internal}`
+> — 예: ordering=`src/analyze/reorder/metis_nd.cpp`, 티어 커널=`src/factorize/{small,mid,big}.cuh`, 분류=`src/internal/types.hpp`.
+> 옛 `01-fp32-batched-kernel-optimization.md`·`02-factor-solve-analyze-optimization.md` 는
+> [`../03-optimization-notes/01-kernel-engineering.md`](../03-optimization-notes/01-kernel-engineering.md)로 통합됐다.
+
 | L# | STRUMPACK 한계 | custom_linear_solver의 대응 | 위치 / 측정 효과 |
 |---|---|---|---|
 | **L1** | CPU solve fallback | **End-to-end device-resident API** (`set_data`/`set_rhs`/`set_solution` device 포인터, `solve()`는 device 솔브 그래프 replay) | `docs/01-orientation/01-api-and-build-design.md` "Public API Shape" + `src/solve/multifrontal.cu`. 본 측정 Transport에서 STRUMPACK solve = 0.77 s (CPU 경고) vs cuDSS = 0.09 s |
-| **L2** | Small-front 비효율 | **Warp-per-front 전용 커널** (`mf_factor_mid_warp_b`): `fsz≤32` 레벨은 1 warp/front, 8 warps/block, 프론트를 per-warp shared로 coalesced 스테이지, `__syncwarp()`만 | `src/batched/factor_mid.cuh`. `docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`: dominant bottom level 2.47→1.12 ms, **compute-bound 76%** 달성 |
+| **L2** | Small-front 비효율 | **Warp-per-front 전용 커널** (`mf_factor_mid_warp_b`): `fsz≤32` 레벨은 1 warp/front, 8 warps/block, 프론트를 per-warp shared로 coalesced 스테이지, `__syncwarp()`만 | `src/batched/factor_mid.cuh`. `docs/03-optimization-notes/01-kernel-engineering.md`: dominant bottom level 2.47→1.12 ms, **compute-bound 76%** 달성 |
 | **L3** | 일반 그래프 peak 0.004% | (L2/L8과 함께) front-size 분포 자체에 맞춘 커널 라우팅 — 우리도 latency-bound이지만 그 안에서 가장 빠른 lever 사용 | `docs/01-orientation/02-related-work-and-novelty.md` §2: 95% of fronts are fsz≤16 (only 5% of flops), 75% compute / 33% DRAM (3 bands) |
 | **L4** | 레벨 직렬화 | **Fused factor+extend-add 커널** (`mf_factor_extend_level`): 한 블록이 프론트 factor 후 곧바로 부모 프론트로 extend-add (`atomicAdd`). 부모는 strictly 높은 레벨이라 race-free | `src/factorize/multifrontal.cu`. *"Halves graph nodes, removes one inter-kernel sync per level"* |
 | **L5** | 단일 시스템 API | **Batched 경로** (`src/batched/*.cuh`): 한 번의 analyze로 B개의 시스템 factor/solve. 1 symbolic + B numeric | `src/batched/multifrontal_batched.cu`. NR 전력조류(모든 NR iter가 같은 pattern, 값만 바뀜)에 직격 |
-| **L6** | FP64 중심 | **FP32-native batched 경로** (`BatchPrecision::FP32`): 프론트 자체가 FP32, no FP64 master | 자체 FP64 baseline 대비 **factor+solve −42…−46%** (`docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`) |
-| **L7** | METIS NodeND 스택 한계 | **GPU symmetric graph build** (`matrix::build_symmetric_graph_device`) + `metis_nd_from_graph`: CPU `build_symmetric_adjacency` 직렬 단계 제거. 전력망 야코비안은 N≤200K로 stack 한계 자체 발생 안 함 | `src/reordering/metis_nd.cpp`. `docs/03-optimization-notes/02-factor-solve-analyze-optimization.md`: **analyze −22…−34%** (소/중규모) |
-| **L8** | 일률 블록 크기 | **3-tier 블록 크기**: small(fsz≤32) warp-per-front, mid(32<fsz≤159) shared-resident, big(fsz>159) **1024-thread** | `src/tc/factor_tc.cuh` + `docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md` §3. 70k factor 0.87→0.77 ms |
+| **L6** | FP64 중심 | **FP32-native batched 경로** (`BatchPrecision::FP32`): 프론트 자체가 FP32, no FP64 master | 자체 FP64 baseline 대비 **factor+solve −42…−46%** (`docs/03-optimization-notes/01-kernel-engineering.md`) |
+| **L7** | METIS NodeND 스택 한계 | **GPU symmetric graph build** (`matrix::build_symmetric_graph_device`) + `metis_nd_from_graph`: CPU `build_symmetric_adjacency` 직렬 단계 제거. 전력망 야코비안은 N≤200K로 stack 한계 자체 발생 안 함 | `src/reordering/metis_nd.cpp`. `docs/03-optimization-notes/01-kernel-engineering.md`: **analyze −22…−34%** (소/중규모) |
+| **L8** | 일률 블록 크기 | **3-tier 블록 크기**: small(fsz≤32) warp-packed, mid(33–64) whole-front shared-resident, big(fsz>64) global-resident **multi-block** | `src/factorize/{small,mid,big}.cuh`, `src/internal/types.hpp` `ClassifyFrontTier` + `docs/03-optimization-notes/01-kernel-engineering.md` §1. 70k factor 0.87→0.77 ms |
 | **L9** | CUDA Graph 미사용 | **Factor/solve CUDA Graph capture & replay**: analyze 시점에 한 번 캡처, 매 NR iter에서 replay | `docs/01-orientation/01-api-and-build-design.md` analyze 단계. *"kernel time = factor/solve wall-clock의 ~97%"* — launch overhead < 3% |
 
 ### 3.3 측정으로 확인된 차이
 
-본 STRUMPACK 재현 측정 (`docs/04-benchmarks-profiling/01-strumpack-paper-table2-reproduction.md` §3.1):
+본 STRUMPACK 재현 측정 (`docs/04-benchmarks-profiling/01-strumpack-paper-reproduction.md` §3.1):
 
 | 매트릭스 | STRUMPACK MAGMA (RTX 3090) | cuDSS (RTX 3090) | 관찰 |
 |---|---|---|---|
@@ -151,7 +157,7 @@ src/
 | ML_Geer | factor 9.9s / solve **0.53s (CPU)** | factor 11.0s / solve 0.06s | 동일 |
 | Hook_1498 | **SIGKILL** | **OOM** | STRUMPACK 자체 경고 — L7 그대로 |
 
-전력망 야코비안 (custom_linear_solver의 타깃, 출처: `docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md`):
+전력망 야코비안 (custom_linear_solver의 타깃, 출처: `docs/03-optimization-notes/01-kernel-engineering.md`):
 
 | case | n | orig FP32 batched f+s [ms/sys] | new FP32-opt [ms/sys] | 개선 |
 |------|--:|---:|---:|---:|
@@ -193,11 +199,11 @@ cuDSS와의 단일 시스템(B=1) 비교 (`docs/03-optimization-notes/05-mysolve
 본 디렉터리:
 - `01-api-and-build-design.md` — 공개 API + 빌드 + 복사 인벤토리
 - `02-related-work-and-novelty.md` — 외부 솔버 landscape + 인용 + novelty 자체 평가
-- `docs/03-optimization-notes/01-fp32-batched-kernel-optimization.md` — FP32 batched 발전 + 측정
-- `docs/03-optimization-notes/02-factor-solve-analyze-optimization.md` — analyze/factor/solve 통합 최적화
+- `docs/03-optimization-notes/01-kernel-engineering.md` — FP32 batched 발전 + 측정
+- `docs/03-optimization-notes/01-kernel-engineering.md` — analyze/factor/solve 통합 최적화
 - `docs/03-optimization-notes/04-tensor-core-factor-design.md` — TC32 + 텐서코어 음의 결과
 - `docs/03-optimization-notes/05-mysolver-warm-cache-port-plan.md` — 단일-케이스 vs cuDSS 측정
-- `docs/04-benchmarks-profiling/01-strumpack-paper-table2-reproduction.md` — 논문 Table 2 재현 시도
+- `docs/04-benchmarks-profiling/01-strumpack-paper-reproduction.md` — 논문 Table 2 재현 시도
 
 외부:
 - Claus, Ghysels, Boukaram, Li, *"A GPU accelerated sparse direct solver and preconditioner with block low rank compression"*, IJHPCA 2025

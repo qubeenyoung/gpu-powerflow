@@ -11,7 +11,6 @@ MultifrontalPlan::~MultifrontalPlan() {
   if (d_plcols_tier) cudaFree(d_plcols_tier);
   if (d_y_f) cudaFree(d_y_f);
   if (d_front_f) cudaFree(d_front_f);
-  if (d_pivot_offset) cudaFree(d_pivot_offset);
   if (arena) cudaFree(arena);
 }
 
@@ -21,13 +20,14 @@ MultifrontalPlan::MultifrontalPlan(MultifrontalPlan&& o) noexcept {
 
 MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept {
   if (this != &o) {
+    // Free our device allocations before adopting the source's.
     if (d_spine_panels) cudaFree(d_spine_panels);
     if (d_plcols_tier) cudaFree(d_plcols_tier);
     if (d_y_f) cudaFree(d_y_f);
     if (d_front_f) cudaFree(d_front_f);
-    if (d_pivot_offset) cudaFree(d_pivot_offset);
     if (arena) cudaFree(arena);
 
+    // Take ownership of every scalar, device pointer, and host mirror.
     num_rows = o.num_rows;
     num_panels = o.num_panels;
     num_plevels = o.num_plevels;
@@ -58,10 +58,6 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept {
     h_front_off = std::move(o.h_front_off);
     h_panel_parent = std::move(o.h_panel_parent);
     h_asm_ptr = std::move(o.h_asm_ptr);
-    h_pivot_offset = std::move(o.h_pivot_offset);
-    d_pivot_offset = o.d_pivot_offset;
-    total_pivots = o.total_pivots;
-    o.d_pivot_offset = nullptr;
     h_spine_panels = std::move(o.h_spine_panels);
     spine_start_level = o.spine_start_level;
     num_subtrees = o.num_subtrees;
@@ -77,10 +73,10 @@ MultifrontalPlan& MultifrontalPlan::operator=(MultifrontalPlan&& o) noexcept {
     d_spine_panels = o.d_spine_panels;
     o.d_spine_panels = nullptr;
 
+    // Null the source's freed-here pointers so its destructor won't double-free.
     o.arena = nullptr;
     o.d_front_f = nullptr;
     o.d_y_f = nullptr;
-    o.d_pivot_offset = nullptr;
   }
   return *this;
 }

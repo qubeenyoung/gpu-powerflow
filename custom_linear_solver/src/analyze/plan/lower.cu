@@ -13,6 +13,7 @@ namespace custom_linear_solver::plan {
 
 namespace {
 
+// Binary-search front_rows[begin,end) for value; return the in-front offset.
 __device__ int FrontLowerBound(const int* front_rows, int begin, int end,
                                int value) {
   int lo = begin;
@@ -26,12 +27,18 @@ __device__ int FrontLowerBound(const int* front_rows, int begin, int end,
   }
   return lo - begin;
 }
+
+// For each nonzero A(i,j), compute its scatter destination in the owning front's
+// dense fsz x fsz block: a_pos[q] = front_off + row*fsz + col. The owner is the
+// panel of the smaller index (lower-triangular storage); the column index inside
+// the front is found by binary search when it lies outside the pivot block.
 __global__ void BuildAPosDevice(
     int n, const int* __restrict__ Ap, const int* __restrict__ Ai,
     const int* __restrict__ panel_of, const int* __restrict__ panel_first,
     const int* __restrict__ panel_ncols, const int* __restrict__ front_off,
     const int* __restrict__ front_ptr, const int* __restrict__ front_rows,
     int* __restrict__ a_pos) {
+  // One block per column j; threads stride over its nonzeros.
   const int j = blockIdx.x;
   if (j >= n) return;
   for (int q = Ap[j] + threadIdx.x; q < Ap[j + 1]; q += blockDim.x) {
@@ -54,12 +61,12 @@ __global__ void BuildAPosDevice(
   }
 }
 
-// Determine whether every numerical scatter destination in `a_pos` is unique.
-// This is kept as Analyze-time metadata/diagnostics; the active scatter path
-// still uses atomicAdd. Optionally emits front fill / coverage statistics.
-// Returns false on cudaMemcpy failure.
+// Report whether every scatter destination in `a_pos` is unique (Analyze-time
+// diagnostic; the live scatter path still uses atomicAdd). Optionally emits
+// front fill / coverage statistics. Returns false on cudaMemcpy failure.
 static bool DetermineAPosUnique(const int* d_a_pos, int nnz_a, long front_total,
                                 bool emit_info) {
+  // 1. Copy to host and sort so duplicates / gaps are adjacent.
   std::vector<int> h_a_pos(static_cast<std::size_t>(nnz_a));
   if (cudaMemcpy(h_a_pos.data(), d_a_pos, h_a_pos.size() * sizeof(int),
                  cudaMemcpyDeviceToHost) != cudaSuccess) {
@@ -67,6 +74,7 @@ static bool DetermineAPosUnique(const int* d_a_pos, int nnz_a, long front_total,
   }
   std::sort(h_a_pos.begin(), h_a_pos.end());
 
+  // 2. Uniqueness check (ignore the -1 "absent" sentinel).
   bool unique = true;
   for (std::size_t i = 1; i < h_a_pos.size(); ++i) {
     if (h_a_pos[i] >= 0 && h_a_pos[i] == h_a_pos[i - 1]) {
@@ -75,6 +83,7 @@ static bool DetermineAPosUnique(const int* d_a_pos, int nnz_a, long front_total,
     }
   }
 
+  // 3. Optional fill / coverage statistics over the front arena.
   if (emit_info) {
     long present = 0, fill_runs = 0, fill_slots = 0, last = -1;
     for (int pos : h_a_pos) {
@@ -108,15 +117,11 @@ static bool DetermineAPosUnique(const int* d_a_pos, int nnz_a, long front_total,
 
 // Panel cap (= supernode amalgamation width). A bigger cap merges longer Etree
 // chains into one panel, cutting the front / Solve-kernel count at the price of
-// padded fill. Upper bound 64 from the shared pivot buffer (nc <= cap).
+// padded fill. Clamp to [1, 64]; the 64 ceiling comes from the shared pivot
+// buffer (nc <= cap). Uses the config value directly (width 8 is the tuned
+// default for power-flow Jacobians; wider caps lose to padded-fill inflation).
 static int ComputeEffectivePanelWidth(int n, int max_panel_width,
                                       bool float_front) {
-  // Width 8 is the default for ALL sizes (config max_panel_width=8). A fair
-  // panel-width sweep (report
-  // 05-reports/08-fair-strumpack-tuning-2026-06-17.md) showed width 8 beats 16
-  // on every power-flow case (ACTIVSg25k factor 1.41x / Solve 1.19x,
-  // SyntheticUSA 1.04x/1.05x, case3120sp 1.05x/1.10x); widths 24/32 lose to
-  // padded-fill inflation. The analyzer uses the config value.
   int effective_panel_width = max_panel_width;
   (void)float_front;
   (void)n;
@@ -133,6 +138,7 @@ static bool LayoutFrontArena(
     MultifrontalPlan& plan,
     const symbolic::MultifrontalSymbolic& symbolic_factor, int P,
     std::vector<int>& front_off, long& total) {
+  // 1. Prefix-sum fsz^2 in panel order; bail if the arena exceeds 1G doubles.
   front_off.assign(P + 1, 0);
   total = 0;
   for (int p = 0; p < P; ++p) {
@@ -143,11 +149,15 @@ static bool LayoutFrontArena(
     if (total > (1L << 30)) return false;
   }
   front_off[P] = static_cast<int>(total);
+
+  // 2. Publish total and host mirror (for per-panel cuBLAS dispatch).
   plan.front_total = total;
-  plan.h_front_off = front_off;  // host mirror for per-panel cuBLAS dispatch
+  plan.h_front_off = front_off;
   return true;
 }
 
+// Sum of fsz^2 over all panels (front arena size in doubles), without laying out
+// offsets.
 static long ComputeFrontTotal(
     const symbolic::MultifrontalSymbolic& symbolic_factor, int P) {
   long total = 0;
@@ -159,19 +169,6 @@ static long ComputeFrontTotal(
   return total;
 }
 
-// Per-panel pivot offsets (one slot per pivot column); total_pivots == n.
-static void BuildPivotOffsets(MultifrontalPlan& plan,
-                              const symbolic::PanelPartition& panels, int P) {
-  plan.h_pivot_offset.assign(P + 1, 0);
-  for (int p = 0; p < P; ++p)
-    plan.h_pivot_offset[p + 1] = plan.h_pivot_offset[p] + panels.ncols[p];
-  plan.total_pivots = plan.h_pivot_offset[P];
-  if (cudaMalloc(&plan.d_pivot_offset, (size_t)(P + 1) * sizeof(int)) ==
-      cudaSuccess) {
-    cudaMemcpy(plan.d_pivot_offset, plan.h_pivot_offset.data(),
-               (size_t)(P + 1) * sizeof(int), cudaMemcpyHostToDevice);
-  }
-}
 
 // Panel-Etree levels (parent id > child in Postorder, so one forward pass
 // suffices). Fills plevel and plan.panel_level_ptr (the level CSR); returns the
@@ -180,6 +177,7 @@ static int BuildPanelLevels(
     MultifrontalPlan& plan,
     const symbolic::MultifrontalSymbolic& symbolic_factor, int P,
     std::vector<int>& plevel) {
+  // 1. Each panel's level = 1 + max child level (forward pass: parent > child).
   plevel.assign(P, 0);
   for (int p = 0; p < P; ++p) {
     const int par = symbolic_factor.panel_parent[p];
@@ -189,6 +187,8 @@ static int BuildPanelLevels(
   for (int p = 0; p < P; ++p)
     num_plevels = std::max(num_plevels, plevel[p] + 1);
   plan.num_plevels = num_plevels;
+
+  // 2. Build the per-level CSR (counts -> prefix sum).
   plan.panel_level_ptr.assign(num_plevels + 1, 0);
   for (int p = 0; p < P; ++p) ++plan.panel_level_ptr[plevel[p] + 1];
   for (int L = 0; L < num_plevels; ++L)
@@ -257,7 +257,7 @@ static void PartitionSubtrees(
     return plan.panel_level_ptr[L + 1] - plan.panel_level_ptr[L];
   };
 
-  // Spine: walk down from the top level while cnt == 1.
+  // 1. Spine: walk down from the top level while cnt == 1.
   int spine_top = num_plevels - 1;
   int spine_bot = spine_top;
   while (spine_bot >= 0 && level_cnt(spine_bot) == 1) --spine_bot;
@@ -279,10 +279,9 @@ static void PartitionSubtrees(
     plan.h_spine_panels.clear();
   }
 
-  // A panel p's subtree root is the highest ancestor whose panel_parent is in
-  // the spine (or -1). All panels with the same root form one subtree. Parent
-  // id > child id holds for Postorder panel ids, so a reverse-id pass lets each
-  // child inherit its already-resolved parent's root.
+  // 2. Assign each panel its subtree root: the highest ancestor whose
+  // panel_parent is in the spine (or -1). Reverse-id pass lets each child
+  // inherit its already-resolved parent's root (parent id > child id).
   plan.h_subtree_of_panel.assign(P, -1);
   std::vector<char> is_spine(P, 0);
   if (plan.spine_start_level >= 0) {
@@ -298,7 +297,7 @@ static void PartitionSubtrees(
       subtree_root_of[p] = subtree_root_of[par];
     }
   }
-  // Collect distinct subtree roots with their member counts.
+  // 3. Collect distinct subtree roots with member counts, sorted desc.
   std::vector<int> root_member_count(P, 0);
   for (int p = 0; p < P; ++p) {
     if (subtree_root_of[p] >= 0) ++root_member_count[subtree_root_of[p]];
@@ -307,15 +306,12 @@ static void PartitionSubtrees(
   for (int p = 0; p < P; ++p) {
     if (root_member_count[p] > 0) distinct_roots.push_back(p);
   }
-  // Sort by member count desc.
   std::sort(distinct_roots.begin(), distinct_roots.end(), [&](int a, int b) {
     return root_member_count[a] > root_member_count[b];
   });
 
-  // Cap to kMaxSubtreeStreams. When more distinct roots exist (common on large
-  // power-grid Jacobians), keep the top (K-1) largest as separate subtrees and
-  // merge ALL remaining roots' members into one "spillover" subtree (id K-1),
-  // processed on its own stream level-by-level.
+  // 4. Cap to kMaxSubtreeStreams: keep the top (K-1) largest as separate
+  // subtrees and merge all remaining roots into one spillover subtree (id K-1).
   constexpr int MAX_SUBTREES = kMaxSubtreeStreams;
   plan.h_subtree_roots.clear();
   std::vector<int> root_to_id(P, -1);
@@ -324,26 +320,24 @@ static void PartitionSubtrees(
     root_to_id[distinct_roots[i]] = i;
     plan.h_subtree_roots.push_back(distinct_roots[i]);
   }
-  // If there are more roots, all "extra" roots map to id = kept (spillover
-  // bin).
+  // Extra roots map to id = kept (spillover bin); use one as its representative.
   if ((int)distinct_roots.size() > kept) {
     for (int i = kept; i < (int)distinct_roots.size(); ++i) {
       root_to_id[distinct_roots[i]] = kept;
     }
-    // The spillover bin needs a representative root for h_subtree_roots[kept].
     plan.h_subtree_roots.push_back(distinct_roots[kept]);
   }
   plan.num_subtrees = (int)plan.h_subtree_roots.size();
-  // Assign subtree id per panel via its subtree_root_of.
+
+  // 5. Assign each panel its subtree id via its root.
   for (int p = 0; p < P; ++p) {
     const int r = subtree_root_of[p];
     if (r < 0) continue;
     plan.h_subtree_of_panel[p] = root_to_id[r];
   }
 
-  // Re-sort plcols within each level so panels of the same subtree are
-  // contiguous (subtree 0 first, ..., then -1=spine). Same-level panels are
-  // independent.
+  // 6. Re-sort plcols within each level so same-subtree panels are contiguous
+  // (subtree 0 first, ..., spine last). Same-level panels are independent.
   if (plan.num_subtrees > 0) {
     constexpr int NT = MultifrontalPlan::kNumTiers;
     auto tier_of = [&](int p) {
@@ -426,6 +420,7 @@ static void BuildTierOrder(
         symbolic_factor.front_ptr[p + 1] - symbolic_factor.front_ptr[p];
     return FrontBucket(fsz, fp64);
   };
+  // 1. Within each level, emit panels tier-major and record tier offsets.
   plan.h_plcols_tier.assign(P, 0);
   plan.h_level_tier_off.assign((long)num_plevels * (NT + 1), 0);
   int w = 0;
@@ -440,6 +435,8 @@ static void BuildTierOrder(
     }
     plan.h_level_tier_off[(long)L * (NT + 1) + NT] = w;  // == hi
   }
+
+  // 2. Upload the tier-ordered panel list.
   if (cudaMalloc(&plan.d_plcols_tier, (size_t)std::max(1, P) * sizeof(int)) ==
       cudaSuccess) {
     cudaMemcpy(plan.d_plcols_tier, plan.h_plcols_tier.data(),
@@ -475,8 +472,8 @@ static bool AllocateAndUploadPlan(
     const std::vector<int>& plcols, const std::vector<int>& asm_local,
     const int* d_Ap, const int* d_Ai, int n, int P, long total,
     bool float_front, bool emit_info) {
-  // One arena with kArenaAlignmentBytes-aligned sub-arrays (avoids an L2
-  // cache-line straddle).
+  // 1. Lay out one arena of kArenaAlignmentBytes-aligned sub-arrays (alignment
+  // avoids an L2 cache-line straddle).
   auto align_up = [](long b) {
     return (b + kArenaAlignmentBytes - 1) &
            ~static_cast<long>(kArenaAlignmentBytes - 1);
@@ -512,6 +509,8 @@ static bool AllocateAndUploadPlan(
   off = align_up(off + (long)n * sizeof(double));
   const long o_sing = off;
   off = align_up(off + sizeof(int));
+
+  // 2. Allocate the arena and bind each device pointer to its sub-array.
   cudaMalloc(&plan.arena, off);
   char* base = static_cast<char*>(plan.arena);
   plan.d_front = reinterpret_cast<double*>(base + o_front);
@@ -533,6 +532,7 @@ static bool AllocateAndUploadPlan(
   int* d_panel_first = reinterpret_cast<int*>(base + o_pf);
   int* d_panel_of = reinterpret_cast<int*>(base + o_pof);
 
+  // 3. Upload host plan arrays into the arena.
   auto copy_to_device = [](int* d, const std::vector<int>& v) {
     if (!v.empty())
       cudaMemcpy(d, v.data(), v.size() * sizeof(int), cudaMemcpyHostToDevice);
@@ -554,6 +554,8 @@ static bool AllocateAndUploadPlan(
   }
   copy_to_device(d_panel_first, panels.first);
   copy_to_device(d_panel_of, panels.panel_of);
+
+  // 4. Build the a_pos scatter map on device and check for failure.
   BuildAPosDevice<<<n, 128>>>(n, d_Ap, d_Ai, d_panel_of, d_panel_first,
                               plan.d_ncols, plan.d_front_off, plan.d_front_ptr,
                               plan.d_front_rows, plan.d_a_pos);
@@ -579,6 +581,7 @@ MultifrontalPlan AnalyzeMultifrontal(
   plan.nnz = nnz_a;
   if (n <= 0) return plan;
 
+  // 1. Amalgamate the Etree into panels and compute the multifrontal symbolic.
   std::vector<int> colcount(n);
   for (int j = 0; j < n; ++j) colcount[j] = Lp[j + 1] - Lp[j];
   const int effective_panel_width =
@@ -591,13 +594,13 @@ MultifrontalPlan AnalyzeMultifrontal(
       sym::ComputeMultifrontalSymbolic(n, Lp, Li, panels);
   const int P = panels.num_panels;
   plan.num_panels = P;
-  plan.h_front_ptr =
-      symbolic_factor
-          .front_ptr;  // host copies for batched dispatch / TC shared sizing
+  // Host copies for batched dispatch / TC shared sizing.
+  plan.h_front_ptr = symbolic_factor.front_ptr;
   plan.h_ncols = panels.ncols;
   plan.h_panel_parent = symbolic_factor.panel_parent;
   plan.h_asm_ptr = symbolic_factor.asm_ptr;
 
+  // 2. Panel-Etree levels and the level-grouped panel order (plcols).
   std::vector<int> plevel;
   const int num_plevels = BuildPanelLevels(plan, symbolic_factor, P, plevel);
   std::vector<int> plcols(P);
@@ -608,6 +611,7 @@ MultifrontalPlan AnalyzeMultifrontal(
   }
   plan.h_plcols = plcols;
 
+  // 3. Optional diagnostics; early-out when only host front metadata is wanted.
   const long symbolic_total = ComputeFrontTotal(symbolic_factor, P);
   if (emit_info)
     DumpFrontDistribution(symbolic_factor, plevel, n, P, num_plevels,
@@ -617,18 +621,20 @@ MultifrontalPlan AnalyzeMultifrontal(
     return plan;
   }
 
+  // 4. Lay out the front arena.
   std::vector<int> front_off;
   long total = 0;
   if (!LayoutFrontArena(plan, symbolic_factor, P, front_off, total))
     return MultifrontalPlan{};
 
-  BuildPivotOffsets(plan, panels, P);
-
+  // 5. Build the subtree/tier dispatch orders and the assembly map.
   const bool fp64 = !float_front;
   PartitionSubtrees(plan, symbolic_factor, plcols, P, num_plevels, fp64,
                     emit_info);
   BuildTierOrder(plan, symbolic_factor, plcols, P, num_plevels, fp64);
   const std::vector<int> asm_local = BuildAssemblyMap(plan, symbolic_factor, P);
+
+  // 6. Allocate the device arena, upload, and build a_pos.
   if (!AllocateAndUploadPlan(plan, symbolic_factor, panels, front_off, plcols,
                              asm_local, d_Ap, d_Ai, n, P, total, float_front,
                              emit_info))

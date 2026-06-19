@@ -1,23 +1,19 @@
 #pragma once
 
-// FACTORIZE — single-system (B=1) schedule. Ported from cuDSS_reproduce
-// (mysolver/gpu/gpu_mf.cu).
+// FACTORIZE — single-system (B=1) schedule.
 //
-// The batched front-major schedule (schedule.cuh) amortizes its per-level
-// launch / barrier latency across B systems; at B=1 that latency is exposed and
-// the tier-split + occupancy gate add launches the single-system path does not
-// need. This restores the tuned single-system schedule for B=1: one CUDA block
+// The batched schedule (schedule.cuh) amortizes per-level launch / barrier
+// latency across B systems; at B=1 that latency is exposed and the tier-split +
+// occupancy-gate launches buy nothing. This path is tuned for B=1: one block
 // per front, a FUSED factor+extend-add per level, per-level block-size
-// heuristics, the multi-block big-front triple (FP64), and the
-// partitioned-inverse pivot blocks that turn the Solve's triangular back-solves
-// into parallel GEMVs (Solve/single.cuh).
+// heuristics, the multi-block big-front triple, and the partitioned-inverse
+// pivot blocks that turn the Solve's triangular back-solves into parallel GEMVs
+// (Solve/single.cuh).
 //
-// It runs against the SAME MultifrontalPlan device arrays the batched path uses
-// (front_off / front_ptr / ncols / plcols / panel_parent / asm_ptr / asm_local
-// / front_rows; see Analyze/plan/lower.cu) and the B=1 slice of the per-state
-// front arena (State.d_front_batch[_f]). The numeric scatter
-// (AssembleFrontValues) is shared with the batched path; only the level walk
-// and the per-front kernels differ here.
+// Runs against the SAME MultifrontalPlan device arrays as the batched path and
+// the B=1 slice of the per-state front arena (State.d_front_batch[_f]). The
+// numeric scatter (AssembleFrontValues) is shared; only the level walk and the
+// per-front kernels differ here.
 
 #include <cuda_runtime.h>
 
@@ -59,6 +55,7 @@ __global__ void FactorSingleLevel(
   const int uc = fsz - nc;
 
   if (fsz <= 48) {
+    // Small front: per-pivot rank-1 LU over the whole remaining block.
     for (int k = 0; k < nc; ++k) {
       FT piv = F[(long)k * fsz + k];
       if (piv == FT(0)) {
@@ -75,6 +72,8 @@ __global__ void FactorSingleLevel(
       __syncthreads();
     }
   } else {
+    // Big front: blocked panel LU → U-panel Solve → rank-nc trailing.
+    // Phase 1: panel LU on the pivot block (rank-1 over the nc-wide panel only).
     for (int k = 0; k < nc; ++k) {
       FT piv = F[(long)k * fsz + k];
       if (piv == FT(0)) {
@@ -90,16 +89,20 @@ __global__ void FactorSingleLevel(
       }
       if (pc > 0) __syncthreads();
     }
+
+    // Phase 2: U-panel Solve (forward-subst against L11), accumulated in FT.
     for (int k = 1; k < nc; ++k) {
       for (int e = t; e < uc; e += nt) {
         const int jj = nc + e;
-        FT v = F[(long)k * fsz + jj];  // accumulate in front precision (FT)
+        FT v = F[(long)k * fsz + jj];
         for (int i = 0; i < k; ++i)
           v -= F[(long)k * fsz + i] * F[(long)i * fsz + jj];
         F[(long)k * fsz + jj] = v;
       }
       __syncthreads();
     }
+
+    // Phase 3: rank-nc trailing update over the uc×uc contribution block.
     for (int e = t; e < uc * uc; e += nt) {
       const int ii = nc + e / uc, jj = nc + e % uc;
       FT acc = 0;
@@ -109,6 +112,8 @@ __global__ void FactorSingleLevel(
     }
   }
 
+  // Phase 4: extend-add the contribution block into the parent (race-free
+  // atomicAdd — parent is a strictly higher, not-yet-factored level).
   const int par = panel_parent[p];
   if (par < 0 || !do_extend) return;
   __syncthreads();
@@ -122,11 +127,11 @@ __global__ void FactorSingleLevel(
   }
 }
 
-// ---- Multi-block big-front triple. The few big fronts near the root sit on the
+// Multi-block big-front triple. The few big fronts near the root sit on the
 // sequential critical path; one block each under-uses the SMs, so the panel/U-
-// panel run one block/front while the embarrassingly-parallel trailing update +
-// extend spread many blocks. Templated on the front type so the FP32 single-
-// system path gets multi-block big fronts too (else they collapse to one block).
+// panel run one block/front while the embarrassingly-parallel trailing + extend
+// spread many blocks. Templated on the front type so the FP32 single-system
+// path gets multi-block big fronts too.
 template <typename FT>
 __global__ void FactorSingleBigPanel(int lbegin, int lend,
                                      const int* __restrict__ plcols,
@@ -143,6 +148,8 @@ __global__ void FactorSingleBigPanel(int lbegin, int lend,
   FT* F = front + front_off[p];
   const int t = threadIdx.x, nt = blockDim.x;
   const int uc = fsz - nc;
+
+  // Phase 1: panel LU on the nc-wide pivot panel.
   for (int k = 0; k < nc; ++k) {
     FT piv = F[(long)k * fsz + k];
     if (piv == FT(0)) {
@@ -158,6 +165,8 @@ __global__ void FactorSingleBigPanel(int lbegin, int lend,
     }
     if (pc > 0) __syncthreads();
   }
+
+  // Phase 2: U-panel Solve (forward-subst against L11).
   for (int k = 1; k < nc; ++k) {
     for (int e = t; e < uc; e += nt) {
       const int jj = nc + e;
@@ -169,6 +178,10 @@ __global__ void FactorSingleBigPanel(int lbegin, int lend,
     __syncthreads();
   }
 }
+
+// Multi-block scalar big-front trailing: each block owns one
+// kSingleTrailTile² tile of the uc×uc contribution block. Stages its L rows and
+// U cols into shared, then C -= L·U over the nc K-dim. FP64/FP32.
 template <typename FT>
 __global__ void FactorSingleBigTrail(int lbegin, int lend,
                                      const int* __restrict__ plcols,
@@ -192,6 +205,8 @@ __global__ void FactorSingleBigTrail(int lbegin, int lend,
   FT* Lsh = sh;
   FT* Ush = sh + kSingleTrailTile * nc;
   const int t = threadIdx.x;
+
+  // Stage this tile's L rows and U cols into shared.
   for (int e = t; e < kSingleTrailTile * nc;
        e += kSingleTrailTile * kSingleTrailTile) {
     const int rr = e / nc, k = e % nc;
@@ -205,6 +220,8 @@ __global__ void FactorSingleBigTrail(int lbegin, int lend,
     Ush[e] = (jj < fsz) ? F[(long)k * fsz + jj] : FT(0);
   }
   __syncthreads();
+
+  // Dot over nc and subtract from this thread's (ii, jj) trailing entry.
   const int r = t / kSingleTrailTile, c = t % kSingleTrailTile;
   const int ii = nc + ti * kSingleTrailTile + r,
             jj = nc + tj * kSingleTrailTile + c;
@@ -216,12 +233,12 @@ __global__ void FactorSingleBigTrail(int lbegin, int lend,
   }
 }
 
-// Dedicated B=1 TF32 big-front trailing: rank-nc update C -= L @ U via shared-
-// staged TF32 Ozaki mma (m16n8k8). Each block owns one kTcRow x kTcCol output tile
-// (16 x 64); the 8 warps each compute one 16x8 N-subtile, all sharing the single
-// staged 16xnc L-tile (so L is read from global once per row tile, not once per
-// 16-wide column). Multi-block over (row tile, col strip, front). nc<=8 (panel
-// cap) -> the K dimension is one 8-wide mma tile. Float front only.
+// B=1 TF32 big-front trailing: rank-nc update C -= L @ U via shared-staged TF32
+// Ozaki mma (m16n8k8). Each block owns one kTcRow x kTcCol output tile (16 x
+// 64); the 8 warps each compute one 16x8 N-subtile, all sharing the single
+// staged 16xnc L-tile (L read from global once per row tile, not per 16-wide
+// column). Multi-block over (row tile, col strip, front). nc<=8 (panel cap) ->
+// the K dimension is one 8-wide mma tile. Float front only.
 constexpr int kTcRow = 16;  // M (rows per output tile)
 constexpr int kTcCol = 64;  // N (cols per output tile) = 8 warps x 8
 __global__ void FactorSingleBigTrailTf32(int lbegin, int lend,
@@ -245,6 +262,7 @@ __global__ void FactorSingleBigTrailTf32(int lbegin, int lend,
   if (ti >= nrt) return;
   const int row0 = nc + ti * kTcRow;  // first trailing row of this tile
   const int col0 = nc + tj * kTcCol;  // first trailing col of this tile
+
   // Stage the 16xnc L-tile (shared by all 8 warps) and the ncx64 U-strip.
   __shared__ float Lsh[kTcRow * 8];  // Lsh[r * 8 + k]
   __shared__ float Ush[8 * kTcCol];  // Ush[k * kTcCol + c]
@@ -260,14 +278,15 @@ __global__ void FactorSingleBigTrailTf32(int lbegin, int lend,
     Ush[e] = (k < nc && gc < fsz) ? F[(long)k * fsz + gc] : 0.0f;
   }
   __syncthreads();
+
+  // Tensor-core rank-nc mma: one 8-wide K tile (nc<=8). Ozaki head/tail 4-pass
+  // recovers ~FP32; plain single-pass TF32 diverges on these ill-conditioned
+  // no-pivot+selinv Jacobians, so the Ozaki passes are required.
   const int warp = t >> 5, lane = t & 31;  // 8 warps, one N-subtile each
   const int laneR = lane >> 2, laneC = (lane & 3) * 2;
   const int r_top = laneR, r_bot = laneR + 8;  // A fragment rows
   const int ncol = warp * 8;                   // this warp's N-subtile base col
   float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
-  // K = nc (<=8) -> one 8-wide mma tile. Ozaki head/tail 4-pass recovers ~FP32
-  // accuracy; plain single-pass TF32 diverges on these ill-conditioned Jacobians
-  // (no-pivot factor + selinv), so the Ozaki passes are required, not optional.
   const Tf32Pair a0 = Tf32OzakiPair(Lsh[r_top * 8 + laneC]);
   const Tf32Pair a1 = Tf32OzakiPair(Lsh[r_bot * 8 + laneC]);
   const Tf32Pair a2 = Tf32OzakiPair(Lsh[r_top * 8 + laneC + 1]);
@@ -275,7 +294,8 @@ __global__ void FactorSingleBigTrailTf32(int lbegin, int lend,
   const Tf32Pair b0 = Tf32OzakiPair(Ush[laneC * kTcCol + ncol + laneR]);
   const Tf32Pair b1 = Tf32OzakiPair(Ush[(laneC + 1) * kTcCol + ncol + laneR]);
   CLS_MMA_TF32_OZAKI2(c0, c1, c2, c3, a0, a1, a2, a3, b0, b1);
-  // Drain: C[r][ncol+laneC(+1)] -= c. (mma C-fragment layout: laneC selects col.)
+
+  // Drain C[r][ncol+laneC(+1)] -= c (mma C-fragment layout: laneC selects col).
   const int oc0 = ncol + laneC, oc1 = oc0 + 1;
   auto drain = [&](int rr, int cc, float v) {
     const int gr = row0 + rr, gc = col0 + cc;
@@ -286,6 +306,9 @@ __global__ void FactorSingleBigTrailTf32(int lbegin, int lend,
   drain(r_bot, oc0, c2);
   drain(r_bot, oc1, c3);
 }
+
+// Multi-block extend-add: scatter the uc×uc contribution block into the parent
+// front via atomicAdd, grid-strided across blocks.
 template <typename FT>
 __global__ void FactorSingleBigExtend(
     int lbegin, int lend, const int* __restrict__ plcols,

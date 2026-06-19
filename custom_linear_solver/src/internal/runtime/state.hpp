@@ -21,15 +21,10 @@ namespace custom_linear_solver {
 // Numeric precision modes for the factor / Solve. The Solve reads the front the
 // factor produced.
 //
-//   FP64       – everything double. Reference accuracy (~1e-13), slowest
-//   factor. FP32       – the whole front is float. ~1e-4 accurate, ~2x faster
-//   than FP64 on RTX 3090. TF32       – FP32 front + TF32 mma.m16n8k8 trailing
-//   GEMM. Small/mid fronts use the warp-packed / whole-front shared
-//                kernels (FactorSmall / FactorMid); big
-//                fronts use the global-resident multi-block FactorBig.
-//                Recommended path on power-grid Jacobians.
-//
-// TF32 requires Ampere (sm80+).
+//   FP64 – everything double; reference accuracy (~1e-13), slowest factor.
+//   FP32 – whole front is float; ~1e-4 accurate, ~2x faster than FP64.
+//   TF32 – FP32 front + TF32 mma.m16n8k8 trailing GEMM; recommended on
+//          power-grid Jacobians. Requires Ampere (sm80+).
 enum class Precision { FP64, FP32, TF32 };
 
 // Small utilities used by both the runtime wrapper and the factor/Solve
@@ -44,13 +39,14 @@ inline bool IsTf32Path(Precision p) { return p == Precision::TF32; }
 // batch_size or precision changes. The factor/Solve kernel launches read State
 // fields directly.
 struct State {
-  int batch_count = 0;
-  long front_total = 0;
+  int batch_count = 0;   // B: number of systems sharing the symbolic plan
+  long front_total = 0;  // front elements per system (from plan)
   int num_rows = 0;
   Precision precision = Precision::FP64;
   bool static_pivoting = false;
   double pivot_threshold = 0.0;
   double pivot_shift = 0.0;
+
   double* d_front_batch =
       nullptr;  // batch_count * front_total FP64 front (FP64 mode only)
   float* d_front_batch_f =
@@ -59,11 +55,12 @@ struct State {
       nullptr;  // batch_count * num_rows FP64 Solve vector (FP64 mode)
   float* d_y_batch_f =
       nullptr;  // batch_count * num_rows FP32 Solve vector (FP32/TF32)
-  int* d_sing = nullptr;
+  int* d_sing = nullptr;  // singularity flag
+
   void* stream =
       nullptr;  // internal-graph mode: solver-owned; external: caller-owned
   bool owns_stream = false;  // true only when this State created `stream`
-  void* factor_graph_exec = nullptr;
+  void* factor_graph_exec = nullptr;  // captured factor graph (internal mode)
   // Full Solve graph (gather + Solve levels + scatter), captured lazily by
   // Solve.cu and keyed by the (rhs, solution, perm, iperm, type) it was
   // recorded for; a key change recaptures it. This supersedes the old
@@ -74,12 +71,14 @@ struct State {
   const int* full_solve_perm = nullptr;
   const int* full_solve_iperm = nullptr;
   int FullSolveTypeTag = 0;
+
   // Multi-stream subtree dispatch (batched): each independent subtree gets its
   // own stream, joined before the spine levels which run on the main stream.
-  int num_subtree_streams = 0;
+  int num_subtree_streams = 0;  // active subtree streams (0 when single-stream)
   void* subtree_streams[kMaxSubtreeStreams] = {nullptr};
-  void* fork_event = nullptr;
-  void* join_events[kMaxSubtreeStreams] = {nullptr};
+  void* fork_event = nullptr;  // signals subtree streams to start
+  void* join_events[kMaxSubtreeStreams] = {nullptr};  // per-subtree completion
+
   State() = default;
   ~State();
   State(const State&) = delete;

@@ -10,9 +10,9 @@ namespace custom_linear_solver {
 
 using custom_linear_solver::plan::MultifrontalPlan;
 
-// Opt the shared-resident kernels into the sm_86 dynamic-shared cap (they
-// exceed the 48 KB default). The PTX tensor-core variants only run on the
-// float-front path.
+// Opt every shared-resident factor kernel into the dynamic-shared cap; their
+// staged-front footprint exceeds the 48 KB default. Tensor-core variants exist
+// only on the float-front path.
 void RegisterFactorAttributes(Precision precision) {
   (void)precision;
   cudaFuncSetAttribute(FactorSmall<float, 8>,
@@ -68,7 +68,8 @@ static bool FactorizeImpl(const MultifrontalPlan& plan, State& st,
   constexpr int threads_per_block = 256;
   const dim3 scatter_grid(
       (plan.nnz + threads_per_block - 1) / threads_per_block, st.batch_count);
-  // Zero + scatter A into the front the factor consumes.
+
+  // Zero the front buffer, then scatter A into the front the factor consumes.
   auto issue_scatter = [&]() {
     cudaMemsetAsync(st.d_sing, 0, sizeof(int), stream);
     if (IsFp32Front(st.precision)) {

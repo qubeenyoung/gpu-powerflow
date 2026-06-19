@@ -18,16 +18,19 @@ namespace custom_linear_solver::plan {
 namespace {
 
 // Run a parallel-for over [lo, hi) chunked across up to 12 host threads. Falls
-// back to a single-thread call for small ranges or when the system reports zero
-// hardware concurrency.
+// back to a single-thread call for small ranges or when hardware concurrency is
+// unknown.
 template <typename Fn>
 void ParFor(int lo, int hi, Fn&& fn) {
+  // 1. Pick thread count; small ranges run serially.
   unsigned hw = std::thread::hardware_concurrency();
   const int nth = static_cast<int>(std::max(1u, std::min(hw ? hw : 1u, 12u)));
   if (hi - lo < 32768 || nth <= 1) {
     fn(lo, hi);
     return;
   }
+
+  // 2. Split the range into chunks and join.
   std::vector<std::thread> th;
   const int chunk = (hi - lo + nth - 1) / nth;
   for (int t = 0; t < nth; ++t) {
@@ -39,20 +42,23 @@ void ParFor(int lo, int hi, Fn&& fn) {
 }
 
 // Relabel a symmetric CSC pattern (col_ptr / row_idx) under (perm, iperm) into
-// a new CSC. new_col = iperm[old_col]; new_row = iperm[old_row]. Used to
-// prepare Etree / FillPattern in the post-METIS ordering.
+// a new CSC: new_col = iperm[old_col], new_row = iperm[old_row]. Prepares Etree
+// / FillPattern in the post-METIS ordering.
 void PermuteSymmetricPattern(int n, const std::vector<int>& col_ptr,
                              const std::vector<int>& row_idx,
                              const std::vector<int>& perm,
                              const std::vector<int>& iperm,
                              std::vector<int>& out_col_ptr,
                              std::vector<int>& out_row_idx) {
+  // 1. Prefix-sum new column pointers (column sizes are permutation-invariant).
   out_col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
   for (int new_col = 0; new_col < n; ++new_col) {
     const int old_col = perm[new_col];
     out_col_ptr[new_col + 1] =
         out_col_ptr[new_col] + (col_ptr[old_col + 1] - col_ptr[old_col]);
   }
+
+  // 2. Scatter relabeled row indices in parallel.
   out_row_idx.resize(static_cast<std::size_t>(out_col_ptr[n]));
   ParFor(0, n, [&](int lo, int hi) {
     for (int new_col = lo; new_col < hi; ++new_col) {
@@ -65,9 +71,13 @@ void PermuteSymmetricPattern(int n, const std::vector<int>& col_ptr,
   });
 }
 
+// Compute a perfect structural (row->col) matching of the bipartite graph
+// induced by the sparsity pattern via Hopcroft-Karp. Returns false if no perfect
+// matching exists (some row has no incident column, or augmentation stalls).
 bool StructuralMatchingFromCsc(int n, const std::vector<int>& col_ptr,
                                const std::vector<int>& row_idx,
                                std::vector<int>& row_to_col) {
+  // 1. Build the row-major adjacency (transpose of the CSC) for row->col lookup.
   std::vector<int> degree(static_cast<std::size_t>(n), 0);
   for (int col = 0; col < n; ++col) {
     for (int p = col_ptr[col]; p < col_ptr[col + 1]; ++p) {
@@ -85,13 +95,17 @@ bool StructuralMatchingFromCsc(int n, const std::vector<int>& col_ptr,
       if (0 <= row && row < n) adj[cursor[row]++] = col;
     }
   }
+
+  // 2. Empty row => no perfect matching possible.
   for (int r = 0; r < n; ++r)
     if (row_ptr[r + 1] == row_ptr[r]) return false;
 
+  // 3. Hopcroft-Karp state.
   row_to_col.assign(static_cast<std::size_t>(n), -1);
   std::vector<int> col_to_row(static_cast<std::size_t>(n), -1);
   std::vector<int> dist(static_cast<std::size_t>(n), -1);
 
+  // BFS builds the layered distance graph over unmatched rows.
   auto bfs = [&]() {
     std::deque<int> q;
     bool found = false;
@@ -120,6 +134,7 @@ bool StructuralMatchingFromCsc(int n, const std::vector<int>& col_ptr,
     return found;
   };
 
+  // DFS augments along a shortest layered path from row r.
   auto dfs = [&](auto&& self, int r) -> bool {
     for (int p = row_ptr[r]; p < row_ptr[r + 1]; ++p) {
       const int c = adj[p];
@@ -134,6 +149,7 @@ bool StructuralMatchingFromCsc(int n, const std::vector<int>& col_ptr,
     return false;
   };
 
+  // 4. Repeated BFS/DFS phases; matching is perfect iff all rows are matched.
   int matched = 0;
   while (bfs()) {
     for (int r = 0; r < n; ++r) {
@@ -143,9 +159,8 @@ bool StructuralMatchingFromCsc(int n, const std::vector<int>& col_ptr,
   return matched == n;
 }
 
-// Dump per-front structure to a CSV when SolverConfig.analyze_dump_fronts_path
-// is non-empty. Used by offline front-distribution and parent-update analysis
-// scripts.
+// Dump per-front structure to CSV when a dump path is set, for offline
+// front-distribution and parent-update analysis. No-op on empty path.
 void MaybeDumpFronts(const MultifrontalPlan& plan, const std::string& path) {
   if (path.empty()) return;
   FILE* f = std::fopen(path.c_str(), "w");
@@ -179,7 +194,8 @@ void MaybeDumpFronts(const MultifrontalPlan& plan, const std::string& path) {
 
 }  // namespace
 
-// Build the plan for one fixed ND seed (the original single-ordering pipeline).
+// Build the multifrontal plan for one fixed ND seed: reorder, factor symbolic
+// structure, then assemble the device plan. Returns false on any failure.
 static bool BuildPlanSeed(const CsrMatrixView& matrix,
                           const PlanBuildOptions& options, int metis_seed,
                           bool parallel_nd, PlanBuildResult& out) {
@@ -195,8 +211,8 @@ static bool BuildPlanSeed(const CsrMatrixView& matrix,
                                       csc_device) != Status::kSuccess)
       return false;
 
-    // 2. Symmetric adjacency graph (A + A^T) on device. Reused below for
-    // permute_metis_graph.
+    // 2. Symmetric adjacency graph (A + A^T) on device. Reused below to relabel
+    // the pattern for Etree / FillPattern.
     std::vector<int> metis_sym_col_ptr, metis_sym_row_idx;
     if (matrix::BuildSymmetricGraphDevice(csc_device, metis_sym_col_ptr,
                                           metis_sym_row_idx) !=
@@ -217,19 +233,20 @@ static bool BuildPlanSeed(const CsrMatrixView& matrix,
       }
     }
 
-    // 3. METIS nested-dissection.
+    // 3. METIS nested-dissection. Pass copies; the ND call may consume them.
     std::vector<int> nd_perm(static_cast<std::size_t>(n), 0);
     {
-      std::vector<int> nd_xadj =
-          metis_sym_col_ptr;  // consumed (moved-from) by ND call
+      std::vector<int> nd_xadj = metis_sym_col_ptr;
       std::vector<int> nd_adjncy = metis_sym_row_idx;
-      if (!reordering::MetisNdFromGraph(n, nd_xadj, nd_adjncy, nd_perm,
-                                        parallel_nd, metis_seed))
+      if (!reordering::MetisNdFromGraph(
+              n, nd_xadj, nd_adjncy, nd_perm, parallel_nd, metis_seed,
+              options.parallel_nd_depth, options.parallel_nd_base_small,
+              options.parallel_nd_base_large))
         return false;
     }
     out.perm = nd_perm;  // row order: new row -> original row
-    out.iperm.assign(static_cast<std::size_t>(n),
-                     0);  // column inverse: original col -> new col
+    // Column inverse: original col -> new col.
+    out.iperm.assign(static_cast<std::size_t>(n), 0);
     if (options.use_matching) {
       std::vector<int> col_perm(static_cast<std::size_t>(n), 0);
       for (int k = 0; k < n; ++k) col_perm[k] = row_to_col[out.perm[k]];
@@ -276,12 +293,13 @@ static bool BuildPlanSeed(const CsrMatrixView& matrix,
     std::vector<int> parent =
         symbolic::Etree(n, sym_col_ptr.data(), sym_row_idx.data());
 
-    // 7. Fill pattern. The METIS ordering is a Postorder → fill-neutral, so we
-    // can compute fill in METIS order and relabel below without a second
-    // FillPattern pass.
+    // 7. Fill pattern. The METIS ordering is already a postorder, so fill is
+    // computed directly without a relabeling pass.
     std::vector<int> Lp, Li;
     symbolic::FillPattern(n, sym_col_ptr.data(), sym_row_idx.data(), parent, Lp,
                           Li);
+
+    // Diagnostic: report fill nnz and Etree height.
     {
       long h = 0;
       std::vector<int> dep(n, 0);

@@ -13,17 +13,13 @@ using custom_linear_solver::plan::MultifrontalPlan;
 
 namespace {
 
-// =======================================================================================
-//  STAGE-IN  —  global → shared
-// =======================================================================================
+// STAGE-IN — global -> shared.
 //
-// Copies the whole fsz×fsz front from global to dynamic shared so the four
-// phases below touch only shared memory. On Ampere+ each element is issued
-// through cp.async via
-// __pipeline_memcpy_async, then committed and waited as one batch; on
-// pre-Ampere the helper falls back to a synchronous strided copy. The async
-// path lets a thread queue many loads before stalling, giving the SM something
-// else to schedule while the loads are in flight.
+// Copy the whole fsz×fsz front into dynamic shared so the factor phases touch
+// only shared memory. On Ampere+ each element is issued through cp.async
+// (__pipeline_memcpy_async) then committed and waited as one batch, letting a
+// thread queue many loads before stalling; pre-Ampere falls back to a
+// synchronous strided copy.
 template <typename T>
 __device__ __forceinline__ void StageInAsync(T* __restrict__ Fs,
                                              const T* __restrict__ F, int fsz2,
@@ -40,6 +36,10 @@ __device__ __forceinline__ void StageInAsync(T* __restrict__ Fs,
 #endif
 }
 
+// Right-looking trailing update F[row0..,col0..] -= L*U over the kb-wide pivot
+// block, run on the Tensor Cores via the TF32 Ozaki split (two TF32 products
+// recover near-FP32 accuracy). The accumulators c[] hold each warp's output
+// tiles.
 __device__ __forceinline__ void BlockUpdateTf32Tc(float* F, int fsz, int row0,
                                                   int col0, int dim, int k0,
                                                   int kb, int t, int nt) {
@@ -66,6 +66,7 @@ __device__ __forceinline__ void BlockUpdateTf32Tc(float* F, int fsz, int row0,
     if (r < dim && col < dim) F[(long)(row0 + r) * fsz + (col0 + col)] -= c;
   };
 
+  // Fast path: hold all n_tiles output tiles in registers and stream K once.
   constexpr int NTJ8_MAX = 16;
   if (n_tiles <= NTJ8_MAX) {
     for (int ti = warp; ti < m_tiles; ti += nwarp) {
@@ -105,6 +106,7 @@ __device__ __forceinline__ void BlockUpdateTf32Tc(float* F, int fsz, int row0,
     return;
   }
 
+  // General path: too many output tiles for registers, so re-stream K per tile.
   for (int ti = warp; ti < m_tiles; ti += nwarp) {
     const int r_top = ti * 16 + laneR;
     const int r_bot = r_top + 8;
@@ -130,6 +132,9 @@ __device__ __forceinline__ void BlockUpdateTf32Tc(float* F, int fsz, int row0,
   }
 }
 
+// Blocked right-looking LU of a shared-resident front, BK pivot columns at a
+// time: factor the diagonal+L block, solve the U block row, then apply the
+// trailing update on the Tensor Cores (BlockUpdateTf32Tc).
 __device__ __forceinline__ void FactorizeFrontBlockedTf32(
     float* F, int fsz, int nc, int t, int nt, int* sing, bool static_pivoting,
     double pivot_threshold, double pivot_shift) {
@@ -180,13 +185,11 @@ __device__ __forceinline__ void FactorizeFrontBlockedTf32(
   }
 }
 
-// Shared-resident blocked kernel — the unified SMALL-tier kernel for every
-// precision. The full front is staged into shared (fits the 99 KiB opt-in
-// budget for fsz below the per-precision shared limit) and factorized in place.
-// For UseTC (T = float, TF32 precision) eligible shapes use the blocked TF32
-// Tensor-Core trailing; otherwise (FP64/FP32, or TC-ineligible shapes) the same
-// shared-resident blocked structure runs scalar trailing. Supersedes FactorMid
-// / factor_mid_tf32_ptx / factor_big_shared_tf32_blocked.
+// MID tier kernel — one block per (front, batch). Stage the full front into the
+// shared opt-in budget and factorize it in place. UseTC (T=float, TF32) on a
+// TC-eligible shape runs the blocked Tensor-Core trailing; every other case
+// (FP64/FP32, or TC-ineligible shapes) runs scalar trailing over the same
+// shared-resident blocked structure.
 template <typename T, bool UseTC>
 __global__ void FactorMid(int lbegin, int lend, const int* __restrict__ plcols,
                           const int* __restrict__ front_off,
@@ -198,6 +201,7 @@ __global__ void FactorMid(int lbegin, int lend, const int* __restrict__ plcols,
                           long front_total, int* sing, int do_extend,
                           int fsz_cap, int rb_width, bool static_pivoting,
                           double pivot_threshold, double pivot_shift) {
+  // 1. Locate this block's front; split into pivot (nc) and contribution (uc).
   const int idx = lbegin + blockIdx.x;
   if (idx >= lend) return;
   T* front = frontB + (long)blockIdx.y * front_total;
@@ -209,19 +213,21 @@ __global__ void FactorMid(int lbegin, int lend, const int* __restrict__ plcols,
   const int uc = fsz - nc;
   const int fsz2 = fsz * fsz;
 
+  // 2. Stage the whole front into shared before factoring in place.
   extern __shared__ char smem_mid_blocked[];
   T* Fs = reinterpret_cast<T*>(smem_mid_blocked);
   StageInAsync<T>(Fs, F, fsz2, t, nt);
   __syncthreads();
 
-  // Factorize the front in place: TF32-eligible shapes take the blocked
+  // 3. Factorize the front in place: TF32-eligible shapes take the blocked
   // Tensor-Core path; all other shapes / precisions run the scalar phases
   // (Phase 1 panel LU + Phase 2 U-Solve + Phase 3 trailing, with the
   // fsz<=kFusedMidFrontMax fused Phase 1+3 fast path).
   bool did_tc = false;
   if constexpr (UseTC) {
-    if (fsz > CLS_TC_FSZ_MIN && uc >= CLS_TC_UC_MIN && nc >= CLS_TC_NC_MIN &&
-        nc <= kTensorCorePivotColumnCap && uc <= CLS_TC_UC_CAP) {
+    // Only gate: the shape fits the TF32 staging budget; uc=0 runs the TC path
+    // as a no-op trailing.
+    if (nc <= kTensorCorePivotColumnCap && uc <= kTensorCoreUcCap) {
       FactorizeFrontBlockedTf32(Fs, fsz, nc, t, nt, sing, static_pivoting,
                                 pivot_threshold, pivot_shift);
       did_tc = true;
@@ -241,8 +247,10 @@ __global__ void FactorMid(int lbegin, int lend, const int* __restrict__ plcols,
     }
   }
 
+  // 4. Write the factored L|U panel back to global F (the CB stays in Fs).
   WritebackFactored<T, T>(F, Fs, fsz, nc, uc, t, nt);
 
+  // 5. Extend-add this front's contribution block into its parent front.
   const int par = panel_parent[p];
   if (par < 0 || !do_extend) return;
   __syncthreads();
@@ -253,13 +261,11 @@ __global__ void FactorMid(int lbegin, int lend, const int* __restrict__ plcols,
   (void)fsz_cap;
 }
 
-// MID tier — whole-front shared-resident kernel (FactorMid). The entire
-// fsz×fsz front is staged into shared and factorized in place; TF32 runs the
-// blocked Tensor-Core trailing. The tier boundary (fsz <= kMidFrontMax = 64)
-// guarantees the whole front fits the shared budget for every precision, so
-// this never overflows. Routed deterministically by tier — no occupancy/opt-in
-// gate. Thread count follows the swept occupancy heuristic (underfilled levels
-// parallelise each front more).
+// MID tier dispatch — launch FactorMid for the active precision. The tier
+// boundary (fsz <= kMidFrontMax = 64) guarantees the whole front fits the
+// shared budget for every precision, so the staging never overflows. Routed
+// deterministically by tier. Thread count scales down as the grid fills: thin
+// levels parallelise each front more.
 static void DispatchFactorMid(const MultifrontalPlan& plan, State& st,
                               cudaStream_t stream, int b, int e,
                               const int* d_plc, const int* h_plc,
@@ -270,9 +276,8 @@ static void DispatchFactorMid(const MultifrontalPlan& plan, State& st,
   const int level_size = e - b;
   constexpr int do_extend = kFactorDoExtend;
   const int fsz_cap = max_fsz;
-  // Register-blocked trailing width (exp_260612 sweep optimum): each thread
-  // owns a 4-wide column strip of the trailing block, raising the FMA:load
-  // ratio over the scalar form.
+  // Register-blocked trailing width: each thread owns a 4-wide column strip of
+  // the trailing block, raising the FMA:load ratio over the scalar form.
   constexpr int rb_width = 4;
   (void)max_uc;
   (void)level_max_nc;
@@ -286,9 +291,9 @@ static void DispatchFactorMid(const MultifrontalPlan& plan, State& st,
       (size_t)fsz_cap * fsz_cap * element_bytes;  // whole front in shared
   const long blocks = (long)level_size * B;
   const long sms = FactorNumSms();
-  // NB: bumping the under-fill case 512->1024 threads was measured neutral
-  // (each front is dependency-latency-bound on the sequential panel-LU chain).
-  // Kept at 512. (exp_260612)
+  // Thread count scales with how full the grid is; each front is latency-bound
+  // on the serial panel-LU chain, so wider blocks add nothing once the grid
+  // saturates.
   const int threads = (blocks < sms) ? 512 : (blocks < 4 * sms ? 256 : 128);
 
   if (precision == Precision::FP64) {

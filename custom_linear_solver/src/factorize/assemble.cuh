@@ -9,9 +9,8 @@ namespace {
 
 // Batched numeric scatter — front_b[a_pos[q]] += values_b[o2c[q]].
 //   FT = front element type (double for FP64, float for FP32 / TF32).
-//   VT = input CSR value type (double or float). The value is cast to FT on
-//   scatter, so any
-//        (VT → FT) combination is valid.
+//   VT = input CSR value type (double or float).
+// The value is cast to FT on scatter, so any (VT -> FT) combination is valid.
 template <typename FT, typename VT>
 __global__ void AssembleFrontValues(int nnz_a, long front_total,
                                     const int* __restrict__ o2c,

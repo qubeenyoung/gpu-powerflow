@@ -31,11 +31,9 @@ void ParPanels(int lo, int hi, Fn&& fn) {
 // partition.
 //   In : Lp/Li (symbolic Cholesky), panels (amalgamated Supernodes).
 //   Out: per-panel front_ptr/front_rows (sorted member+CB rows), panel_parent,
-//   and the
-//        extend-add map asm_ptr/asm_idx (where each CB row lands in the
+//        and the extend-add map asm_ptr/asm_idx (where each CB row lands in the
 //        parent's front).
-// Phases are parallelized across panels where independent (see the per-block
-// notes).
+// Phases are parallelized across panels where independent.
 MultifrontalSymbolic ComputeMultifrontalSymbolic(int n,
                                                  const std::vector<int>& Lp,
                                                  const std::vector<int>& Li,
@@ -50,14 +48,11 @@ MultifrontalSymbolic ComputeMultifrontalSymbolic(int n,
     return mf;
   }
 
-  // Front rows = sorted union of the panel's member columns' L structures. The
-  // marker `mark[i]==p` dedups within a panel; L is lower-triangular so every
-  // row i >= the member column index >= panel's first column -> the panel's own
-  // (contiguous) columns sort to the front, CB rows follow.
-  // Phase 1 (parallel): each panel's front-rows depend only on read-only L. A
-  // PER-THREAD marker array (mark[i]==p dedups within a panel; p is monotonic
-  // in a chunk) makes panels fully independent -> byte-identical fr[p]
-  // regardless of threading. The front_ptr prefix-sum stays serial after.
+  // 1. Front rows = sorted union of the panel's member columns' L structures.
+  //    The marker `mark[i]==p` dedups within a panel; L is lower-triangular so
+  //    row i >= member column >= panel's first column, hence the panel's own
+  //    contiguous columns sort to the front and CB rows follow. A per-thread
+  //    marker array keeps panels independent -> result is threading-invariant.
   std::vector<std::vector<int>> fr(P);
   ParPanels(0, P, [&](int plo, int phi) {
     std::vector<int> mark(
@@ -78,6 +73,7 @@ MultifrontalSymbolic ComputeMultifrontalSymbolic(int n,
       std::sort(rows.begin(), rows.end());
     }
   });
+  // 2. Prefix-sum front sizes, then flatten each panel's rows into front_rows.
   for (int p = 0; p < P; ++p)
     mf.front_ptr[p + 1] = mf.front_ptr[p] + static_cast<int>(fr[p].size());
 
@@ -89,9 +85,9 @@ MultifrontalSymbolic ComputeMultifrontalSymbolic(int n,
     }
   });
 
-  // Panel parent = the panel owning the first CB row (the Etree parent of the
-  // panel's last column is exactly that smallest sub-front row). Roots have no
-  // CB.
+  // 3. Panel parent = the panel owning the first CB row (the Etree parent of
+  //    the panel's last column is exactly that smallest sub-front row); also
+  //    size the per-panel asm_idx ranges. Roots have no CB.
   for (int p = 0; p < P; ++p) {
     const int start = mf.front_ptr[p];
     const int nc = panels.ncols[p];
@@ -101,11 +97,10 @@ MultifrontalSymbolic ComputeMultifrontalSymbolic(int n,
     mf.asm_ptr[p + 1] = mf.asm_ptr[p] + (mf.front_ptr[p + 1] - start - nc);
   }
 
-  // Extend-add map: position of each CB row of P inside its parent's front_rows
-  // (binary search; both are sorted). -1 flags an invariant violation.
-  // Phase 4 (parallel): each panel writes a DISJOINT asm_idx[mf.asm_ptr[p]..)
-  // range and only reads its parent's (already-final) front_rows -> race-free
-  // across panels.
+  // 4. Extend-add map: position of each CB row of P inside its parent's
+  //    front_rows (binary search; both sorted). -1 flags an invariant
+  //    violation. Each panel writes a disjoint asm_idx range and only reads its
+  //    parent's already-final front_rows, so this is race-free across panels.
   mf.asm_idx.assign(static_cast<std::size_t>(mf.asm_ptr[P]), -1);
   ParPanels(0, P, [&](int plo, int phi) {
     for (int p = plo; p < phi; ++p) {

@@ -16,39 +16,29 @@ namespace custom_linear_solver {
 // Warp width on all supported architectures.
 inline constexpr int kWarpSize = 32;
 
-// ── Front-size tiers (3)
-// ─────────────────────────────────────────────────────────────────────────
-// Each tier routes to ONE dedicated factor kernel; the kernel is a
-// deterministic function of front size — no occupancy/opt-in gating decides
-// which kernel runs. Two boundaries, both physical:
+// Front-size tiers (3). Each tier routes to ONE dedicated factor kernel as a
+// deterministic function of front size; no occupancy/opt-in gating decides
+// which kernel runs.
 //
-//   small (fsz <= kSmallFrontMax=32)  -> warp-packed sub-group kernel
-//   (FactorSmall) mid   (fsz <= kMidFrontMax=64)    -> whole-front
-//   shared-resident, 1 block/front (FactorMid) big   (fsz > 64) ->
-//   global-resident; L/U panel tiles staged; ONE front spread
-//                                        across MANY blocks (pivot + panel +
-//                                        trailing multi-block) (FactorBig)
+//   small (fsz <= 32) -> warp-packed sub-group kernel (FactorSmall)
+//   mid   (fsz <= 64) -> whole-front shared-resident, 1 block/front (FactorMid)
+//   big   (fsz >  64) -> global-resident; L/U panel tiles staged; ONE front
+//                        spread across MANY blocks (FactorBig)
 //
-// Rationale per boundary:
+// Boundary rationale (both physical):
 //   small|mid = warp width (32): sub-group packing (8/16/32 lanes per front)
-//   only lives inside one
-//                warp; below it, warp-per-front + __syncwarp beats a
-//                block-per-front kernel that would idle most threads and pay a
-//                full block barrier on the tens of thousands of Leaf fronts.
+//                lives inside one warp; below it, warp-per-front + __syncwarp
+//                beats a block-per-front kernel that idles most threads and pays
+//                a full block barrier on the many Leaf fronts.
 //   mid|big   = whole-front shared occupancy crossover (64): whole-front
-//   staging costs fsz²·elem of
-//                shared, so beyond ~64 the footprint drops occupancy below ~2
-//                blocks/SM. The big tier keeps the front in global and stages
-//                only small tiles, spreading one front's work across many
-//                blocks — fills the GPU when fronts are few/large, and absorbs
-//                fronts too large to be shared-resident at all (FEM/circuit
-//                root separators).
+//                staging costs fsz²·elem of shared, so beyond ~64 the footprint
+//                drops occupancy below ~2 blocks/SM. The big tier keeps the
+//                front in global and stages only small tiles, spreading one
+//                front's work across many blocks — fills the GPU when fronts are
+//                few/large and absorbs fronts too large to be shared-resident at
+//                all (FEM/circuit root separators).
 //
-// HISTORY (2026-06-18): a former 4-tier scheme had big=panel-resident (65–111)
-// + large=global (>111). A measured A/B collapsed it: the panel-resident tier
-// gave ~1.2% at batch (the old §07 −9.3% no longer reproduces) and was 16%
-// SLOWER than the global multi-block kernel for 65–111 fronts at B=1. So 65–111
-// was folded into the global kernel and "large" was renamed "big".
+// 65–111 fronts run the global big kernel (faster than a panel-resident tier);
 // WholeFrontSharedMax() survives only as the big kernel's bounded-shared
 // staging threshold.
 
@@ -71,33 +61,22 @@ inline constexpr int kTensorCorePivotColumnCap = 32;
 
 // Fronts with fsz <= this run the LuMidFront fused (Phase 1+2+3) path inside
 // the mid kernel; larger fronts run the blocked panel-LU / U-Solve / trailing.
-// Big fronts are always > this. (Was a scattered literal 48 in
-// Factorize/{mid,big}.cuh — consolidated here.)
+// Big fronts are always > this.
 inline constexpr int kFusedMidFrontMax = 48;
 
-// TC-eligibility caps for the TF32 trailing path (mid + big). Relaxed defaults
-// (2026-06-11): nearly every mid/big front takes the tensor-core path — the
-// uc>256 spine fronts that used to fall to scalar (the L25 Factorize spike) now
-// run TF32 too. Override via -D for A/Bs. Shared-budget bound: the whole-front
-// staging is (2·uc_pad·nc_pad + 4·nc_pad)·4 B ≤ 99 KiB opt-in, i.e.
-// uc_pad·nc_pad ≤ ~12.6 K. With nc cap 32 that allows uc up to 384; UC_CAP=512
-// is safe for nc≤24 (power-grid Jacobians have nc≤16, so 512 leaves ~35 %
-// headroom). The max_uc clamp in front_range_caps.hpp tracks CLS_TC_UC_CAP so
-// the dispatch sizes shared consistently (no OOB).
-#ifndef CLS_TC_UC_CAP
-#define CLS_TC_UC_CAP \
-  512  // max contribution dim (uc) eligible for the TF32 mma trailing
-#endif
-#ifndef CLS_TC_NC_MIN
-#define CLS_TC_NC_MIN 1  // mid: min pivot cols (K) for the blocked TF32 path
-#endif
-#ifndef CLS_TC_UC_MIN
-#define CLS_TC_UC_MIN 1  // mid: min uc for the blocked TF32 path
-#endif
-#ifndef CLS_TC_FSZ_MIN
-#define CLS_TC_FSZ_MIN \
-  32  // mid: min front size for the blocked TF32 path (mid starts at 33)
-#endif
+// TC-eligibility cap for the TF32 trailing path (mid + big): the largest
+// contribution dim (uc) whose padded L/U staging still fits the shared budget.
+//
+// HARDWARE-derived bound, not a tuning knob: whole-front staging is
+// (2·uc_pad·nc_pad + 4·nc_pad)·4 B and must fit kDynamicSharedMemoryOptInBytes
+// (99 KiB on sm_86), giving uc_pad·nc_pad <= ~12.6 K; with nc cap 32, 512 is
+// safe for nc<=24. MUST be re-derived if kDynamicSharedMemoryOptInBytes changes.
+// The max_uc clamp in front_range_caps.hpp tracks it so the dispatch sizes
+// shared consistently (no OOB).
+//
+// Only gate is "shape fits the staging budget": nc <= kTensorCorePivotColumnCap,
+// uc <= this. (uc=0 fronts run the TC path as a no-op trailing.)
+inline constexpr int kTensorCoreUcCap = 512;
 
 // Opt-in dynamic shared-memory size passed to
 // cudaFuncAttributeMaxDynamicSharedMemorySize for the shared-resident kernels
@@ -135,8 +114,7 @@ inline FrontTier ClassifyFrontTier(int front_size, bool fp64) {
   (void)fp64;
   if (front_size <= kSmallFrontMax) return FrontTier::kSmall;
   if (front_size <= kMidFrontMax) return FrontTier::kMid;
-  return FrontTier::kBig;  // fsz > 64: global-resident multi-block (was large
-                           // tier)
+  return FrontTier::kBig;  // fsz > 64: global-resident multi-block
 }
 
 // Number of dispatch tiers (== number of dedicated kernels). The Analyze-time

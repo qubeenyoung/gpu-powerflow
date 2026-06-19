@@ -16,7 +16,6 @@ option(CLS_BUILD_CUDA_OPS "Build the CUDA multifrontal factor/solve kernels" ON)
 #      CUPF_ENABLE_CUDA_GRAPH.
 option(CLS_INTERNAL_GRAPH "Capture factor/solve into internal CUDA graphs" ON)
 option(CLS_BUILD_SCRIPTS "Build custom_linear_solver command-line scripts" ON)
-option(CLS_BUILD_CUDSS_SCRIPT "Build cuDSS command-line comparison script" OFF)
 
 set(CLS_CUDA_ARCHITECTURES "86" CACHE STRING
   "CUDA architectures for custom_linear_solver_ops; must be >= 80 for TF32 mma")
@@ -103,44 +102,5 @@ if(CLS_BUILD_CUDA_OPS)
       CUDA_ARCHITECTURES "${CLS_CUDA_ARCHITECTURES}"
       CUDA_SEPARABLE_COMPILATION OFF
     )
-
-    if(CLS_BUILD_CUDSS_SCRIPT)
-      find_path(CUDSS_INCLUDE_DIR
-        NAMES cuDSS.h cudss.h
-        HINTS
-          /usr/include
-          /usr/local/include
-          /usr/local/cuda/include
-          $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/cu12/include)
-      find_library(CUDSS_LIBRARY
-        NAMES cudss
-        HINTS
-          /usr/lib
-          /usr/lib/x86_64-linux-gnu
-          /usr/local/lib
-          $ENV{HOME}/.local/lib/python3.10/site-packages/nvidia/cu12/lib)
-
-      if(NOT CUDSS_INCLUDE_DIR OR NOT CUDSS_LIBRARY)
-        message(FATAL_ERROR "CLS_BUILD_CUDSS_SCRIPT=ON requires cuDSS headers/library.")
-      endif()
-      get_filename_component(CUDSS_LIBRARY_DIR "${CUDSS_LIBRARY}" DIRECTORY)
-
-      add_executable(cudss_run
-        tests/io.cpp
-        tests/run_cudss_solver.cpp
-      )
-      target_include_directories(cudss_run PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CUDSS_INCLUDE_DIR}
-      )
-      target_link_libraries(cudss_run PRIVATE
-        CUDA::cudart
-        ${CUDSS_LIBRARY}
-      )
-      set_target_properties(cudss_run PROPERTIES
-        BUILD_RPATH "${CUDSS_LIBRARY_DIR}"
-      )
-    endif()
   endif()
 endif()

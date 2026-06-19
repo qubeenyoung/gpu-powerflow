@@ -32,10 +32,10 @@ using custom_linear_solver::plan::MultifrontalPlan;
 
 namespace {
 
-// TF32 head/tail split for the two-component Ozaki product: rounds x to TF32
-// (head) and captures the rounded-off residual as a second TF32 (tail), so
-// head+tail recovers ~FP32 precision through the Tensor-Core mma. This is the
-// default — and only — TF32 trailing scheme.
+// TF32 head/tail split for the two-component Ozaki product: head is x rounded
+// to TF32, tail is the rounded-off residual as a second TF32, so head+tail
+// recovers ~FP32 precision through the Tensor-Core mma. The only TF32 trailing
+// scheme.
 struct Tf32Pair {
   unsigned h;
   unsigned t;
@@ -115,11 +115,9 @@ static int FactorNumSms() {
 //   have signalled completion. The use_multistream gate also handles the "no
 //   spine" case (spine_start_level < 0) by not enqueueing any spine levels on
 //   the main stream.
-// GPU warp-slot count (SMs × warps/SM). The tier router is deterministic (front
-// size → kernel), so this no longer gates split-vs-merge; it is used only by
-// FactorSmallSg to pick the small-tier sub-group size (pack 8/16/32 fronts
-// per warp only while the packed grid still fills the device). A pure hardware
-// quantity (device attrs), so it generalizes across matrices and GPUs.
+// GPU warp-slot count (SMs × warps/SM). Used by FactorSmallSg to pick the
+// small-tier sub-group size: pack 8/16/32 fronts per warp only while the packed
+// grid still fills the device. A pure hardware quantity (device attrs).
 static long FactorWarpFill() {
   static const long v = [] {
     int dev = 0;
@@ -194,14 +192,11 @@ __device__ __forceinline__ void LuPanelFactor(T* F, int fsz, int nc, int t,
                                               bool static_pivoting,
                                               double pivot_threshold,
                                               double pivot_shift) {
-  // Row-fused panel LU pays 1 block barrier/pivot (vs the two-phase form's 2).
-  // Barrier cost dominates the latency-bound mid kernel (exp_260612), but the
-  // row-fused form serializes the per-thread inner panel loop, which costs more
-  // on TALL fronts (more rows/thread). So take the fewer-barrier path for
-  // nc<=12 always, and extend to the panel-width cap (nc<=16, n>=16K) only when
-  // the front is short enough that the serial inner loop is cheap (measured:
-  // helps ACTIVSg25k ~3%, avoids the SyntheticUSA regression that a blanket
-  // nc<=16 cutoff caused).
+  // Row-fused panel LU pays 1 block barrier/pivot vs the two-phase form's 2,
+  // but serializes the per-thread inner panel loop, which costs more on TALL
+  // fronts. Take the fewer-barrier path for nc<=12 always, and extend to the
+  // panel-width cap (nc<=16) only when the front is short enough that the serial
+  // inner loop stays cheap.
   constexpr int ROWFUSED_NC_MAX = 12;
   constexpr int ROWFUSED_WIDE_NC = 16;   // up to the panel-width cap
   constexpr int ROWFUSED_WIDE_FSZ = 96;  // only on short fronts
@@ -284,14 +279,11 @@ __device__ __forceinline__ void UPanelSolve(T* F, int fsz, int nc, int uc,
   }
 }
 
-// Sync-free U-panel Solve (exp_260612 barrier-cut): each thread owns one U
-// column jj and forward- substitutes all nc rows in-thread (the per-row
-// dependency lives inside the thread). The nc block barriers of the
-// row-parallel form above collapse to ONE barrier (caller-side, before the
-// trailing update reads U). Same column parallelism (uc / nt) and same
-// arithmetic; only the barriers change. Wins when the front is barrier-bound
-// (deep under-filled levels, low occupancy). Numerically identical to
-// UPanelSolve (same op order per element).
+// Barrier-cut U-panel Solve: each thread owns one U column jj and forward-
+// substitutes all nc rows in-thread (the per-row dependency lives inside the
+// thread), so the row-parallel form's nc barriers collapse to ONE caller-side
+// barrier before the trailing reads U. Same column parallelism and op order as
+// UPanelSolve (numerically identical); wins when the front is barrier-bound.
 template <typename T>
 __device__ __forceinline__ void UPanelSolveFewsync(T* F, int fsz, int nc,
                                                    int uc, int t, int nt) {
@@ -322,13 +314,10 @@ __device__ __forceinline__ void TrailingUpdateScalar(T* F, int fsz, int nc,
   }
 }
 
-// Register-blocked trailing (exp_260612): the scalar version does 1 FMA per 2
-// strided shared loads with a per-iteration k*fsz address → ~5% FMA throughput
-// (latency/overhead bound, not compute bound). Here each thread owns one row ii
-// and a contiguous MR-wide column strip: L[ii,k] is loaded ONCE per k and
-// reused across MR outputs, and U[k, jj0..) is read contiguously, so the
-// FMA:load ratio rises from 1:2 to MR:(1+MR) and the strided address is
-// amortized over MR outputs.
+// Register-blocked trailing: each thread owns one row ii and a contiguous
+// MR-wide column strip. L[ii,k] is loaded once per k and reused across MR
+// outputs, U[k, jj0..) is read contiguously, so the FMA:load ratio rises from
+// 1:2 (scalar) to MR:(1+MR) and the strided address amortizes over MR outputs.
 template <typename T, int MR>
 __device__ __forceinline__ void TrailingUpdateRb(T* F, int fsz, int nc, int uc,
                                                  int t, int nt) {

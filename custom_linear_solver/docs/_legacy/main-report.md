@@ -1,6 +1,6 @@
 # custom_linear_solver — 통합 리포트
 
-> **상태**: canonical (storyline · contribution-analysis · main-report 통합본)   **갱신**: 2026-06-16
+> **상태**: canonical (storyline · contribution-analysis · main-report 통합본)   **갱신**: 2026-06-18
 > **한 줄**: 전력망 Jacobian 의 비효율은 *front 가 작다* 는 한 성질에서 나온다. 개별 GPU 기법은 전부 선행연구에
 > 있지만, **head-to-head 에서 일반/벤더 솔버보다 동일 정밀도로 16–66× 빠르다.** 그 격차의 정체는 — packing 과
 > full-front fusion 이라는 *합쳐질 수 없는 두 입도*를 **sub-group 분해**로 해소해 둘을 한 커널에서 동시에 달성,

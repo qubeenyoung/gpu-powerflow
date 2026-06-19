@@ -35,6 +35,11 @@ struct PlanBuildOptions {
   bool use_matching = false;
   bool use_parallel_nested_dissection = true;
   int metis_seed = 42;
+  // Parallel-ND tuning (used only when use_parallel_nested_dissection): recursion
+  // depth + base-case thresholds (small for n < ~20k, large for bigger graphs).
+  int parallel_nd_depth = 4;
+  int parallel_nd_base_small = 4000;
+  int parallel_nd_base_large = 20000;
   int max_panel_width = 8;
   bool float_front =
       false;  // true if the factor/Solve front is float (FP32 / TF32);

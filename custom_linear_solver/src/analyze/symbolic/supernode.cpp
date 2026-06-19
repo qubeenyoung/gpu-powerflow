@@ -16,6 +16,7 @@ SupernodePartition Supernodes(int n, const std::vector<int>& parent,
     return sp;
   }
 
+  // Count each node's children (single-child is the merge precondition).
   std::vector<int> nchild(n, 0);
   for (int j = 0; j < n; ++j) {
     if (parent[j] != -1) {
@@ -23,6 +24,7 @@ SupernodePartition Supernodes(int n, const std::vector<int>& parent,
     }
   }
 
+  // Walk Postorder; start a new supernode unless the previous node nests.
   int id = -1;
   for (int k = 0; k < n; ++k) {
     const int j = post[k];
@@ -60,13 +62,11 @@ PanelPartition RelaxedPanels(int n, const std::vector<int>& parent,
   if (cap < 1) {
     cap = 1;
   }
-  // Tensor-core-oriented deep-K amalgamation belongs in the Analyze path. A
-  // naive "merge any consecutive columns" version is invalid -- a child's
-  // contribution block must nest in one parent front -- so RelaxedPanels
-  // itself only does the safe chain merge below. Postorder index space: an
-  // Etree chain is a run of consecutive columns with parent[j]==j+1. Greedily
-  // extend a panel along such a chain until it would exceed `cap` columns; the
-  // panel's dense block is padded to its widest member (max colcount), so
+
+  // Merge only along an Etree chain (parent[j]==j+1 in Postorder index space)
+  // so each child's contribution block still nests in one parent front. Greedily
+  // extend a panel along the chain until it would exceed `cap` columns; the
+  // dense block is padded to the panel's widest member, so
   // padded_fill = Σ ncols*width is the dense storage cost.
   for (int j = 0; j < n;) {
     const int start = j;

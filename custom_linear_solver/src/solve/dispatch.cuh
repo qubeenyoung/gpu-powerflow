@@ -56,12 +56,11 @@ static long SolveWarpFill() {
   return v;
 }
 
-// Workload-based mapping gate, mirrors the Factorize schedule. The small tier's
-// parallelism is (level front count × batch). When it saturates the GPU warp
-// capacity, pack fronts into warps (one warp per front); when it under-fills
-// (narrow levels) fall through to the block-per-front path (more threads/front)
-// instead. fp32 fronts are lighter so they fill with fewer fronts → count fp32
-// ×2.
+// Workload gate mirroring the Factorize schedule: small-tier parallelism is
+// (level front count x batch). Pack fronts into warps when that work saturates
+// GPU warp capacity; under-filled (narrow) levels fall through to the
+// block-per-front path with more threads/front. fp32 fronts are lighter, so
+// count them x2.
 static bool SolveSmallPacks(int level_size, int B, bool fp64) {
   const long work = (long)level_size * B;
   const long eff_work = fp64 ? work : work * 2;
@@ -240,7 +239,7 @@ static void FwdLevel(const MultifrontalPlan& plan, State& st, cudaStream_t ks,
   const int max_front_size = metrics.max_fsz;
 
   // Small tier: sub-group-packed warp kernel (fronts_per_warp =
-  // kWarpSize/sub_group_size fronts per warp).
+  // kWarpSize/sub_group_size fronts per warp). Returns once launched.
   if (ClassifyFrontTier(max_front_size, !float_front) == FrontTier::kSmall &&
       SolveSmallPacks(e - b, B, !float_front)) {
     const long warps_unpacked = (long)(e - b) * B;
@@ -272,10 +271,14 @@ static void FwdLevel(const MultifrontalPlan& plan, State& st, cudaStream_t ks,
   const int threads_per_block =
       SolveRegularThreads(max_front_size, e - b, metrics.level_max_nc, B);
   const dim3 fg(e - b, B);
-  // P3: dynamic shared for the staged L panel (rows × cols[0,nc), upper-bounded
-  // by level maxes).
+
+  // Dynamic shared for the staged L panel (rows x cols[0,nc), upper-bounded by
+  // level maxes).
   const size_t fwd_panel_shared =
       (size_t)max_front_size * metrics.level_max_nc * element_bytes;
+
+  // Resolve the fixed-nc specialization (B=1 only) and whether the range is
+  // exactly that nc; specialized kernels compile-time-unroll the panel loops.
   const int fixed_nc =
       SolveRegularFixedNcChoice(plan, h_plc, b, e, metrics.level_max_nc, B);
   const bool use_nc8 = fixed_nc == 8;
@@ -288,6 +291,9 @@ static void FwdLevel(const MultifrontalPlan& plan, State& st, cudaStream_t ks,
   const bool exact_nc14 = use_nc14 && SolveRangeAllNc(plan, h_plc, b, e, 14);
   const bool exact_nc16 = false;
   const bool exact_nc20 = use_nc20 && SolveRangeAllNc(plan, h_plc, b, e, 20);
+
+  // Route to fixed-nc, non-staged (panel too large for shared), or dynamic
+  // staged forward kernels, by front type.
   if (float_front) {
     if (use_nc8)
       LaunchSolveFwdFixed<float, 8>(exact_nc8, fg, threads_per_block, ks, b, e,
@@ -358,14 +364,15 @@ static void BwdLevel(const MultifrontalPlan& plan, State& st, cudaStream_t ks,
   const FrontRangeCaps metrics = ScanFrontRange(plan, h_plc, b, e);
   const int max_front_size = metrics.max_fsz;
   const int max_contribution = metrics.level_max_uc;
-  // P3: regular SolveBwd<T> stages the top-nc U rows (≤ max_fsz·level_max_nc)
-  // plus the x cache.
+
+  // Regular SolveBwd<T> stages the top-nc U rows (<= max_fsz*level_max_nc) plus
+  // the x cache.
   const size_t bwd_panel_shared =
       (size_t)(max_front_size * metrics.level_max_nc + max_contribution) *
       element_bytes;
 
   // Small tier: sub-group-packed warp kernel. slab = kMaxPivotColumns (rhs) +
-  // max_contribution (x cache).
+  // max_contribution (x cache). Returns once launched.
   if (ClassifyFrontTier(max_front_size, !float_front) == FrontTier::kSmall &&
       SolveSmallPacks(e - b, B, !float_front)) {
     const long warps_unpacked = (long)(e - b) * B;
@@ -398,6 +405,7 @@ static void BwdLevel(const MultifrontalPlan& plan, State& st, cudaStream_t ks,
   const int threads_per_block =
       SolveRegularThreads(max_front_size, e - b, metrics.level_max_nc, B);
   const dim3 bg(e - b, B);
+
   const int fixed_nc =
       SolveRegularFixedNcChoice(plan, h_plc, b, e, metrics.level_max_nc, B);
   const bool use_nc8 = fixed_nc == 8;
@@ -410,6 +418,8 @@ static void BwdLevel(const MultifrontalPlan& plan, State& st, cudaStream_t ks,
   const bool exact_nc14 = use_nc14 && SolveRangeAllNc(plan, h_plc, b, e, 14);
   const bool exact_nc16 = false;
   const bool exact_nc20 = use_nc20 && SolveRangeAllNc(plan, h_plc, b, e, 20);
+
+  // Route to fixed-nc, non-staged, or staged backward kernels, by front type.
   if (float_front) {
     if (use_nc8) {
       if (exact_nc8)
@@ -621,6 +631,8 @@ static void BwdSpine(const MultifrontalPlan& plan, State& st, cudaStream_t ks) {
         plan.front_total, plan.num_rows);
 }
 
+// Spine fwd+bwd. Wide blocks split into two kernels (each needs full-block
+// sync); narrow blocks fuse both sweeps in one fused-spine kernel.
 static void SolveSpineChain(const MultifrontalPlan& plan, State& st,
                             cudaStream_t ks) {
   const int n_spine = (int)plan.h_spine_panels.size();
@@ -677,13 +689,13 @@ static void SolveMultistreamSweep(const MultifrontalPlan& plan, State& st,
   const int spine_lo =
       (plan.spine_start_level >= 0) ? plan.spine_start_level : plan.num_plevels;
 
-  // ---- Forward fork ----
+  // 1. Forward fork: each subtree stream waits on the main-stream fork event.
   cudaEventRecord(static_cast<cudaEvent_t>(st.fork_event), stream);
   for (int k = 0; k < K; ++k)
     cudaStreamWaitEvent(static_cast<cudaStream_t>(st.subtree_streams[k]),
                         static_cast<cudaEvent_t>(st.fork_event), 0);
 
-  // Per-subtree forward sweep over pre-spine levels.
+  // 2. Per-subtree forward sweep over pre-spine levels.
   for (int k = 0; k < K; ++k) {
     cudaStream_t ks = static_cast<cudaStream_t>(st.subtree_streams[k]);
     const int* off =
@@ -703,18 +715,19 @@ static void SolveMultistreamSweep(const MultifrontalPlan& plan, State& st,
     cudaEventRecord(static_cast<cudaEvent_t>(st.join_events[k]), ks);
   }
 
-  // ---- Forward join, spine forward on main, then backward re-fork ----
+  // 3. Forward join, then run the spine fwd+bwd on the main stream.
   for (int k = 0; k < K; ++k)
     cudaStreamWaitEvent(stream, static_cast<cudaEvent_t>(st.join_events[k]), 0);
 
   if (spine_lo < plan.num_plevels) SolveSpineChain(plan, st, stream);
 
+  // 4. Backward re-fork: subtree streams wait on the main-stream fork event.
   cudaEventRecord(static_cast<cudaEvent_t>(st.fork_event), stream);
   for (int k = 0; k < K; ++k)
     cudaStreamWaitEvent(static_cast<cudaStream_t>(st.subtree_streams[k]),
                         static_cast<cudaEvent_t>(st.fork_event), 0);
 
-  // Per-subtree backward sweep over pre-spine levels (top -> bottom).
+  // 5. Per-subtree backward sweep over pre-spine levels (top -> bottom).
   for (int k = 0; k < K; ++k) {
     cudaStream_t ks = static_cast<cudaStream_t>(st.subtree_streams[k]);
     const int* off =
@@ -734,6 +747,7 @@ static void SolveMultistreamSweep(const MultifrontalPlan& plan, State& st,
     cudaEventRecord(static_cast<cudaEvent_t>(st.join_events[k]), ks);
   }
 
+  // 6. Backward join back onto the main stream.
   for (int k = 0; k < K; ++k)
     cudaStreamWaitEvent(stream, static_cast<cudaEvent_t>(st.join_events[k]), 0);
 }
@@ -749,6 +763,8 @@ static void SolveSingleStreamSweep(const MultifrontalPlan& plan, State& st,
       (plan.spine_start_level >= 0 && !plan.h_spine_panels.empty())
           ? plan.spine_start_level
           : plan.num_plevels;
+
+  // 1. Forward sweep (leaves->root) over pre-spine levels.
   for (int L = 0; L < spine_lo; ++L) {
     if (have_lvl)
       DispatchTiered(plan, st, stream, lvl_tb + (long)L * (NT + 1),
@@ -759,7 +775,11 @@ static void SolveSingleStreamSweep(const MultifrontalPlan& plan, State& st,
                plan.panel_level_ptr[L + 1], plan.d_plcols,
                plan.h_plcols.data());
   }
+
+  // 2. Spine fwd+bwd.
   if (spine_lo < plan.num_plevels) SolveSpineChain(plan, st, stream);
+
+  // 3. Backward sweep (root->leaves) over pre-spine levels.
   for (int L = spine_lo - 1; L >= 0; --L) {
     if (have_lvl)
       DispatchTiered(plan, st, stream, lvl_tb + (long)L * (NT + 1),

@@ -184,6 +184,7 @@ Status BuildSymmetricGraphDevice(const DeviceCscPattern& csc,
   const long long N = n;
   const long total = 2L * nnz;
 
+  // 1. Emit both directed edge keys for every CSC entry.
   unsigned long long* d_keys = nullptr;
   if (cudaMalloc(&d_keys, static_cast<std::size_t>(total) *
                               sizeof(unsigned long long)) != cudaSuccess)
@@ -195,9 +196,9 @@ Status BuildSymmetricGraphDevice(const DeviceCscPattern& csc,
     return Status::kAnalysisFailed;
   }
 
-  // Sort all directed edge keys, collapse duplicate edges, and locate the
-  // sentinel block (diagonal/invalid entries) that sorts to the high end -> m =
-  // real directed edges.
+  // 2. Sort all directed edge keys, collapse duplicate edges, and locate the
+  //    sentinel block (diagonal/invalid entries) that sorts to the high end ->
+  //    m = real directed edges.
   thrust::sort(thrust::device, d_keys, d_keys + total);
   unsigned long long* uend =
       thrust::unique(thrust::device, d_keys, d_keys + total);
@@ -207,6 +208,7 @@ Status BuildSymmetricGraphDevice(const DeviceCscPattern& csc,
       thrust::lower_bound(thrust::device, d_keys, d_keys + uniq, SENT);
   const long m = static_cast<long>(sent_it - d_keys);
 
+  // 3. Decode the unique keys into neighbor indices and per-source degrees.
   int* d_adjncy = nullptr;
   int* d_deg = nullptr;
   if (cudaMalloc(&d_adjncy, static_cast<std::size_t>(std::max(1L, m)) *
@@ -232,15 +234,14 @@ Status BuildSymmetricGraphDevice(const DeviceCscPattern& csc,
   }
   cudaFree(d_keys);
 
-  // xadj = exclusive scan of per-vertex degree. deg[src] was tallied at slot
-  // src; build the (n+1) offset array by shifting the inclusive scan of
-  // deg[0..n).
+  // 4. Build xadj as the exclusive scan of per-vertex degree on the host.
   std::vector<int> deg(static_cast<std::size_t>(n) + 1, 0);
   cudaMemcpy(deg.data(), d_deg, (static_cast<std::size_t>(n) + 1) * sizeof(int),
              cudaMemcpyDeviceToHost);
   cudaFree(d_deg);
   for (int v = 0; v < n; ++v) xadj[v + 1] = xadj[v] + deg[v];
 
+  // 5. Download the decoded adjacency list to host.
   adjncy.resize(static_cast<std::size_t>(m));
   if (m > 0)
     cudaMemcpy(adjncy.data(), d_adjncy,
@@ -304,6 +305,7 @@ Status BuildCscFromCsrDevice(int n, int nnz, const int* d_csr_row_ptr,
   if (n <= 0 || nnz < 0 || d_csr_row_ptr == nullptr || d_csr_col_idx == nullptr)
     return Status::kInvalidValue;
 
+  // Allocate the CSC output buffers.
   csc.col_ptr.reset();
   csc.row_idx.reset();
   csc.source_pos.reset();
@@ -317,6 +319,7 @@ Status BuildCscFromCsrDevice(int n, int nnz, const int* d_csr_row_ptr,
   st = csc.source_pos.allocate(static_cast<std::size_t>(nnz));
   if (st != Status::kSuccess) return st;
 
+  // 1. Count per-column nnz.
   IntDeviceBuffer counts;
   st = counts.allocate(static_cast<std::size_t>(n) + 1);
   if (st != Status::kSuccess) return st;
@@ -330,9 +333,11 @@ Status BuildCscFromCsrDevice(int n, int nnz, const int* d_csr_row_ptr,
       nnz, d_csr_col_idx, counts.ptr);
   if (cudaGetLastError() != cudaSuccess) return Status::kAnalysisFailed;
 
+  // 2. Scan counts into column pointers.
   thrust::inclusive_scan(thrust::device, counts.ptr, counts.ptr + n + 1,
                          csc.col_ptr.ptr);
 
+  // 3. Scatter CSR entries into CSC slots using a per-column write cursor.
   IntDeviceBuffer next_col;
   st = next_col.allocate(static_cast<std::size_t>(n) + 1);
   if (st != Status::kSuccess) return st;
@@ -358,6 +363,7 @@ Status PermuteCscDevice(const DeviceCscPattern& csc, const int* d_iperm,
       d_iperm == nullptr)
     return Status::kInvalidValue;
 
+  // Allocate the ordered CSC output buffers.
   ordered.col_ptr.reset();
   ordered.row_idx.reset();
   ordered.source_pos.reset();
@@ -371,6 +377,7 @@ Status PermuteCscDevice(const DeviceCscPattern& csc, const int* d_iperm,
   st = ordered.source_pos.allocate(static_cast<std::size_t>(csc.nnz));
   if (st != Status::kSuccess) return st;
 
+  // 1. Count each permuted column's nnz.
   IntDeviceBuffer counts;
   st = counts.allocate(static_cast<std::size_t>(csc.n) + 1);
   if (st != Status::kSuccess) return st;
@@ -384,9 +391,11 @@ Status PermuteCscDevice(const DeviceCscPattern& csc, const int* d_iperm,
       csc.n, csc.col_ptr.ptr, d_iperm, counts.ptr);
   if (cudaGetLastError() != cudaSuccess) return Status::kAnalysisFailed;
 
+  // 2. Scan into the ordered column pointers.
   thrust::inclusive_scan(thrust::device, counts.ptr, counts.ptr + csc.n + 1,
                          ordered.col_ptr.ptr);
 
+  // 3. Copy and relabel each column into its permuted slot.
   FillPermutedCsc<<<csc.n, 128>>>(
       csc.n, csc.col_ptr.ptr, csc.row_idx.ptr, csc.source_pos.ptr, d_iperm,
       ordered.col_ptr.ptr, ordered.row_idx.ptr, ordered.source_pos.ptr);
@@ -400,6 +409,7 @@ Status PermuteCscDeviceRc(const DeviceCscPattern& csc, const int* d_row_iperm,
       d_row_iperm == nullptr || d_col_iperm == nullptr)
     return Status::kInvalidValue;
 
+  // Allocate the ordered CSC output buffers.
   ordered.col_ptr.reset();
   ordered.row_idx.reset();
   ordered.source_pos.reset();
@@ -413,6 +423,7 @@ Status PermuteCscDeviceRc(const DeviceCscPattern& csc, const int* d_row_iperm,
   st = ordered.source_pos.allocate(static_cast<std::size_t>(csc.nnz));
   if (st != Status::kSuccess) return st;
 
+  // 1. Count each permuted column's nnz (column maps through col_iperm).
   IntDeviceBuffer counts;
   st = counts.allocate(static_cast<std::size_t>(csc.n) + 1);
   if (st != Status::kSuccess) return st;
@@ -426,9 +437,11 @@ Status PermuteCscDeviceRc(const DeviceCscPattern& csc, const int* d_row_iperm,
       csc.n, csc.col_ptr.ptr, d_col_iperm, counts.ptr);
   if (cudaGetLastError() != cudaSuccess) return Status::kAnalysisFailed;
 
+  // 2. Scan into the ordered column pointers.
   thrust::inclusive_scan(thrust::device, counts.ptr, counts.ptr + csc.n + 1,
                          ordered.col_ptr.ptr);
 
+  // 3. Copy each column into its permuted slot, remapping rows via row_iperm.
   FillPermutedCscRc<<<csc.n, 128>>>(
       csc.n, csc.col_ptr.ptr, csc.row_idx.ptr, csc.source_pos.ptr, d_row_iperm,
       d_col_iperm, ordered.col_ptr.ptr, ordered.row_idx.ptr,

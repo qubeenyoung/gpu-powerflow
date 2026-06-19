@@ -7,15 +7,20 @@ namespace custom_linear_solver {
 using custom_linear_solver::plan::MultifrontalPlan;
 
 State::~State() {
+  // Destroy captured graphs.
   if (factor_graph_exec)
     cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(factor_graph_exec));
   if (full_solve_graph_exec)
     cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(full_solve_graph_exec));
+
+  // Free device arenas.
   if (d_front_batch) cudaFree(d_front_batch);
   if (d_front_batch_f) cudaFree(d_front_batch_f);
   if (d_y_batch) cudaFree(d_y_batch);
   if (d_y_batch_f) cudaFree(d_y_batch_f);
   if (d_sing) cudaFree(d_sing);
+
+  // Tear down subtree streams and their fork/join events.
   if (fork_event) cudaEventDestroy(static_cast<cudaEvent_t>(fork_event));
   for (int k = 0; k < num_subtree_streams; ++k) {
     if (join_events[k])

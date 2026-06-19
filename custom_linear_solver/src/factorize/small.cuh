@@ -12,18 +12,20 @@ using custom_linear_solver::plan::MultifrontalPlan;
 
 namespace {
 
-// SG = sub-group lane count (8 / 16 / 32). One sub-group of SG lanes owns one
-// front; SG=32 is the classic one-warp-per-front form. `sl` is the lane within
-// the sub-group (0..SG-1) and `mask` the sub-group's active-lane mask. Small
-// fronts (fsz ≤ SG) keep all SG lanes busy instead of idling 32−fsz of a warp,
-// and packing 32/SG fronts per warp raises memory-level parallelism on this
-// latency-bound tier (see Factorize/schedule.cuh).
+// Fused panel LU + trailing update for one front, run by a single sub-group.
+// SG = sub-group lane count (8 / 16 / 32); SG=32 is the classic one-warp-per-
+// front form. `sl` is the lane within the sub-group (0..SG-1) and `mask` its
+// active-lane mask. Packing small fronts (fsz <= SG) into SG-lane groups keeps
+// every lane busy instead of idling 32-fsz of a warp, raising memory-level
+// parallelism on this latency-bound tier.
 template <typename FT, int SG>
 __device__ __forceinline__ void LuSmallWarp(FT* F, int fsz, int nc, int sl,
                                             unsigned mask, int* sing,
                                             bool static_pivoting,
                                             double pivot_threshold,
                                             double pivot_shift) {
+  // Right-looking LU: for each pivot column scale L below the diagonal, then
+  // rank-1 update the trailing submatrix.
   for (int k = 0; k < nc; ++k) {
     const long diag = (long)k * fsz + k;
     FT piv = GuardedPivot(F[diag], static_pivoting, pivot_threshold,
@@ -40,39 +42,21 @@ __device__ __forceinline__ void LuSmallWarp(FT* F, int fsz, int nc, int sl,
   }
 }
 
-// =======================================================================================
-//  SMALL tier  —  one warp per (front, batch); W warps per block
-// =======================================================================================
+// SMALL tier — one sub-group per (front, batch); warps packed per block.
 //
-// Used when the level's max_fsz ≤ kSmallFrontMax (see Factorize/schedule.cuh).
+// Used when the level's max_fsz <= kSmallFrontMax. Leaf fronts are small
+// (fsz <~ 30, nc <~ 8) but numerous, so a full block per front would idle most
+// threads and pay a __syncthreads on every rank-1 step. Instead each sub-group
+// factors a whole front with __syncwarp, and 32/sub_group_size sub-groups pack
+// per warp (kSmallTierWarpsPerBlock warps per block) to amortise launch cost
+// and overlap independent fronts' memory traffic on this latency-bound tier.
 //
-// At the leaves of the elimination tree the fronts are small (fsz ≲ 30, nc ≲ 8)
-// but numerous. A 256-thread block per front would leave most threads idle and
-// pay a full
-// __syncthreads on each rank-1 step. Instead each warp factors a whole front
-// independently using __syncwarp, and W warps are packed into one block to
-// amortise launch cost.
-//
-// Per-warp flow:
-//   1. copy fsz×fsz front from global F into per-warp shared scratch Fs
-//   (synchronous load
-//      — at this size cp.async's commit/wait overhead exceeds the latency
-//      saving).
-//   2. LuSmallWarp: fused Phase-1 panel LU + Phase-3 trailing on Fs,
-//   lane-parallel with
-//      __syncwarp.
-//   3. writeback Fs → global F (factored L | U panel only; the uc×uc CB stays
-//   in Fs).
-//   4. ExtendAdd: scatter the CB straight from shared into the parent front
-//   via atomicAdd.
-// sub_group_size = sub-group lane count (8 / 16 / 32). One sub-group of
-// sub_group_size lanes owns one (front, batch); fronts_per_warp =
-// 32/sub_group_size sub-groups (fronts) pack per warp, kSmallTierWarpsPerBlock
-// warps per block. sub_group_size=32 is the classic one-warp-per-front form.
-// The dispatcher picks sub_group_size from the level's max_fsz so the small
-// fronts (fsz ≤ 16) keep all sub_group_size lanes busy and expose
-// fronts_per_warp independent fronts' memory traffic per warp (latency hiding
-// on this memory-latency-bound tier).
+// Per-sub-group flow (numbered in the kernel body):
+//   1. copy the fsz×fsz front from global F into shared scratch Fs.
+//   2. LuSmallWarp: fused panel LU + trailing on Fs.
+//   3. writeback the factored L|U panel to global F (the uc×uc CB stays in Fs).
+//   4. ExtendAdd: scatter the CB from shared into the parent front via
+//      atomicAdd.
 template <typename FrontType, int sub_group_size>
 __global__ void FactorSmall(
     int lbegin, int level_size, int B, int front_area,
@@ -146,14 +130,13 @@ __global__ void FactorSmall(
   }
 }
 
-// Pick the small-tier sub-group size: sub_group_size ∈ {8,16,32}; packing
-// (sub_group_size<32) only applies once the packed grid still fills the GPU
-// (mirrors Solve/dispatch.cuh SolveSmallSg).
+// Pick the small-tier sub-group size sg in {8,16,32} from max_fsz (mirrors
+// Solve/dispatch.cuh SolveSmallSg). Pack (sg<32) only while the packed grid
+// still saturates the GPU; otherwise fall back to sg=32 to maximise the grid.
 static int FactorSmallSg(int max_fsz, long warps_unpacked) {
   int sg = (max_fsz <= 8) ? 8 : (max_fsz <= 16 ? 16 : 32);
-  // Pack (sg<32) only if the packed grid still fills the GPU; else sg=32 to
-  // maximise the grid. Shared fill gate (FactorSaturates) — work = packed warp
-  // count = (level_size×B)/(32/sg).
+  // Packed warp count = (level_size*B) / (32/sg); revert to sg=32 if that
+  // under-fills.
   if (!FactorSaturates(warps_unpacked / (32 / sg))) sg = 32;
   return sg;
 }
@@ -202,12 +185,10 @@ static inline void LaunchFactorSmallT(
         pivot_threshold, pivot_shift);
 }
 
-// SMALL tier: sub-group-packed kernel. One sub-group of sub_group_size lanes
-// owns one front; 32/sub_group_size fronts pack per warp, sub_group_size chosen
-// by max_fsz so the dominant small fronts keep all sub_group_size lanes busy.
-// The FactorSmallSg gate keeps the classic one-warp-per-front form
-// (sub_group_size=32) until the packed grid fills the GPU. (Within-kernel
-// launch-config only — the tier itself is fixed by front size.)
+// SMALL tier dispatch: resolve the sub-group size from max_fsz, compute the
+// packed grid and per-warp shared budget, and launch FactorSmall for the active
+// precision. sub_group_size is a launch-config choice only; the tier itself is
+// fixed by front size.
 static void DispatchFactorSmall(const MultifrontalPlan& plan, State& st,
                                 cudaStream_t stream, int b, int e,
                                 const int* d_plc, const FrontRangeCaps& caps) {

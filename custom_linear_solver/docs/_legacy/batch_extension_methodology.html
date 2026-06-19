@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>배치 확장 최적화 방법론 — B=1 → 멀티배치 GPU 멀티프론탈 솔버</title>
+<style>
+  :root{
+    --small:#2a9d8f; --mid:#e9c46a; --big:#e76f51;
+    --naive:#9aa3ad; --proper:#264653; --cudss:#9b5de5; --accent:#1d6fb8;
+    --ink:#1c2330; --mut:#5b6573; --line:#d7dde5; --bg:#ffffff; --panel:#f6f8fa;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font-family:-apple-system,"Helvetica Neue","Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+       color:var(--ink);background:var(--bg);line-height:1.7;font-size:16px}
+  .wrap{display:grid;grid-template-columns:230px minmax(0,1fr);max-width:1180px;margin:0 auto;gap:0}
+  nav{position:sticky;top:0;align-self:start;height:100vh;overflow:auto;padding:26px 16px;border-right:1px solid var(--line);font-size:13.5px}
+  nav h2{font-size:12px;letter-spacing:.06em;color:var(--mut);text-transform:uppercase;margin:0 0 10px}
+  nav a{display:block;color:var(--mut);text-decoration:none;padding:4px 8px;border-radius:6px;border-left:2px solid transparent}
+  nav a:hover{color:var(--accent);background:var(--panel)}
+  nav a.lv2{padding-left:18px;font-size:12.5px}
+  main{padding:40px 46px 120px;min-width:0}
+  h1{font-size:30px;line-height:1.3;margin:.1em 0 .2em}
+  .sub{color:var(--mut);font-size:15px;margin-bottom:30px}
+  h2.sec{font-size:23px;margin:54px 0 6px;padding-top:14px;border-top:2px solid var(--ink)}
+  h2.sec .tag{color:var(--accent);font-weight:800;margin-right:10px}
+  h3{font-size:17px;margin:30px 0 6px}
+  p{margin:.6em 0}
+  .lead{font-size:17px}
+  .key{background:var(--panel);border-left:4px solid var(--accent);padding:14px 18px;border-radius:0 8px 8px 0;margin:18px 0}
+  .key b{color:var(--accent)}
+  code,.k{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.88em;background:var(--panel);padding:1px 5px;border-radius:4px}
+  figure{margin:26px 0;padding:18px;border:1px solid var(--line);border-radius:12px;background:#fff}
+  figure svg{display:block;width:100%;height:auto}
+  figcaption{font-size:13px;color:var(--mut);margin-top:12px;border-top:1px dashed var(--line);padding-top:10px}
+  figcaption b{color:var(--ink)}
+  .claimtag{display:inline-block;font-size:11px;font-weight:700;color:#fff;background:var(--accent);border-radius:4px;padding:1px 7px;margin-right:6px;vertical-align:1px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;margin:18px 0}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel);font-weight:700}
+  td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--mut);margin:6px 0}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:13px;height:13px;border-radius:3px;display:inline-block}
+  details{margin:14px 0;border:1px solid var(--line);border-radius:8px;padding:0 14px;background:var(--panel)}
+  details>summary{cursor:pointer;font-weight:600;padding:10px 0;font-size:14px}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:880px){.wrap{grid-template-columns:1fr}nav{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}main{padding:24px}.two{grid-template-columns:1fr}}
+  .foot{color:var(--mut);font-size:12.5px;margin-top:60px;border-top:1px solid var(--line);padding-top:16px}
+</style>
+</head>
+<body>
+<svg style="position:absolute;width:0;height:0" aria-hidden="true"><defs>
+  <marker id="arh" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 Z" fill="#1c2330"/></marker>
+</defs></svg>
+<div class="wrap">
+<nav>
+  <h2>목차</h2>
+  <a href="#s1">S1 · 문제 정의</a>
+  <a href="#s2">S2 · 중심 사실: front 분포</a>
+  <a href="#s3">S3 · B=1 baseline</a>
+  <a href="#s4">S4 · naive 배치 아이디어</a>
+  <a href="#s5">S5 · 무엇이 깨지나</a>
+  <a href="#s6">S6 · tier별 원리</a>
+  <a href="#s7">S7 · work-gate</a>
+  <a href="#s8">S8 · 종합</a>
+  <a href="#s9">S9 · 논리 점검</a>
+  <a href="#appx" class="lv2">부록 · 전체 데이터</a>
+</nav>
+<main>
+  <h1>크기 구간마다 병목이 다르다<br><span style="font-size:18px;font-weight:500;color:var(--mut)">GPU 멀티프론탈 LU 솔버의 B=1 → 멀티배치 확장 방법론</span></h1>
+  <p class="sub">RTX 3090 (sm_86) · CUDA 12.8 · locked clock · power-grid Jacobian 9케이스 · fp32 · forward 유도 + direct 측정 + 축 deconfound</p>
+
+  <div class="key lead">
+    한 문장 요약: <b>B&gt;1에서 GPU를 채우는 것(포화)은 필요조건일 뿐이다. 각 front 크기 구간은 서로 다른 병목에 묶이고,
+    그 병목을 ncu로 직접 측정해 구간별로 다른 커널이 겨냥한다.</b>
+    <b style="color:var(--small)">tiny(98%) = block 낭비 + barrier</b> →
+    <b style="color:var(--mid)">mid = global-load 레이턴시</b> →
+    <b style="color:var(--big)">big = under-fill</b>. 단일 슬로건("granularity ∝ work")은 이 구조를 손실시킨다 —
+    아래에서 그 슬로건을 <b>직접 반박</b>하며 도달한다.
+  </div>
+  <div class="key" style="border-left-color:var(--big)">
+    <b>논리 방법(과 그 한계).</b> 설계를 "naive로 바꿔보니 느려지므로 좋다"는 <b>후행 ablation</b>으로 정당화하지 않는다.
+    ① 워크로드 + 하드웨어 상수와의 <b>forward 일관성</b> → ② 커널 <b>메커니즘 직접 측정</b>(stall·issue) →
+    ③ 축을 <b>deconfound로 격리</b>. 단 정직하게 — 이 설계는 이미 튜닝돼 존재했으므로 이 문서는 그것을
+    <b>"유도"가 아니라 "검증·설명"</b>한다(R7). 각 단계에서 스스로 반박한다(S9의 R1~R7).
+  </div>
+
+  <!-- ===================== S1 ===================== -->
+  <h2 class="sec" id="s1"><span class="tag">S1</span>문제 정의</h2>
+  <p><b>멀티프론탈 sparse LU 분해</b>는 희소 행렬을 elimination tree(소거 트리)로 조직하고,
+  트리의 각 노드에서 작은 조밀(dense) 행렬 조각 — <b>front</b> — 을 LU 분해한 뒤 그 기여(contribution block)를
+  부모 front로 합치는(extend-add) 방식이다. 우리 대상은 <b>전력계통 조류해석(power-flow)의 Newton–Raphson
+  Jacobian</b>이다.</p>
+  <p>우리에겐 이미 잘 튜닝된 <b>B=1</b>(시스템 하나) 경로가 있다. 그런데 조류해석·우발상정(contingency)·
+  몬테카를로 같은 워크로드는 <b>같은 희소 구조를 가진 시스템 B개를 동시에</b> 풀어야 한다(값만 다름).
+  핵심 질문: <b>튜닝된 B=1 스케줄을 B개 동시 처리로 어떻게 확장해야 하는가?</b></p>
+  <p>이 문서는 그 확장 과정에서 내린 설계 결정들을, 추측이 아니라 <b>측정으로 분리한 근거</b>와 함께
+  논리적으로 재구성한다. 출발점은 단 하나의 사실이다 — front 크기 분포.</p>
+
+  <!-- ===================== S2 ===================== -->
+  <h2 class="sec" id="s2"><span class="tag">S2</span>중심 사실 — front 크기 분포</h2>
+  <p>모든 것이 여기서 갈린다. 9개 power-grid 케이스의 front 크기를 전부 덤프해 보면
+  <b>분포가 극단적으로 작은 front에 쏠려 있다</b>. median front 크기는 어느 케이스든 <b>4~6</b>,
+  전체의 <b>약 98%가 크기 ≤32</b>, 그리고 소수(0~0.8%)의 <b>큰 spine front</b>가 트리 위쪽에 존재한다.</p>
+
+  <div class="legend">
+    <span><i class="sw" style="background:var(--small)"></i>small (fsz ≤ 32) — warp 폭</span>
+    <span><i class="sw" style="background:var(--mid)"></i>mid (33–64) — shared 상주 경계</span>
+    <span><i class="sw" style="background:var(--big)"></i>big (&gt; 64) — multi-block</span>
+  </div>
+
+  <figure>
+    <div id="fig-hist"></div>
+    <figcaption><span class="claimtag">C1</span>
+      <b>front 크기 히스토그램</b> (case_ACTIVSg25k, 22,258 fronts, log 스케일). 대부분이 1–8 버킷에 몰려 있고
+      (18,832개), 큰 front는 긴 꼬리로 소수만 존재(최대 124). 색은 tier 경계(32 / 64)를 따른다.
+      → 일감이 <b>bimodal</b>: 수천 개의 아주 작은 front + 소수의 큰 spine front.
+      근거: <code>--dump-fronts</code> → <code>results/methodology/front_dist.json</code>.
+    </figcaption>
+  </figure>
+
+  <figure>
+    <div id="fig-etree"></div>
+    <figcaption>
+      <b>elimination tree 모식도</b>. 바닥의 수많은 작은 leaf front(small)가 위로 갈수록 적고 큰
+      spine front(mid·big)로 수렴해 단일 root에 이른다. 위쪽 spine은 <b>순차 임계경로</b>이자
+      B=1에서 GPU를 비우는(under-fill) 구간이다.
+    </figcaption>
+  </figure>
+
+  <p>9케이스 전체에서 이 모양은 동일하다. 작은 케이스(case118, case1354)는 <b>big front가 0개</b>로 순수 small-tier이고,
+  큰 케이스로 갈수록 spine이 자라 big front 비율과 최대 크기가 커진다(최대 10 → 260).</p>
+
+  <details>
+    <summary>9케이스 분포 요약 표</summary>
+    <div id="tbl-dist"></div>
+  </details>
+
+  <div class="key">
+    <b>두 가지 귀결</b>을 미리 심어둔다 — ① 작은 front는 개별적으로 GPU를 못 채우고 레이턴시-bound다.
+    ② 큰 spine front는 순차 임계경로에 있어 B=1에서 GPU를 비운다. 이후 모든 설계는 이 둘을 푸는 과정이다.
+  </div>
+
+  <!-- ===================== S3 ===================== -->
+  <h2 class="sec" id="s3"><span class="tag">S3</span>B=1 — 튜닝된 단일 시스템 baseline</h2>
+  <p>B=1에서는 일감이 희소하다. 한 레벨에 front가 많아야 수천 개(leaf), 위로 갈수록 한두 개(spine)뿐.
+  그래서 설계 목표는 <b>포화(saturation)가 아니라 레이턴시 은닉과 캐시 상주</b>다.</p>
+  <ul>
+    <li><b>front당 1블록</b>(<code>FactorSingleLevel</code>) — 한 레벨을 한 번에 launch, 인수분해와 extend-add를 융합.</li>
+    <li><b>spine의 큰 front는 multi-block triple</b>(<code>FactorSingleBig{Panel,Trail,Extend}</code>) — 소수의 큰 front가 1블록이면 GPU를 비우므로 trailing을 여러 block으로 분할.</li>
+    <li><b>selinv</b>(<code>FactorSingleInvertPivot</code>) — 인수분해 끝에 각 front의 nc×nc pivot 블록을 역행렬화. 그러면 solve의 순차 삼각솔브가 <b>병렬 GEMV</b>(<code>y=Linv·rhs</code>)가 된다.</li>
+  </ul>
+  <figure>
+    <div id="fig-b1"></div>
+    <figcaption><span class="claimtag">C2</span>
+      <b>B=1: one block, one front.</b> 한 블록이 front를 통째로 인수분해하고 부모로 extend-add.
+      front는 작아 <b>캐시에 상주</b>(측정: L1 hit ~80%, DRAM ~15%) → 경로는 <b>레이턴시-bound</b>.
+      selinv는 삼각솔브를 GEMV로 바꿔 그 레이턴시를 추가로 숨긴다.
+    </figcaption>
+  </figure>
+
+  <!-- ===================== S4 ===================== -->
+  <h2 class="sec" id="s4"><span class="tag">S4</span>최소 배치 확장 — 포화는 달성된다</h2>
+  <p>가장 작은 확장: <b>B=1 커널을 그대로 두고 <code>blockIdx.y = batch</code>만 추가</b>한다(<code>grid.y = B</code>).
+  front-major 레이아웃(아레나 = B × front_total), front당 1블록, 글로벌 상주, 단일 스트림. 한 줄 변경이다.</p>
+  <p>이건 깎아내릴 strawman이 아니라 <b>논리의 기준점</b>이다 — 멀티배치의 가장 분명한 목표인 <b>"GPU를 채운다(포화)"</b>를
+  이 한 줄이 실제로 달성하기 때문이다(아래에서 측정). 질문은 "포화가 곧 속도인가?"로 좁혀진다.
+  이 경로는 실제 구현해 측정했다(<code>CLS_NAIVE_BATCH</code> env 게이트).</p>
+  <figure>
+    <div id="fig-naive"></div>
+    <figcaption>
+      <b>최소 확장.</b> S3의 1블록-1front를 <code>blockIdx.y</code> 축으로 B겹 복제 — 한 줄(<code>grid.y=B</code>).
+      이걸로 occupancy(상주)는 채워진다(다음 절에서 89% 측정). 핵심 질문: 채우는 것이 빠른 것인가?
+    </figcaption>
+  </figure>
+
+  <!-- ===================== S5 ===================== -->
+  <h2 class="sec" id="s5"><span class="tag">S5</span>naive는 왜 느린가 — 흔한 오해부터 제거</h2>
+  <p>측정: naive는 proper보다 factor <b>1.4~3.4× 느리다</b>. 먼저 가장 흔한 오해를 제거하자 — <b>점유율(occupancy) 문제가 아니다.</b>
+  ncu로 보면 naive는 B=64에서 occupancy <b>89%</b>로 GPU를 꽉 채운다. 그런데 실제로 명령을 발행하는 비율(issue)은 <b>52%</b>뿐이다.</p>
+  <div class="key"><b>"GPU를 채우는 것(포화)은 필요조건일 뿐, 충분조건이 아니다."</b> 상주한 warp가 절반을 stall로 흘려보낸다.
+  ← 이 구분이 이후 논리의 출발점이다(자가반박 R4: "포화 = 빠름"은 틀렸다).</div>
+  <figure>
+    <div id="fig-s5b"></div>
+    <figcaption><span class="claimtag">C4</span>
+      <b>naive <code>FactorSingleLevel</code>의 warp stall</b> (B=64, ncu). occ 89%인데 issue 52% — 절반이 stall이고,
+      그 stall은 <b>long_scoreboard</b>(global load 결과 대기) 8.0 + <b>barrier</b>(<code>__syncthreads</code>) 6.5다.
+      즉 front당 비효율 = (a) 글로벌에서 읽기를 기다리고 (b) pivot마다 블록 barrier를 친다.
+      근거: <code>results/methodology/profile.txt</code>·<code>regime_bottleneck.txt</code>.
+    </figcaption>
+  </figure>
+  <figure>
+    <div id="fig-s5a"></div>
+    <figcaption><span class="claimtag">C3</span>
+      <b>naive / proper factor 비율 vs B</b>. 격차가 케이스마다 다르게 움직인다 — 소·중형은 B↑에 비율↑, 대형은 B↑에 비율↓.
+      이미 여기에 <b>크기 구간별로 다른 메커니즘</b>이 숨어 있다(다음 절). 근거: <code>naive_vs_proper.txt</code>.
+    </figcaption>
+  </figure>
+  <div class="key">
+    핵심: S5의 두 비용(global-load 8, barrier 6.5)은 "한 front를 1블록-글로벌로" 처리한 결과다. 그런데
+    <b>이 비용을 어떻게 없앨지는 front 크기마다 다르다</b> — 그게 S6다.
+  </div>
+
+  <!-- ===================== S6 ===================== -->
+  <h2 class="sec" id="s6"><span class="tag">S6</span>크기 구간마다 병목이 다르다</h2>
+  <p>설계를 "naive로 바꿔보니 느려지므로 좋다"는 ablation으로 정당화하지 않는다. 대신 분포(median 6, 소수 big)와
+  하드웨어 상수(warp 32, global 레이턴시 수백 cyc, SM 82)에서 각 구간의 병목을 <b>forward 논증</b>으로 짚고,
+  커널 <b>메커니즘을 직접 측정</b>해 확인한다.</p>
+  <div class="key" style="border-left-color:var(--mut)">
+    <b>정직한 인식론.</b> 이 3-tier 설계와 경계(32/64)는 <b>이미 존재했다</b>(cuDSS_reproduce 이식 + 튜닝). 따라서 이 절은
+    설계를 무에서 "유도"한다고 주장하지 않는다 — <b>"선택된 설계가 forward 논증과 일관되며, 직접 측정으로 확인된다"</b>를 보인다.
+    경계도 정직하게: <b>32 = warp 폭</b>(원리적), <b>64 = 경험값</b>(autotuning에서 나온 shared/occupancy 크로스오버).
+  </div>
+  <figure>
+    <div id="fig-s6"></div>
+    <figcaption>
+      <b>세 구간, 세 병목.</b> <b style="color:var(--small)">tiny</b>: 한 front에 블록 하나면 warp 대부분이 놀고 block barrier를 침
+      → 여러 front를 warp에 packing(<code>__syncwarp</code>). <b style="color:var(--mid)">mid</b>: front를 통째로 shared에
+      → global-load 레이턴시 제거. <b style="color:var(--big)">big</b>: 한 front를 여러 block으로 → under-fill 해소.
+      <code>small.cuh / mid.cuh / big.cuh</code>.
+    </figcaption>
+  </figure>
+
+  <h3>1) tiny (전체의 98%) — block 낭비 + barrier <span style="color:var(--mut);font-weight:400">(메모리 아님)</span></h3>
+  <p><b>forward:</b> median front 6 ≪ warp 32 ≪ block(128~). tiny front 하나에 블록을 주면 한 warp만 일하고 나머지는 놀며,
+  pivot마다 모든 warp가 <code>__syncthreads</code>를 친다. → 여러 tiny front를 한 warp에 <b>packing</b>(FactorSmall).</p>
+  <p><b>direct:</b> FactorSmall은 barrier <b>0</b>(<code>__syncwarp</code>), issue <b>67%</b>(naive 52%, FactorMid 44%보다 높음).
+  그리고 결정적 — <b>축을 격리(deconfound)</b>하면:</p>
+  <figure>
+    <div id="fig-decon"></div>
+    <figcaption><span class="claimtag">C6</span>
+      <b>tiny tier를 세 갈래로 라우팅</b> — global-1block / shared-1block(FactorMid) / packed(FactorSmall).
+      <b>memory 축</b>(global→shared) = <b>+1~2%뿐</b>. <b>granularity 축</b>(1block→packed) = <b>+14~20%</b>.
+      → <b>tiny에서 메모리는 거의 무관</b>(너무 작아 글로벌에서도 캐시 상주); 이김은 <b>packing</b>이다.
+      <span style="color:var(--mut)"><b>격리의 한계(정직):</b> memory 축은 두 커널의 block size도 다름(완전 순수 아님, 단 null 결과는 robust);
+      granularity 축은 packing에 <code>__syncwarp</code>(sync 종류)가 묶여 있음 — 엄밀히는 "warp-level 처리"다(둘 다 shared 상주는 코드로 확인).</span>
+      근거: <code>regime_bottleneck.txt</code>.
+    </figcaption>
+  </figure>
+
+  <h3>2) mid — global-load 레이턴시 <span style="color:var(--mut);font-weight:400">(granularity 아님)</span></h3>
+  <p><b>forward:</b> mid front(33~64)는 B개가 동시에 돌면 L1을 넘쳐 캐시 상주가 깨지고, 인수분해 중 원소를 O(nc)번 재접근하므로
+  global load 레이턴시가 노출된다. → front를 통째로 <b>shared</b>에 stage(FactorMid).</p>
+  <p><b>direct:</b> FactorMid는 naive와 <b>똑같이 1블록-1front(granularity 동일)</b>인데 long_scoreboard <b>8.0 → 1.6</b>, barrier <b>6.5 → 1.9</b>.</p>
+  <figure>
+    <div id="fig-mech"></div>
+    <figcaption><span class="claimtag">C5</span>
+      <b>세 커널의 직접 메커니즘</b> (B=64): naive(global·1block) / FactorMid(shared·1block) / FactorSmall(shared·packed).
+      mid는 granularity가 naive와 같은데 stall이 1/4로 → <b>mid는 메모리 축</b>. small은 barrier가 0으로 → <b>tiny는 granularity 축</b>.
+    </figcaption>
+  </figure>
+  <div class="key" style="border-left-color:var(--big)">
+    <b>자가반박이 두 번 작동한다:</b> "granularity ∝ work"는 <b>mid</b>에서 무너지고(mid는 1블록 그대로, shared만 다른데 4× 빨라짐 → 메모리),
+    그 대안 "memory가 축"은 <b>tiny</b>에서 무너진다(tiny는 shared가 +1~2%뿐, packing이 +14~20% → granularity).
+    <b>단일 축은 없다 — 구간마다 병목이 다르다.</b>
+  </div>
+
+  <h3>3) big (소수 spine) — under-fill + 직렬 grind</h3>
+  <p><b>forward:</b> big front(&gt;64, 최대 260)의 trailing은 uc²≈수만 원소를 한 블록이 직렬로 갈고, 큰 front는 레벨당 몇 개뿐이라
+  저-B에서 (front수×B) 블록 &lt; 82 SM → under-fill. → 한 front의 trailing을 여러 block으로 <b>분할</b>(FactorBig).
+  단 — 배치 차원이 커지면 B개 front가 SM을 채우므로 이 이득은 고-B에서 수렴한다(부록의 수렴 곡선 참고).</p>
+  <p>그리고 <b>B&gt;1에선 selinv를 버린다</b> — 배치 solve는 inverted-pivot GEMV 대신 sub-group packed 삼각솔브를 쓴다.
+  selinv의 invert 비용은 레이턴시-bound인 B=1 GEMV에서만 값했고, 포화된 B&gt;1에선 packed 삼각솔브가 이미 빠르다.</p>
+
+  <details>
+    <summary>보조: 집계 ablation (route-to-naive contribution) — 약하지만 "언제 어느 구간이 중요한가"는 보여줌</summary>
+    <p style="font-size:13.5px">아래는 "proper 안에서 한 tier만 naive 1블록으로 바꿔 전체 시간 차이"를 본 것이다. 위의 forward+direct가
+    <b>왜</b>인지를 말한다면, 이건 <b>언제(어느 B)</b> 어느 구간이 지배하는지를 보여주는 집계 보조 지표다.
+    단 비교 기준이 "최악(global-1block)"이라 절대값은 과대평가됨에 유의(특히 tiny는 위 deconfound가 정확).</p>
+    <div id="fig-s6c"></div>
+    <div class="two">
+      <figure style="margin-top:8px"><div id="fig-tf"></div><figcaption><span class="claimtag">C9</span>실행시간 비중 ≠ 기여(ACTIVSg25k B=64): 비중은 Big 과대(27% vs 8%)·Small 과소(24% vs 31%).</figcaption></figure>
+      <figure style="margin-top:8px"><div id="fig-s6mid"></div><figcaption>big front 없는 case3120sp: Big 기여 ≈ 0. 분포가 결정.</figcaption></figure>
+    </div>
+  </details>
+  <!-- ===================== S7 ===================== -->
+  <h2 class="sec" id="s7"><span class="tag">S7</span>work-gate — 단 하나의 적응적 결정</h2>
+  <p>tier는 front 크기의 순수 함수다(<code>ClassifyFrontTier</code>: ≤32 / ≤64 / &gt;64). 그런데 <b>small tier 안에서만</b>
+  라우팅이 가용 일감에 따라 갈린다: <span class="k">(레벨 front 수 × B × 2) ≥ FactorWarpFill(3936)</span> 이면
+  <code>FactorSmall</code>(packing), 아니면 <code>FactorMid</code>(front당 1블록).</p>
+  <p>이게 <b>"입자도를 일감에 맞춰라"의 문자 그대로의 구현</b>이다 — <b>같은 front</b>가 배치 병렬성이 얼마나 있느냐에 따라
+  두 가지로 스케줄된다. 임계 <span class="k">3936 = SM수(82) × (1536/32)</span>는 순수 하드웨어량이라 GPU가 바뀌어도
+  규칙이 일반화된다. flip이 일어나는 배치는 <span class="k">B ≥ 1968 / (레벨 front 수)</span>:
+  front 100개 레벨은 <b>B≥20</b>, 500개는 <b>B≥4</b>에서 <code>FactorSmall</code>로 넘어가고,
+  거대 leaf 레벨(front 수천 개)은 <b>B=1에서도</b> 이미 <code>FactorSmall</code>이다.</p>
+  <figure>
+    <div id="fig-s7"></div>
+    <figcaption><span class="claimtag">C10</span>
+      <b>work-gate 결정 흐름.</b> tier는 크기의 함수지만 small tier 안에서는 <code>(cnt×B×2)≥3936</code> 게이트가
+      <code>FactorSmall</code>(packing) ↔ <code>FactorMid</code>(1블록)을 가른다. 좁은 레벨은 저-B에서 <code>FactorMid</code>로
+      가다가 B가 커지면 flip. → "small <b>tier</b>" ≠ "<code>FactorSmall</code> <b>커널</b>".
+      근거: <code>schedule.cuh</code>·<code>front_ops.cuh</code>(<code>FactorWarpFill</code>).
+    </figcaption>
+  </figure>
+
+  <!-- ===================== S8 ===================== -->
+  <h2 class="sec" id="s8"><span class="tag">S8</span>종합 — 두 단계, 구간별 병목</h2>
+  <p class="lead"><b>① GPU를 채운다(포화 — 필요조건). ② 각 front 크기 구간의 고유 병목을 직접 측정해 겨냥한다.</b></p>
+  <p>단일 슬로건이 없는 게 핵심이다. "granularity ∝ work"는 tiny·big만 설명하고 mid(메모리)를 놓치며,
+  "memory가 축"은 mid만 설명하고 tiny(packing)를 놓친다. 정직한 종합은 <b>구간별로 병목이 다르다</b>는 것:
+  <b style="color:var(--small)">tiny = granularity</b>(packing), <b style="color:var(--mid)">mid = memory</b>(shared),
+  <b style="color:var(--big)">big = occupancy</b>(split) + solve에서 selinv drop.</p>
+  <figure>
+    <div id="fig-s8a"></div>
+    <figcaption>
+      <b>B=1 vs B&gt;1.</b> 왼쪽(일감 희소): front당 1블록 + selinv + 캐시 상주 — 레이턴시 은닉.
+      오른쪽(일감 ∝ B): 포화는 필요조건일 뿐(naive도 occ 89%), 그 위에서 구간별 병목을 각개 겨냥.
+    </figcaption>
+  </figure>
+  <div class="key" style="border-left-color:var(--mut)">
+    <b>B=1/B&gt;1 경계의 정직한 위상.</b> 이건 "다른 원리"라기보다 <b>구현 경계</b>다. tiny-front의 block 낭비 같은 구간별 병목은
+    <b>B=1에도 존재</b>하지만, B=1은 이식한 단일시스템 커널을 써서 tier/packing을 하지 않을 뿐이다. 즉 같은 병목이고,
+    <b>고치는 이득이 B와 함께 커진다</b>(동시 front가 많을수록 per-block 비효율이 누적). selinv도 마찬가지 — 레이턴시-bound B=1에선
+    GEMV가 값했고, 포화된 B&gt;1에선 packed 삼각솔브가 이미 빨라 invert를 버린다.
+  </div>
+  <p>그 결과 cuDSS(범용 직접 솔버) 대비:</p>
+  <figure>
+    <div id="fig-s8b"></div>
+    <figcaption><span class="claimtag">C11</span>
+      <b>custom / cuDSS factor speedup vs B</b> (per-system). B=2에서 1.4~2.0×, B=256에서 <b>3.5~10×</b>.
+      <span style="color:var(--mut)"><b>공정성 caveat:</b> 사과-오렌지 비교다. cuDSS는 <b>범용·pivoting·robust</b> 솔버로 임의 패턴·수치안정을 처리하는 반면,
+      우린 <b>이 워크로드 특화·no-pivot</b>이다. "이긴다"가 아니라 "특화가 이 구간에서 이만큼 산다"로 읽어야 한다.</span>
+      relres ~1e-4 정상. 근거: <code>cudss_vs_custom.txt</code>.
+    </figcaption>
+  </figure>
+
+  <!-- ===================== S9 ===================== -->
+  <h2 class="sec" id="s9"><span class="tag">S9</span>논리 점검 — 자가반박 로그 + claim→evidence</h2>
+  <p>이 방법론은 한 번에 옳게 나오지 않았다. 스스로 반박하며 도달했고, 그 과정을 숨기지 않는다.</p>
+  <table style="margin-bottom:24px">
+    <thead><tr><th style="width:8%">라운드</th><th style="width:32%">주장(가설)</th><th style="width:32%">자가반박</th><th>개선된 결론</th></tr></thead>
+    <tbody>
+    <tr><td><b>R1</b></td><td>"granularity ∝ work" — 입자도를 일감 크기에 맞추면 된다</td><td><code>FactorMid</code>는 naive와 <b>같은 1블록-1front</b>(granularity 동일)인데 shared만으로 4× 빨라짐(long 8→1.6)</td><td>granularity로 설명 안 됨 → <b>memory가 별개 축</b></td></tr>
+    <tr><td><b>R2</b></td><td>그럼 "memory가 진짜 축"이다 (shared 상주가 핵심)</td><td>tiny tier deconfound: memory축(global→shared) <b>+1~2%뿐</b>, granularity축(1block→packed) <b>+14~20%</b></td><td>tiny는 너무 작아 memory 무관 → <b>tiny는 granularity 축</b></td></tr>
+    <tr><td><b>R3</b></td><td>그럼 두 축(memory·granularity) 중 하나로 통일</td><td>mid는 memory, tiny는 granularity, big은 occupancy — <b>구간마다 지배 축이 다름</b></td><td><b>단일 축 없음 — 구간별 병목</b> (C8)</td></tr>
+    <tr><td><b>R4</b></td><td>naive가 느린 건 GPU를 못 채워서다(점유율)</td><td>naive occ <b>89%</b>인데 issue <b>52%</b> — 채웠는데 stall</td><td><b>포화는 필요조건일 뿐</b>; 발행을 막는 건 per-front 병목 (C4)</td></tr>
+    <tr><td><b>R5</b></td><td>"tier를 naive로 바꿔 느려지니 그 tier가 좋다"(ablation)로 정당화</td><td>후행·기준의존(최악 baseline 대비 과대); <b>왜</b>인지 못 말함</td><td>forward 논증 + <b>직접 메커니즘 측정</b>으로 전환; ablation은 보조 (C9)</td></tr>
+    <tr><td><b>R6</b></td><td>"B=1=레이턴시 은닉 원리, B&gt;1=구간별 병목"은 깨끗한 원리 전환</td><td>구간별 병목은 B=1에도 존재; B=1은 이식 커널이라 tier를 안 할 뿐 → <b>구현 경계지 원리 경계 아님</b></td><td>같은 병목, 고치는 이득이 B와 함께 커짐으로 정정 (S8)</td></tr>
+    <tr><td><b>R7</b></td><td>"분포+HW에서 설계를 forward로 유도했다"</td><td>설계·경계(32/64)는 이미 튜닝돼 존재; "유도"는 사후 합리화. 64는 경험값</td><td>"<b>일관·확인</b>"으로 격하(유도 주장 철회); 32 원리적/64 경험값 명시 (S6)</td></tr>
+    </tbody>
+  </table>
+  <p>아래 표는 그렇게 도달한 각 주장을 실험·근거·범위와 묶는다(C1~C12).</p>
+  <div id="tbl-audit"></div>
+  <div class="key" style="border-left-color:var(--big);margin-top:24px">
+    <b>이 문서가 아닌 것 (범위·한계).</b>
+    ① <b>최적성 증명이 아니다</b> — "왜 선택된 설계가 도는가"를 설명할 뿐, "3 tier가 최적인가 / 왜 32·64인가 / 2·4는?"은 답하지 않는다.
+    ② <b>일반화 근거가 얇다</b> — 전부 RTX 3090 + power-grid Jacobian. <code>FactorWarpFill</code>만 HW 공식이고, bimodal 분포·경계는 워크로드 특화.
+    ③ <b>메커니즘 측정은 단일점</b>(B=64, ACTIVSg25k), deconfound는 2케이스 — 추세는 다-B 스윕으로 보강하나 stall은 cherry-pick 위험.
+    ④ <b>cuDSS 비교는 특화 vs 범용</b>(R/⑥). 정직한 결론: <b>사전 튜닝된 설계가 forward 논증과 일관되고 직접 측정으로 확인된다</b> — 무에서 유도한 게 아니다.
+  </div>
+
+  <!-- ===================== 부록 ===================== -->
+  <h2 class="sec" id="appx"><span class="tag">부록</span>전체 데이터 & 방법</h2>
+  <details><summary>E2 — naive/proper factor 비율 (9케이스 × B)</summary><div id="tbl-e2"></div></details>
+  <details><summary>E3 — tier별 기여 % (4케이스 × B)</summary><div id="tbl-e3"></div></details>
+  <details><summary>E6 — custom vs cuDSS factor (ms, 5케이스 × B)</summary><div id="tbl-e6"></div></details>
+  <p style="font-size:13px;color:var(--mut);margin-top:20px">
+    <b>방법.</b> RTX 3090(sm_86, SM 82, 1536 threads/SM), CUDA 12.8, locked clock. fp32(ComputePolicy 무관, 선형솔버 단독).
+    측정은 per-system = 배치 median ÷ B, repeat 5 / warmup 2. 기여 측정 = proper 안에서 한 tier만 naive 1블록 커널로
+    라우팅(<code>CLS_TIER_NAIVE_*</code>). naive 경로 = <code>CLS_NAIVE_BATCH</code>(전부 env 게이트, 기본 off).
+    렌더링은 외부 의존성 0(inline SVG) — 오프라인·이메일·아카이브 모두 동작. 트레이드오프: 네이티브 hover/zoom 없음
+    (고정 소규모 데이터 + 오프라인 내구성 우선).
+  </p>
+
+  <div class="foot">
+    렌더링: 외부 의존성 0 — 모든 그림·차트는 inline SVG(오프라인·이메일·아카이브 모두 동작).
+    측정: RTX 3090, CUDA 12.8, locked clock, fp32. 각 그림의 근거 데이터 파일은 caption에 명시.
+  </div>
+</main>
+</div>
+
+<script>
+/* =========================== 측정 데이터 (raw 임베드) =========================== */
+const DATA = {
+  thresh:{small:32, mid:64, warpfill:3936},
+  front_dist: {
+    "case118":{n:106,med:5,mx:10,small:106,mid:0,big:0,levels:8,buckets:[103,3,0,0,0,0,0]},
+    "case1354pegase":{n:1238,med:4,mx:31,small:1238,mid:0,big:0,levels:17,buckets:[1128,83,27,0,0,0,0]},
+    "case3120sp":{n:2848,med:6,mx:52,small:2832,mid:16,big:0,levels:23,buckets:[2584,184,64,16,0,0,0]},
+    "case6468rte":{n:5836,med:6,mx:53,small:5789,mid:47,big:0,levels:25,buckets:[5244,423,122,47,0,0,0]},
+    "case8387pegase":{n:7298,med:6,mx:86,small:7239,mid:54,big:5,levels:29,buckets:[6374,645,220,54,5,0,0]},
+    "case13659pegase":{n:12163,med:6,mx:88,small:12048,mid:104,big:11,levels:32,buckets:[10772,930,346,104,11,0,0]},
+    "case_ACTIVSg25k":{n:22258,med:6,mx:124,small:21795,mid:325,big:138,levels:51,buckets:[18832,2358,605,325,138,0,0]},
+    "case_ACTIVSg70k":{n:62501,med:6,mx:260,small:61148,mid:870,big:483,levels:75,buckets:[53118,6464,1566,870,376,106,1]},
+    "case_SyntheticUSA":{n:73231,med:6,mx:251,small:71628,mid:1100,big:503,levels:74,buckets:[61811,7853,1964,1100,384,119,0]}
+  },
+  bucketLabels:["1-8","9-16","17-32","33-64","65-128","129-256",">256"],
+  bucketTier:["small","small","small","mid","big","big","big"],
+  nvp_B:[2,4,8,16,32,64],
+  naive_vs_proper:{
+    "case118":{proper:[0.023,0.0116,0.006,0.003,0.0017,0.001],naive:[0.0224,0.0114,0.006,0.0033,0.002,0.0013]},
+    "case1354pegase":{proper:[0.0556,0.0295,0.0166,0.0097,0.0065,0.0043],naive:[0.0705,0.0404,0.0249,0.0174,0.014,0.0125]},
+    "case3120sp":{proper:[0.1066,0.0548,0.0294,0.0189,0.0119,0.009],naive:[0.1094,0.0693,0.0431,0.0329,0.0263,0.0235]},
+    "case6468rte":{proper:[0.1428,0.081,0.0478,0.0307,0.0223,0.0187],naive:[0.1687,0.1011,0.0708,0.0521,0.0446,0.0399]},
+    "case8387pegase":{proper:[0.2147,0.1202,0.0589,0.0452,0.0313,0.0263],naive:[0.2488,0.1413,0.1282,0.071,0.0594,0.0538]},
+    "case13659pegase":{proper:[0.2439,0.1372,0.0908,0.0603,0.0462,0.0423],naive:[0.3166,0.2002,0.1364,0.111,0.0914,0.1263]},
+    "case_ACTIVSg25k":{proper:[0.5217,0.3122,0.2131,0.1569,0.12,0.1105],naive:[0.7104,0.4334,0.3155,0.2438,0.2041,0.1977]},
+    "case_ACTIVSg70k":{proper:[1.0635,0.6985,0.5323,0.4288,0.4087,0.4071],naive:[2.702,1.6816,1.0915,0.8995,0.7676,0.6946]},
+    "case_SyntheticUSA":{proper:[1.1268,0.7514,0.5611,0.4837,0.4483,0.4546],naive:[2.7357,1.6618,1.2242,0.991,0.8503,0.7976]}
+  },
+  contrib_B:[4,16,64,256],
+  /* 각 [small%, mid%, big%] = 그 tier를 one-block화했을 때 proper 대비 느려진 % */
+  contrib:{
+    "case3120sp":{small:[8,33,46,50],mid:[41,44,13,3],big:[-13,12,0,1]},
+    "case_ACTIVSg25k":{small:[10,21,31,32],mid:[16,7,11,15],big:[30,8,8,6]},
+    "case_ACTIVSg70k":{small:[21,24,28,24],mid:[4,5,6,10],big:[97,48,18,11]},
+    "case_SyntheticUSA":{small:[16,15,25,27],mid:[8,5,7,11],big:[93,38,14,12]}
+  },
+  timefrac_B64:{small:24,mid:16,big:27},   /* nsys 실행시간 비중 (B=64) */
+  /* 각 커널의 직접 메커니즘 (B=64, ACTIVSg25k) — ncu */
+  stall:{naive:{occ:89,issue:52,long:8.0,barrier:6.5,short:0.4},
+         mid:{occ:42,issue:44,long:1.6,barrier:1.9,short:1.0},
+         small:{occ:59,issue:67,long:2.5,barrier:0.0,short:0.7}},
+  /* small tier 축 격리: global-1block / shared-1block(Mid) / packed(Small) factor ms */
+  deconfound:{
+    "case3120sp":{B:[16,64],global:[0.022,0.013],shared:[0.022,0.013],packed:[0.029,0.010]},
+    "case_ACTIVSg25k":{B:[16,64],global:[0.182,0.141],shared:[0.178,0.139],packed:[0.153,0.113]}
+  },
+  cvc_B:[2,4,8,16,32,64,128,256],
+  cudss_vs_custom:{
+    "case3120sp":{custom:[0.0995,0.05,0.0334,0.0172,0.0127,0.009,0.0078,0.0071],cudss:[0.1484,0.1067,0.0879,0.0806,0.0758,0.073,0.0717,0.071]},
+    "case8387pegase":{custom:[0.21,0.1016,0.0771,0.0392,0.0305,0.0253,0.024,0.0213],cudss:[0.3405,0.247,0.2014,0.1771,0.1646,0.1579,0.1545,0.153]},
+    "case_ACTIVSg25k":{custom:[0.5429,0.3141,0.2035,0.1508,0.1204,0.1154,0.107,0.1092],cudss:[0.7368,0.6184,0.5544,0.5243,0.5079,0.4997,0.495,0.4932]},
+    "case_ACTIVSg70k":{custom:[1.0891,0.6892,0.5149,0.4274,0.4063,0.4067,0.4072,0.4177],cudss:[1.9019,1.6842,1.5758,1.519,1.4897,1.4762,1.4685,1.4648]},
+    "case_SyntheticUSA":{custom:[1.0941,0.7246,0.5739,0.482,0.4593,0.4394,0.4484,0.4762],cudss:[2.2035,1.9467,1.8124,1.7512,1.7163,1.7086,1.7003,1.6962]}
+  }
+};
+const COL={small:'#2a9d8f',mid:'#e9c46a',big:'#e76f51',naive:'#9aa3ad',proper:'#264653',cudss:'#9b5de5',accent:'#1d6fb8',ink:'#1c2330',mut:'#5b6573',line:'#d7dde5'};
+
+/* =========================== SVG 헬퍼 =========================== */
+const NS='http://www.w3.org/2000/svg';
+function el(tag,attr,txt){const e=document.createElementNS(NS,tag);for(const k in attr)e.setAttribute(k,attr[k]);if(txt!=null)e.textContent=txt;return e;}
+function svg(w,h){const s=el('svg',{viewBox:`0 0 ${w} ${h}`,width:w,height:h});return s;}
+function text(s,x,y,t,o={}){s.appendChild(el('text',{x,y,'font-size':o.fs||12,fill:o.fill||COL.ink,'text-anchor':o.anchor||'start','font-weight':o.fw||400,'font-family':o.mono?'monospace':'inherit'},t));}
+
+/* 막대(로그 옵션) */
+function barChart(id,{labels,values,colors,w=720,h=300,log=false,ylabel='',valfmt=v=>v}){
+  const s=svg(w,h);const ml=58,mr=14,mt=18,mb=46;const pw=w-ml-mr,ph=h-mt-mb;
+  const mx=Math.max(...values);
+  const yv=v=> log? (v<=0?0: Math.log10(v)/Math.log10(mx)) : v/mx;
+  // axis
+  s.appendChild(el('line',{x1:ml,y1:mt,x2:ml,y2:mt+ph,stroke:COL.line}));
+  s.appendChild(el('line',{x1:ml,y1:mt+ph,x2:ml+pw,y2:mt+ph,stroke:COL.line}));
+  if(log){[1,10,100,1000,10000].forEach(g=>{if(g>mx)return;const y=mt+ph-yv(g)*ph;s.appendChild(el('line',{x1:ml,y1:y,x2:ml+pw,y2:y,stroke:COL.line,'stroke-dasharray':'2 4'}));text(s,ml-8,y+4,g.toLocaleString(),{anchor:'end',fs:10,fill:COL.mut});});}
+  const bw=pw/labels.length*0.66, gap=pw/labels.length;
+  labels.forEach((lb,i)=>{
+    const v=values[i];const bh=yv(v)*ph;const x=ml+i*gap+(gap-bw)/2;const y=mt+ph-bh;
+    s.appendChild(el('rect',{x,y,width:bw,height:Math.max(bh,0),rx:2,fill:colors[i]}));
+    text(s,x+bw/2,y-5,valfmt(v),{anchor:'middle',fs:11,fw:600});
+    text(s,x+bw/2,mt+ph+15,lb,{anchor:'middle',fs:11,fill:COL.mut});
+  });
+  if(ylabel)text(s,14,mt+ph/2,ylabel,{anchor:'middle',fs:11,fill:COL.mut});
+  document.getElementById(id).appendChild(s);
+}
+
+/* 다중 시리즈 라인차트. xs(배열, log x), series=[{name,color,ys,dash}] */
+function lineChart(id,{xs,series,w=720,h=300,ylabel='',xlabel='',yfmt=v=>v,ymin=null,ymax=null,xticklabels=null}){
+  const s=svg(w,h);const ml=62,mr=120,mt=18,mb=44;const pw=w-ml-mr,ph=h-mt-mb;
+  const lx=Math.log10(xs[0]),hx=Math.log10(xs[xs.length-1]);
+  let lo=ymin!=null?ymin:Math.min(...series.flatMap(s=>s.ys)), hi=ymax!=null?ymax:Math.max(...series.flatMap(s=>s.ys));
+  if(lo===hi)hi=lo+1; const pad=(hi-lo)*0.08; lo-=pad; hi+=pad;
+  const X=v=>ml+(Math.log10(v)-lx)/(hx-lx)*pw;
+  const Y=v=>mt+ph-(v-lo)/(hi-lo)*ph;
+  // grid+axis
+  s.appendChild(el('line',{x1:ml,y1:mt,x2:ml,y2:mt+ph,stroke:COL.line}));
+  s.appendChild(el('line',{x1:ml,y1:mt+ph,x2:ml+pw,y2:mt+ph,stroke:COL.line}));
+  for(let g=0;g<=4;g++){const yv=lo+(hi-lo)*g/4;const y=Y(yv);if(g>0)s.appendChild(el('line',{x1:ml,y1:y,x2:ml+pw,y2:y,stroke:COL.line,'stroke-dasharray':'2 4'}));text(s,ml-8,y+4,yfmt(yv),{anchor:'end',fs:10,fill:COL.mut});}
+  xs.forEach((xv,i)=>{const x=X(xv);text(s,x,mt+ph+15,(xticklabels?xticklabels[i]:('B='+xv)),{anchor:'middle',fs:10,fill:COL.mut});});
+  series.forEach(se=>{
+    let dp=xs.map((xv,i)=>`${i?'L':'M'}${X(xv).toFixed(1)} ${Y(se.ys[i]).toFixed(1)}`).join(' ');
+    s.appendChild(el('path',{d:dp,fill:'none',stroke:se.color,'stroke-width':2.2,'stroke-dasharray':se.dash||''}));
+    xs.forEach((xv,i)=>s.appendChild(el('circle',{cx:X(xv),cy:Y(se.ys[i]),r:2.6,fill:se.color})));
+  });
+  // legend
+  series.forEach((se,i)=>{const y=mt+10+i*18;s.appendChild(el('line',{x1:ml+pw+10,y1:y,x2:ml+pw+28,y2:y,stroke:se.color,'stroke-width':2.5,'stroke-dasharray':se.dash||''}));text(s,ml+pw+33,y+4,se.name,{fs:11,fill:COL.ink});});
+  if(ylabel)text(s,14,mt+ph/2,ylabel,{anchor:'middle',fs:11,fill:COL.mut});
+  document.getElementById(id).appendChild(s);
+}
+
+/* =========================== Fig S2a 히스토그램 =========================== */
+(function(){
+  const d=DATA.front_dist.case_ACTIVSg25k;
+  barChart('fig-hist',{labels:DATA.bucketLabels,values:d.buckets,
+    colors:DATA.bucketTier.map(t=>COL[t]),log:true,ylabel:'front 개수 (log)',
+    valfmt:v=>v.toLocaleString()});
+  // tier 경계 주석은 색으로 이미 표현됨
+})();
+
+/* =========================== Fig S2b elimination tree 모식도 =========================== */
+(function(){
+  const w=720,h=300,s=svg(w,h);
+  // leaf fringe (bottom), narrowing spine upward
+  function node(x,y,r,tier){s.appendChild(el('circle',{cx:x,cy:y,r,fill:COL[tier],opacity:.85,stroke:'#fff','stroke-width':1}));}
+  // bottom row: many small
+  const n=34;
+  for(let i=0;i<n;i++){node(40+i*(640/(n-1)),250,3.2,'small');}
+  // edges to mid row
+  const midN=10, midY=180;
+  for(let i=0;i<midN;i++){const x=110+i*(500/(midN-1));node(x,midY,7,i%5==0?'mid':'small');
+    // connect a few leaves up
+    for(let k=0;k<3;k++){const lx=40+ (Math.floor(i*3.3)+k)*(640/(n-1));s.appendChild(el('line',{x1:lx,y1:247,x2:x,y2:midY+6,stroke:COL.line}));}
+  }
+  // spine row: few big
+  const spN=4, spY=110;
+  for(let i=0;i<spN;i++){const x=230+i*(260/(spN-1));node(x,spY,13,'big');
+    for(let k=0;k<3;k++){const mx2=110+(i*2+k)*(500/(midN-1));s.appendChild(el('line',{x1:mx2,y1:174,x2:x,y2:spY+10,stroke:COL.line}));}
+  }
+  // root
+  node(360,52,18,'big');
+  [230,317,403,490].forEach(x=>s.appendChild(el('line',{x1:x,y1:100,x2:360,y2:62,stroke:COL.line})));
+  text(s,360,30,'root',{anchor:'middle',fs:12,fill:COL.mut});
+  text(s,656,250,'leaf: 작은 front 수천 개 (small)',{anchor:'end',fs:12,fill:COL.small,fw:600});
+  text(s,656,112,'spine: 큰 front 소수 (big)  ← 순차 임계경로',{anchor:'end',fs:12,fill:COL.big,fw:600});
+  document.getElementById('fig-etree').appendChild(s);
+})();
+
+/* =========================== 9케이스 분포 표 =========================== */
+(function(){
+  const cs=Object.keys(DATA.front_dist);
+  let html='<table><thead><tr><th>case</th><th class="n">fronts</th><th class="n">median</th><th class="n">max fsz</th><th class="n">small%</th><th class="n">mid%</th><th class="n">big%</th><th class="n">levels</th></tr></thead><tbody>';
+  cs.forEach(c=>{const d=DATA.front_dist[c];
+    html+=`<tr><td>${c}</td><td class="n">${d.n.toLocaleString()}</td><td class="n">${d.med}</td><td class="n">${d.mx}</td>`
+      +`<td class="n">${(100*d.small/d.n).toFixed(1)}</td><td class="n">${(100*d.mid/d.n).toFixed(1)}</td>`
+      +`<td class="n">${(100*d.big/d.n).toFixed(1)}</td><td class="n">${d.levels}</td></tr>`;});
+  html+='</tbody></table>';
+  document.getElementById('tbl-dist').innerHTML=html;
+})();
+
+/* helper: 작은 블록(스레드 점 격자) */
+function blockGlyph(s,x,y,w,h,col){
+  s.appendChild(el('rect',{x,y,width:w,height:h,rx:6,fill:col,opacity:.16,stroke:col,'stroke-width':1.5}));
+  for(let r=0;r<3;r++)for(let c=0;c<5;c++)s.appendChild(el('circle',{cx:x+8+c*(w-16)/4,cy:y+8+r*(h-16)/2,r:1.8,fill:col}));
+}
+/* Fig S3 — B=1 one block per front + selinv + cache */
+(function(){
+  const w=720,h=240,s=svg(w,h);
+  // front (matrix)
+  s.appendChild(el('rect',{x:60,y:60,width:120,height:120,rx:4,fill:'#fff',stroke:COL.ink}));
+  text(s,120,52,'front (작은 dense 행렬)',{anchor:'middle',fs:12,fill:COL.mut});
+  blockGlyph(s,78,84,84,42,COL.small);
+  text(s,120,200,'1 block',{anchor:'middle',fs:12,fill:COL.small,fw:700});
+  // arrow extend-add to parent
+  s.appendChild(el('path',{d:'M190 120 L250 120',stroke:COL.ink,'stroke-width':1.5,'marker-end':'url(#arh)'}));
+  text(s,220,112,'extend-add',{anchor:'middle',fs:11,fill:COL.mut});
+  s.appendChild(el('rect',{x:255,y:75,width:90,height:90,rx:4,fill:'#fff',stroke:COL.ink}));
+  text(s,300,68,'parent',{anchor:'middle',fs:11,fill:COL.mut});
+  // selinv inset
+  text(s,470,52,'selinv: 삼각솔브 → 병렬 GEMV',{anchor:'middle',fs:12,fill:COL.mut});
+  s.appendChild(el('path',{d:'M410 80 L410 150 L480 150 Z',fill:COL.accent,opacity:.2,stroke:COL.accent}));
+  text(s,430,170,'U (삼각)',{anchor:'middle',fs:10,fill:COL.mut});
+  s.appendChild(el('path',{d:'M500 110 L530 110',stroke:COL.ink,'stroke-width':1.5,'marker-end':'url(#arh)'}));
+  s.appendChild(el('rect',{x:540,y:80,width:70,height:70,rx:3,fill:COL.accent,opacity:.25,stroke:COL.accent}));
+  text(s,575,170,'Uinv·rhs',{anchor:'middle',fs:10,fill:COL.accent,fw:600});
+  // cache thermometer
+  text(s,665,52,'캐시 상주',{anchor:'middle',fs:12,fill:COL.mut});
+  s.appendChild(el('rect',{x:645,y:75,width:18,height:90,fill:'#eef',stroke:COL.line}));
+  s.appendChild(el('rect',{x:645,y:75+90*0.2,width:18,height:90*0.8,fill:COL.small,opacity:.7}));
+  text(s,654,180,'L1 80%',{anchor:'middle',fs:9,fill:COL.mut});
+  s.appendChild(el('rect',{x:678,y:75,width:18,height:90,fill:'#eef',stroke:COL.line}));
+  s.appendChild(el('rect',{x:678,y:75+90*0.85,width:18,height:90*0.15,fill:COL.mut,opacity:.5}));
+  text(s,687,180,'DRAM 15%',{anchor:'middle',fs:9,fill:COL.mut});
+  document.getElementById('fig-b1').appendChild(s);
+})();
+/* Fig S4 — grid.y=B extrusion */
+(function(){
+  const w=720,h=210,s=svg(w,h);
+  for(let i=4;i>=0;i--){const ox=i*16,oy=-i*12;
+    const c=i==0?COL.small:'#cfe7e3';
+    s.appendChild(el('rect',{x:120+ox,y:70+oy,width:120,height:90,rx:5,fill:'#fff',stroke:i==0?COL.ink:COL.line}));
+    if(i==0)blockGlyph(s,135,90,90,46,COL.small); else s.appendChild(el('rect',{x:135+ox,y:90+oy,width:90,height:46,rx:5,fill:c,opacity:.5}));
+  }
+  s.appendChild(el('path',{d:'M270 150 L360 90',stroke:COL.accent,'stroke-width':1.5,'marker-end':'url(#arh)'}));
+  text(s,330,150,'blockIdx.y = batch',{anchor:'start',fs:13,fill:COL.accent,fw:700,mono:true});
+  text(s,330,170,'(grid.y = B) — 한 줄 변경',{anchor:'start',fs:12,fill:COL.mut});
+  text(s,180,185,'같은 1블록-1front를 B겹 복제',{anchor:'middle',fs:12,fill:COL.mut});
+  document.getElementById('fig-naive').appendChild(s);
+})();
+/* Fig S5a — naive/proper 비율 vs B */
+(function(){
+  const cs=['case1354pegase','case3120sp','case_ACTIVSg70k','case_SyntheticUSA'];
+  const cols=[COL.small,COL.mid,COL.big,COL.cudss];
+  const ser=cs.map((c,i)=>{const d=DATA.naive_vs_proper[c];return {name:c.replace('case',''),color:cols[i],ys:d.naive.map((v,j)=>v/d.proper[j])};});
+  lineChart('fig-s5a',{xs:DATA.nvp_B,series:ser,ylabel:'naive / proper (factor)',yfmt:v=>v.toFixed(1)+'×',ymin:0.8});
+})();
+/* 그룹 막대 헬퍼 */
+function groupBars(id,{groups,series,mxOf,w=720,h=230,unit='',gap=160,bw=42}){
+  const s=svg(w,h);const ml=64,mt=20,ph=140;
+  groups.forEach((g,i)=>{const x0=ml+i*gap;
+    series.forEach((se,j)=>{const v=se.vals[i];const mx=mxOf(g);const bh=Math.max(v/mx*ph,0);const x=x0+j*(bw+6);
+      s.appendChild(el('rect',{x,y:mt+ph-bh,width:bw,height:bh,rx:2,fill:se.color}));
+      text(s,x+bw/2,mt+ph-bh-4,(typeof v==='number'?(Number.isInteger(v)?v:v.toFixed(1)):v)+(g.unit||''),{anchor:'middle',fs:10.5,fw:600});
+    });
+    g.label.split('\n').forEach((ln,li)=>text(s,x0+(series.length*(bw+6))/2-3,mt+ph+15+li*12,ln,{anchor:'middle',fs:10.5,fill:COL.ink,fw:li?400:600}));
+  });
+  s.appendChild(el('line',{x1:ml,y1:mt+ph,x2:ml+gap*groups.length-40,y2:mt+ph,stroke:COL.line}));
+  series.forEach((se,i)=>{const y=mt+8+i*16;s.appendChild(el('rect',{x:ml+gap*groups.length-30,y:y-8,width:11,height:11,rx:2,fill:se.color}));text(s,ml+gap*groups.length-15,y+1,se.name,{fs:10.5});});
+  document.getElementById(id).appendChild(s);
+}
+/* Fig S5b — naive 단독: 포화 vs 발행, stall */
+(function(){
+  const n=DATA.stall.naive;
+  groupBars('fig-s5b',{
+    groups:[{label:'occupancy\n(상주)',unit:'%'},{label:'issue\n(발행)',unit:'%'},{label:'long_scoreboard\n(global load 대기)'},{label:'barrier\n(__syncthreads)'}],
+    series:[{name:'naive FactorSingleLevel',color:COL.naive,vals:[n.occ,n.issue,n.long,n.barrier]}],
+    mxOf:g=>g.unit==='%'?100:9, gap:165, bw:60});
+})();
+/* Fig mech — 세 커널 직접 메커니즘 */
+(function(){
+  const S=DATA.stall;
+  groupBars('fig-mech',{
+    groups:[{label:'long_scoreboard\n(global 대기)'},{label:'barrier\n(__syncthreads)'},{label:'issue %',unit:'%'}],
+    series:[{name:'naive (global·1block)',color:COL.naive,vals:[S.naive.long,S.naive.barrier,S.naive.issue]},
+            {name:'FactorMid (shared·1block)',color:COL.mid,vals:[S.mid.long,S.mid.barrier,S.mid.issue]},
+            {name:'FactorSmall (shared·packed)',color:COL.small,vals:[S.small.long,S.small.barrier,S.small.issue]}],
+    mxOf:g=>g.unit==='%'?100:9, gap:210, bw:34});
+})();
+/* Fig decon — tiny tier 축 격리 (B=64) */
+(function(){
+  const w=720,h=220,s=svg(w,h);const ml=70,mt=24,ph=130,gap=300,bw=64,mx=28;
+  const cases=Object.keys(DATA.deconfound);
+  cases.forEach((c,i)=>{const d=DATA.deconfound[c];const k=d.B.indexOf(64);
+    const mem=100*(d.global[k]-d.shared[k])/d.global[k], gran=100*(d.shared[k]-d.packed[k])/d.shared[k];
+    const x0=ml+i*gap;
+    [['memory 축\n(global→shared)',mem,'#bcc4cc'],['granularity 축\n(1block→packed)',gran,COL.small]].forEach((b,j)=>{
+      const x=x0+j*(bw+30);const bh=Math.max(b[1]/mx*ph,2);
+      s.appendChild(el('rect',{x,y:mt+ph-bh,width:bw,height:bh,rx:2,fill:b[2]}));
+      text(s,x+bw/2,mt+ph-bh-5,'+'+b[1].toFixed(0)+'%',{anchor:'middle',fs:13,fw:700});
+      b[0].split('\n').forEach((ln,li)=>text(s,x+bw/2,mt+ph+15+li*12,ln,{anchor:'middle',fs:10.5,fill:COL.ink,fw:li?400:600}));
+    });
+    text(s,x0+bw+15,mt-8,c.replace('case',''),{anchor:'middle',fs:12,fill:COL.mut,fw:600});
+  });
+  s.appendChild(el('line',{x1:ml,y1:mt+ph,x2:ml+gap*cases.length-90,y2:mt+ph,stroke:COL.line}));
+  document.getElementById('fig-decon').appendChild(s);
+})();
+/* Fig S6 — tier triptych (workers & desks) */
+(function(){
+  const w=720,h=260,s=svg(w,h);const pw=240;
+  function panel(ox,title,col,draw){
+    s.appendChild(el('rect',{x:ox+8,y:30,width:pw-16,height:200,rx:8,fill:col,opacity:.06,stroke:col,'stroke-width':1}));
+    text(s,ox+pw/2,22,title,{anchor:'middle',fs:13,fill:col,fw:700});
+    draw(ox);
+  }
+  // small: packing
+  panel(0,'small — warp에 packing',COL.small,ox=>{
+    s.appendChild(el('rect',{x:ox+30,y:120,width:180,height:26,rx:5,fill:COL.small,opacity:.25,stroke:COL.small}));
+    text(s,ox+120,162,'1 warp (32 lane)',{anchor:'middle',fs:10,fill:COL.mut});
+    [0,1,2,3].forEach(i=>{const x=ox+38+i*44;s.appendChild(el('rect',{x,y:80,width:34,height:34,rx:4,fill:'#fff',stroke:COL.small}));text(s,x+17,100,'front',{anchor:'middle',fs:8,fill:COL.small});});
+    text(s,ox+120,205,'작은 front 여러 개 → 한 벤치',{anchor:'middle',fs:10.5,fill:COL.mut});
+  });
+  // mid: shared
+  panel(240,'mid — front 통째 shared',COL.mid,ox=>{
+    s.appendChild(el('rect',{x:ox+70,y:70,width:100,height:90,rx:8,fill:COL.mid,opacity:.18,stroke:COL.mid,'stroke-dasharray':'4 3'}));
+    text(s,ox+120,64,'shared (작업실)',{anchor:'middle',fs:10,fill:COL.mut});
+    s.appendChild(el('rect',{x:ox+88,y:88,width:64,height:54,rx:4,fill:'#fff',stroke:COL.mid}));
+    text(s,ox+120,118,'front',{anchor:'middle',fs:10,fill:COL.mid});
+    blockGlyph(s,ox+92,150,56,4,COL.mid);
+    text(s,ox+120,205,'한 front, 한 블록 (저레이턴시)',{anchor:'middle',fs:10.5,fill:COL.mut});
+  });
+  // big: multi-block
+  panel(480,'big — 여러 block으로 분할',COL.big,ox=>{
+    s.appendChild(el('rect',{x:ox+55,y:70,width:130,height:90,rx:6,fill:'#fff',stroke:COL.big}));
+    text(s,ox+120,64,'큰 front 하나',{anchor:'middle',fs:10,fill:COL.mut});
+    for(let r=0;r<2;r++)for(let c=0;c<3;c++){const x=ox+62+c*42,y=78+r*42;s.appendChild(el('rect',{x,y,width:36,height:36,rx:3,fill:COL.big,opacity:.22,stroke:COL.big}));}
+    text(s,ox+120,205,'trailing을 타일로 fan-out',{anchor:'middle',fs:10.5,fill:COL.mut});
+  });
+  document.getElementById('fig-s6').appendChild(s);
+})();
+/* Fig S6c — tier 기여 vs B (ACTIVSg70k) */
+(function(){
+  const d=DATA.contrib.case_ACTIVSg70k;
+  lineChart('fig-s6c',{xs:DATA.contrib_B,series:[
+    {name:'Small',color:COL.small,ys:d.small},{name:'Mid',color:COL.mid,ys:d.mid},{name:'Big',color:COL.big,ys:d.big}],
+    ylabel:'기여 (one-block화 시 +%)',yfmt:v=>'+'+v.toFixed(0)+'%',ymin:0});
+})();
+/* Fig tf — time-fraction vs contribution (ACTIVSg25k B=64) */
+(function(){
+  const w=340,h=240,s=svg(w,h);const ml=44,mt=22,ph=150,gap=92,bw=30;const mx=35;
+  const tf=DATA.timefrac_B64, ct=DATA.contrib.case_ACTIVSg25k; // B=64 = index 2
+  const tiers=[['small',COL.small,2],['mid',COL.mid,2],['big',COL.big,2]];
+  tiers.forEach((t,i)=>{const x0=ml+i*gap;
+    [['time-fr',tf[t[0]],'#bcc4cc'],['기여',ct[t[0]][2],t[1]]].forEach((b,j)=>{
+      const v=b[1];const bh=v/mx*ph;const x=x0+j*(bw+6);
+      s.appendChild(el('rect',{x,y:mt+ph-bh,width:bw,height:bh,rx:2,fill:b[2]}));
+      text(s,x+bw/2,mt+ph-bh-4,v+'%',{anchor:'middle',fs:10,fw:600});
+      text(s,x+bw/2,mt+ph+12,b[0],{anchor:'middle',fs:9,fill:COL.mut});});
+    text(s,x0+bw+3,mt+ph+28,t[0],{anchor:'middle',fs:11,fill:t[1],fw:700});
+  });
+  s.appendChild(el('line',{x1:ml,y1:mt+ph,x2:ml+gap*3-30,y2:mt+ph,stroke:COL.line}));
+  document.getElementById('fig-tf').appendChild(s);
+})();
+/* Fig S6mid — 3120sp 기여 (big≈0) */
+(function(){
+  const d=DATA.contrib.case3120sp;
+  lineChart('fig-s6mid',{xs:DATA.contrib_B,w:340,series:[
+    {name:'Small',color:COL.small,ys:d.small},{name:'Mid',color:COL.mid,ys:d.mid},{name:'Big',color:COL.big,ys:d.big}],
+    ylabel:'기여 +%',yfmt:v=>(v>=0?'+':'')+v.toFixed(0)});
+})();
+/* Fig S7 — work-gate 흐름도 + flip line */
+(function(){
+  const w=720,h=260,s=svg(w,h);
+  function box(x,y,bw,bh,fill,t,fs){s.appendChild(el('rect',{x,y,width:bw,height:bh,rx:6,fill:fill,opacity:.14,stroke:fill}));t.split('\n').forEach((ln,i)=>text(s,x+bw/2,y+bh/2+4+(i-(t.split('\n').length-1)/2)*14,ln,{anchor:'middle',fs:fs||11,fw:600}));}
+  function arr(x1,y1,x2,y2,lbl){s.appendChild(el('path',{d:`M${x1} ${y1} L${x2} ${y2}`,stroke:COL.ink,'stroke-width':1.3,'marker-end':'url(#arh)'}));if(lbl)text(s,(x1+x2)/2,(y1+y2)/2-5,lbl,{anchor:'middle',fs:10,fill:COL.mut});}
+  box(20,110,110,46,COL.accent,'front 범위',12);
+  // diamond tier
+  arr(130,133,168,133);
+  s.appendChild(el('path',{d:'M230 95 L290 133 L230 171 L170 133 Z',fill:COL.mid,opacity:.14,stroke:COL.mid}));
+  text(s,230,130,'크기?',{anchor:'middle',fs:11,fw:600});
+  text(s,230,146,'(Classify)',{anchor:'middle',fs:9,fill:COL.mut});
+  // big branch
+  arr(260,108,320,70,'>64'); box(320,48,120,44,COL.big,'FactorBig\n(multi-block)',11);
+  // mid branch
+  arr(260,158,320,196,'33–64'); box(320,176,120,44,COL.mid,'FactorMid\n(shared)',11);
+  // small → gate
+  arr(290,133,340,133,'≤32');
+  s.appendChild(el('path',{d:'M430 100 L500 133 L430 166 L360 133 Z',fill:COL.small,opacity:.14,stroke:COL.small}));
+  text(s,430,128,'(cnt×B×2)',{anchor:'middle',fs:9.5,fw:600});text(s,430,142,'≥ 3936 ?',{anchor:'middle',fs:10,fw:600});
+  arr(465,110,520,80,'예'); box(520,58,140,40,COL.small,'FactorSmall (packing)',10.5);
+  arr(465,156,520,186,'아니오'); box(520,168,140,40,COL.mid,'FactorMid (1블록)',10.5);
+  text(s,360,250,'small tier라도 일감이 GPU를 채우면 packing, 아니면 한 front씩 → "tier ≠ kernel"',{anchor:'middle',fs:11,fill:COL.mut});
+  document.getElementById('fig-s7').appendChild(s);
+})();
+/* Fig S8a — B=1 vs B>1 */
+(function(){
+  const w=720,h=200,s=svg(w,h);
+  function col(x,title,col,items){
+    s.appendChild(el('rect',{x,y:24,width:320,height:120,rx:10,fill:col,opacity:.07,stroke:col}));
+    text(s,x+160,18,title,{anchor:'middle',fs:14,fill:col,fw:700});
+    items.forEach((t,i)=>text(s,x+20,54+i*26,'· '+t,{fs:12.5}));
+  }
+  col(20,'B=1 — 일감 희소',COL.proper,['front당 1블록','selinv → 병렬 GEMV','front 캐시 상주','= 레이턴시 은닉']);
+  col(380,'B>1 — 일감 ∝ B',COL.accent,['포화는 필요조건일 뿐','tiny: packing (granularity)','mid: shared (memory)','big: split (occupancy) + selinv drop']);
+  s.appendChild(el('line',{x1:30,y1:170,x2:690,y2:170,stroke:COL.ink,'stroke-width':1.3,'marker-end':'url(#arh)'}));
+  text(s,360,190,'available work (배치 B) →',{anchor:'middle',fs:12,fill:COL.mut});
+  document.getElementById('fig-s8a').appendChild(s);
+})();
+/* Fig S8b — custom vs cuDSS speedup */
+(function(){
+  const cs=Object.keys(DATA.cudss_vs_custom);
+  const cols=[COL.mid,COL.small,COL.accent,COL.big,COL.cudss];
+  const ser=cs.map((c,i)=>{const d=DATA.cudss_vs_custom[c];return {name:c.replace('case',''),color:cols[i],ys:d.cudss.map((v,j)=>v/d.custom[j])};});
+  lineChart('fig-s8b',{xs:DATA.cvc_B,series:ser,ylabel:'cuDSS / custom (factor)',yfmt:v=>v.toFixed(0)+'×',ymin:1});
+})();
+/* S9 audit 표 */
+(function(){
+  const rows=[
+   ['C1','front 분포는 bimodal: ~98% tiny(≤32) + 소수 큰 spine','E1 (dump-fronts, 9케이스)','median 4~6 공통; big%·max는 케이스 크기에 따라 0~0.8%'],
+   ['C2','B=1은 레이턴시-bound·캐시 상주','L1~80%/DRAM~15%, 1블록/front','결함이 아니라 일감 희소 regime'],
+   ['C3','naive(grid.y=B)는 proper보다 1.4~3.4× 느림','E2 (naive_vs_proper)','env 게이트 실제 경로, 측정값'],
+   ['C4','naive는 occ 89%인데 issue 52% → 포화는 필요조건일 뿐','E4 ncu: long 8.0/barrier 6.5','자가반박 R4: "포화=빠름" 반증'],
+   ['C5','mid의 병목은 memory (granularity 아님)','E4: FactorMid는 1블록 동일(granularity 고정)인데 long 8.0→1.6','자가반박 R1: "granularity∝work"가 mid에서 무너짐'],
+   ['C6','tiny의 병목은 granularity/packing (memory 아님)','deconfound: mem축 +1~2% vs gran축 +14~20%, barrier 6.5→0','자가반박 R2: "memory가 축"이 tiny에서 무너짐 (clean isolation)'],
+   ['C7','big은 under-fill — multi-block이 저-B 지배, 고-B 수렴','E3/E6: +97%(B4)→+11%(B256)','배치가 병렬성 제공 → 고-B 미미; big front 없으면 0'],
+   ['C8','단일 축 없음 — 구간별 병목이 다름','C5·C6의 결합 (mem≠gran, 구간별)','이게 핵심 결론; 슬로건 압축은 손실'],
+   ['C9','집계 ablation(route-to-naive)은 약한 후행 지표','E3는 "최악(global-1block)" 기준 → 절대값 과대','C6의 deconfound가 정확; 비중≠기여도 별개(Big27%vs8%)'],
+   ['C10','small tier 라우팅은 일감-적응(FactorMid↔FactorSmall)','work-gate (cnt×B×2)≥3936=SM×warp','small tier ≠ FactorSmall kernel'],
+   ['C11','custom이 cuDSS 압도, B 커질수록 격차↑','E6: 1.4~2.0×(B2)→3.5~10×(B256)','fp32; relres ~1e-4 정상'],
+   ['C12','종합: 포화(필요) + 구간별 병목 겨냥(tiny=gran/mid=mem/big=occ)','C1~C11 + forward 유도 + direct + deconfound','forward·direct로 도출; ablation은 보조'],
+  ];
+  let h='<table><thead><tr><th>#</th><th>주장(claim)</th><th>근거(experiment)</th><th>caveat / 범위</th></tr></thead><tbody>';
+  rows.forEach(r=>{h+=`<tr><td><b>${r[0]}</b></td><td>${r[1]}</td><td>${r[2]}</td><td style="color:var(--mut)">${r[3]}</td></tr>`;});
+  h+='</tbody></table>';
+  document.getElementById('tbl-audit').innerHTML=h;
+})();
+/* 부록 표들 */
+function dataTable(id,head,rowsFn){let h='<table><thead><tr>'+head.map((x,i)=>`<th class="${i?'n':''}">${x}</th>`).join('')+'</tr></thead><tbody>';h+=rowsFn();h+='</tbody></table>';document.getElementById(id).innerHTML=h;}
+(function(){ // E2
+  dataTable('tbl-e2',['case','B=2','B=4','B=8','B=16','B=32','B=64'],()=>{
+    let r='';for(const c in DATA.naive_vs_proper){const d=DATA.naive_vs_proper[c];r+=`<tr><td>${c.replace('case','')}</td>`+d.naive.map((v,j)=>`<td class="n">${(v/d.proper[j]).toFixed(2)}×</td>`).join('')+'</tr>';}return r;});
+})();
+(function(){ // E3
+  dataTable('tbl-e3',['case·tier','B=4','B=16','B=64','B=256'],()=>{
+    let r='';for(const c in DATA.contrib){const d=DATA.contrib[c];['small','mid','big'].forEach(t=>{r+=`<tr><td>${c.replace('case','')} · <b style="color:var(--${t})">${t}</b></td>`+d[t].map(v=>`<td class="n">${v>=0?'+':''}${v}%</td>`).join('')+'</tr>';});}return r;});
+})();
+(function(){ // E6
+  dataTable('tbl-e6',['case','metric',...DATA.cvc_B.map(b=>'B='+b)],()=>{
+    let r='';for(const c in DATA.cudss_vs_custom){const d=DATA.cudss_vs_custom[c];
+      r+=`<tr><td rowspan="3">${c.replace('case','')}</td><td>custom</td>`+d.custom.map(v=>`<td class="n">${v.toFixed(3)}</td>`).join('')+'</tr>';
+      r+=`<tr><td>cuDSS</td>`+d.cudss.map(v=>`<td class="n">${v.toFixed(3)}</td>`).join('')+'</tr>';
+      r+=`<tr><td>speedup</td>`+d.cudss.map((v,j)=>`<td class="n"><b>${(v/d.custom[j]).toFixed(1)}×</b></td>`).join('')+'</tr>';}return r;});
+})();
+</script>
+</body>
+</html>

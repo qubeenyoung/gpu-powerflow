@@ -107,13 +107,13 @@ Status Solver::get_solution(DenseVectorView* solution) const {
 
 Status Solver::Analyze() {
   if (!impl_ || !impl_->has_matrix) return Status::kInvalidState;
-  if (impl_->config.pivot_strategy == PivotStrategy::DynamicPartial)
-    return Status::kInvalidValue;
   plan::PlanBuildOptions opts;
-  opts.use_matching = impl_->config.use_matching ||
-                      impl_->config.matching == MatchingMode::Structural;
+  opts.use_matching = impl_->config.matching == MatchingMode::Structural;
   opts.use_parallel_nested_dissection =
       impl_->config.use_parallel_nested_dissection;
+  opts.parallel_nd_depth = impl_->config.parallel_nd_depth;
+  opts.parallel_nd_base_small = impl_->config.parallel_nd_base_small;
+  opts.parallel_nd_base_large = impl_->config.parallel_nd_base_large;
   opts.metis_seed = 42;  // fixed ND ordering seed
   opts.max_panel_width = impl_->config.max_panel_width;
   opts.float_front = IsFp32Front(impl_->config.precision);
@@ -121,6 +121,7 @@ Status Solver::Analyze() {
   opts.dump_fronts_only = impl_->config.analyze_fronts_only;
   opts.emit_analyze_info = impl_->config.analyze_emit_info;
 
+  // Build the symbolic plan and adopt its ordering / permutations.
   plan::PlanBuildResult result;
   if (!plan::BuildPlanFromCsr(impl_->matrix, opts, result))
     return Status::kAnalysisFailed;
@@ -139,7 +140,6 @@ Status Solver::Setup(int batch_size) {
   if (batch_size <= 0) return Status::kInvalidValue;
   const bool static_pivoting =
       impl_->config.pivot_strategy == PivotStrategy::StaticDiagonalShift &&
-      impl_->config.enable_shift_retry &&
       impl_->config.shift_retry_epsilon > 0.0;
   return custom_linear_solver::Setup(
              impl_->plan, batch_size, impl_->config.precision, impl_->state,
@@ -164,6 +164,7 @@ Status Solver::Factorize() {
   if (impl_->state.batch_count == 0) {
     if (auto st = Setup(1); st != Status::kSuccess) return st;
   }
+  // Dispatch the numeric factor in the registered input precision.
   const int* o2c = impl_->d_ordered_value_to_csr.ptr;
   bool ok = false;
   if (impl_->matrix.value_type == ValueType::kFloat64) {
@@ -184,6 +185,7 @@ Status Solver::Solve() {
   if (!impl_ || !impl_->has_rhs || !impl_->has_solution || !impl_->analyzed)
     return Status::kInvalidState;
   if (impl_->state.batch_count == 0) return Status::kInvalidState;
+  // Dispatch the triangular Solve by (rhs, solution) precision pair.
   const int* perm = impl_->d_perm.ptr;
   const int* iperm = impl_->d_iperm.ptr;
   bool ok = false;

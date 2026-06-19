@@ -87,14 +87,12 @@ __device__ __forceinline__ void FwdSubstituteFixed(
   }
 }
 
-// ── Shared-staged (compact leading-dim) variants
-// ────────────────────────────────────── P3: the regular block-per-front
+// Shared-staged (compact leading-dim) variants: the regular block-per-front
 // kernels stage the touched panel into shared with a coalesced load, then run
 // the phases reading the compact panel (leading dim `ld`, not the front's
-// `fsz`). ncu showed the direct global access at ~7-13% load-coalescing
-// (bytes/sector); staging converts the strided gathers into one coalesced load
-// + bank-friendly shared reads. The math is identical to the non-staged helpers
-// above; only the operand source (Lsh/Ush, stride ld) changes.
+// `fsz`). Staging converts the strided global gathers into one coalesced load
+// plus bank-friendly shared reads. The math is identical to the non-staged
+// helpers above; only the operand source (Lsh/Ush, stride ld) changes.
 
 // Forward panel substitution reading the compact L panel Lsh (row-major,
 // leading dim ld = nc).
@@ -193,28 +191,23 @@ __device__ __forceinline__ void BwdLoadRhsAndXFixed(const T* y_global,
 // Phase 2 — rhs[k] -= sum_j U[k, nc + j] * xsh[j], over k in [0, nc).
 //
 // Two paths sharing the same math:
-//   nc-parallel (original): each lane handles one row k, runs cb FMAs serial.
-//   Latency cb
-//                           cycles; idles (width - nc) threads. Best when nc is
-//                           close to a warp.
-//   cb-parallel (new):      lanes stride over j (xsh dimension); per-row dot is
-//   a warp
-//                           reduce. Uses 32 lanes regardless of nc; latency
-//                           nc * (ceil(cb/32) + log2(32)). Best when cb >> nc.
+//   nc-parallel: each lane handles one row k, runs cb FMAs serially. Idles
+//                (width - nc) threads; best when nc is close to a warp.
+//   cb-parallel: lanes stride over j (xsh dimension), per-row dot is a warp
+//                reduce; keeps all lanes busy. Best when cb >> nc.
 //
-// The reduce path only wins for very contribution-heavy small fronts.
-// Empirically, `cb > 8*nc` was the best gate after switching small-tier packing
-// to max-nc-based subgroups; lower gates overuse shuffle reduction and regress
-// the batch Solve. SG = sub-group lane count (8/16/32) for the warp/sub-group
-// reduce path; `width` = the caller's active lane count (SG for warp/sub-group
-// kernels, blockDim for the regular tier); `mask` = the sub-group's active-lane
-// mask (0xffffffff for a full warp). SG=32 / width=32 / mask=0xffffffff is the
-// classic full-warp form.
+// The reduce path only wins for contribution-heavy small fronts; gate cb > 8*nc
+// (lower gates overuse shuffle reduction and regress the batch Solve). SG =
+// sub-group lane count (8/16/32) for the reduce path; `width` = the caller's
+// active lane count (SG for warp/sub-group kernels, blockDim for the regular
+// tier); `mask` = the sub-group's active-lane mask. SG=32 / width=32 /
+// mask=0xffffffff is the classic full-warp form.
 template <typename T, int SG = 32>
 __device__ __forceinline__ void BwdCbSubtract(const T* F, int fsz, int nc,
                                               int cb, const T* xsh, T* rhs,
                                               int t, int width,
                                               unsigned mask = 0xffffffffu) {
+  // Block-wide cb-parallel reduce: warps split rows, lanes stride over j.
   if (width >= 128 && cb >= 64) {
     const int lane = t & 31;
     const int warp = t >> 5;
@@ -230,11 +223,10 @@ __device__ __forceinline__ void BwdCbSubtract(const T* F, int fsz, int nc,
     return;
   }
 
-  // Warp / sub-group reduce path (width ≤ 32): lanes stride over j (xsh dim)
-  // and each row's dot is a segment reduce, keeping all SG lanes busy where
-  // nc-parallel would idle cb-nc of them. The regular tier (width > 32) has
-  // parallelism elsewhere and the FP64-latency-bound nc-parallel path beats the
-  // reduce-bound one — empirical.
+  // Warp / sub-group reduce path (width <= 32): lanes stride over j and each
+  // row's dot is a segment reduce, keeping all SG lanes busy where nc-parallel
+  // would idle cb-nc of them. The regular tier (width > 32) falls through to
+  // nc-parallel, which has parallelism elsewhere and is FP64-latency-bound.
   if (width <= 32 && cb > 8 * nc) {
     for (int k = 0; k < nc; ++k) {
       T pk = T(0);
@@ -245,6 +237,7 @@ __device__ __forceinline__ void BwdCbSubtract(const T* F, int fsz, int nc,
       if (t == 0) rhs[k] -= pk;
     }
   } else {
+    // nc-parallel: one row per lane, cb FMAs serially.
     if (t < nc && t < width) {
       T pk = T(0);
       for (int j = 0; j < cb; ++j) pk += F[(long)t * fsz + (nc + j)] * xsh[j];

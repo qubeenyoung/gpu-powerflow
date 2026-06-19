@@ -31,14 +31,14 @@ struct Options {
   int batch =
       0;  // uniform-batch experiment: B systems sharing the sparsity pattern
   bool batch_only = false;  // skip the single-system factor/Solve
-  bool single_fp32 = false;
+  bool single_fp32 = false;  // upload single-system input as FP32
   int max_panel_width =
       8;  // Analyze: max panel width inside a supernode; -1 keeps default
   bool use_parallel_nested_dissection =
       true;                   // false: deterministic serial METIS NodeND
   bool analyze_only = false;  // stop after Analyze/dump-fronts
   bool analyze_info = false;  // print Analyze-phase front/subtree summary
-  bool matching = false;
+  bool matching = false;      // structural row/column matching before factor
   cls::PivotStrategy pivot_strategy = cls::PivotStrategy::StaticDiagonalShift;
   double pivot_epsilon = 1.0e-8;
   // Numeric precision. See state.hpp for what each mode does: fp64 / fp32 /
@@ -136,8 +136,7 @@ void usage(const char* argv0) {
          "--dump-fronts)\n"
       << "  --matching            enable structural row/column matching before "
          "factorization\n"
-      << "  --pivot-strategy MODE none|shift|partial (partial is rejected "
-         "unless implemented)\n"
+      << "  --pivot-strategy MODE none|shift (default shift)\n"
       << "  --pivot-epsilon X     static shift pivot threshold/magnitude\n"
       << "  --Analyze-info        print front-size and subtree summary after "
          "Analyze\n"
@@ -198,17 +197,14 @@ Options parse_args(int argc, char** argv) {
       options.matching = true;
     } else if (arg == "--pivot-strategy") {
       if (++i >= argc)
-        throw std::runtime_error(
-            "--pivot-strategy requires none|shift|partial");
+        throw std::runtime_error("--pivot-strategy requires none|shift");
       const std::string value = argv[i];
       if (value == "none")
         options.pivot_strategy = cls::PivotStrategy::None;
       else if (value == "shift")
         options.pivot_strategy = cls::PivotStrategy::StaticDiagonalShift;
-      else if (value == "partial")
-        options.pivot_strategy = cls::PivotStrategy::DynamicPartial;
       else
-        throw std::runtime_error("--pivot-strategy must be none|shift|partial");
+        throw std::runtime_error("--pivot-strategy must be none|shift");
     } else if (arg == "--pivot-epsilon") {
       if (++i >= argc)
         throw std::runtime_error("--pivot-epsilon requires a value");
@@ -358,7 +354,6 @@ int main(int argc, char** argv) {
     solver_config.analyze_fronts_only = options.analyze_only;
     solver_config.matching = options.matching ? cls::MatchingMode::Structural
                                               : cls::MatchingMode::None;
-    solver_config.use_matching = options.matching;
     solver_config.pivot_strategy = options.pivot_strategy;
     solver_config.shift_retry_epsilon = options.pivot_epsilon;
     solver_config.analyze_emit_info = options.analyze_info;
@@ -443,7 +438,7 @@ int main(int argc, char** argv) {
     // Warmup (untimed): excludes first-call graph instantiation / lazy
     // allocation from the timed median. The timed loop syncs inside the
     // measured region so the wall-clock span covers GPU execution, not just
-    // async launch — matching the batched path below (B-1/B-2).
+    // async launch.
     for (int r = 0; r < options.warmup && !options.batch_only; ++r) {
       require_success(solver.Factorize(), "Factorize(warmup)");
       require_success(solver.Solve(), "Solve(warmup)");
