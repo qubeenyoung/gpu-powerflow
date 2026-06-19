@@ -1,181 +1,200 @@
 # gpu-powerflow
 
-미분 가능(differentiable) **GPU 가속 전력조류(power flow)** 솔버 **cuPF**와, 그 데이터
-준비·벤치마크·튜토리얼·기준선(baseline)·실험 도구를 모은 작업 공간이다.
+미분 가능(differentiable) **GPU 가속 전력조류(power flow)** 솔버 **cuPF**와, 이를 둘러싼
+데이터 준비·벤치마크·튜토리얼·기준선(baseline) 도구를 모은 작업 공간이다.
 
 핵심은 [`cuPF/`](cuPF/) — 희소 `Ybus`를 입력으로 Newton–Raphson(NR) 전력조류를 GPU에서
 풀고, adjoint(역전파)로 부하 gradient를 계산하며, 시나리오 **배치**를 한 번에 처리하는
-C++/CUDA 솔버다. 나머지 디렉터리는 cuPF를 **둘러싼 생태계**(케이스 변환, 벤치마크, MATLAB/
-pandapower 기준선, 커스텀 선형 솔버, 튜토리얼, 컨테이너)를 제공한다.
+C++/CUDA 솔버다. 백엔드는 CPU(SuiteSparse KLU/UMFPACK)와 CUDA(cuDSS / 자체 multifrontal
+솔버)를 런타임에 선택하고, 정밀도는 FP64 / FP32 / Mixed / TF32를 지원한다.
 
 ---
 
-## 저장소 구성
+## 1. 저장소 구성
 
 ```text
 .
-├── cuPF/                 # 핵심 솔버 (C++/CUDA + Python 바인딩 + 설계 문서)
-├── python/               # 데이터 준비 · 벤치마크 하니스 · 튜토리얼 노트북
-├── custom_linear_solver/ # cuDSS형 래퍼 (CUDA multifrontal 직접 솔버, 선택적 백엔드)
-├── benchmark/            # 빌드/실행 하니스, 결과(results/), 분석 docs
-├── matlab/               # MATPOWER runpf 기준선 실행 스크립트
-├── Dockerfile, requirements.txt
+├── cuPF/                 # 핵심 솔버: C++/CUDA 라이브러리 + pybind/torch 바인딩 + 설계 문서
+│   ├── cpp/              #   newton_solver (core, ops, storage)
+│   ├── bindings/         #   pybind_cupf.cpp, torch_cupf_extension.cpp
+│   ├── python/cupf/      #   torch autograd 래퍼 패키지
+│   ├── tests/            #   run_cupf.py(통합 러너) · cupf_bench(C++) · unit/ · smoke/
+│   └── docs/             #   컴포넌트별 설계 문서
+├── custom_linear_solver/ # CUDA multifrontal 직접 선형 솔버 (cuPF의 선택적 CUDA 백엔드)
+│   └── tests/            #   scripts/(build_custom·cudss·strumpack) · datasets/ · runners
+├── benchmark/            # 벤치마크 일체
+│   ├── pinn/             #   PINN 훈련 하니스(더미 레이어 + 5에폭) — train.py
+│   ├── backends/         #   백엔드 러너: exapf/(Julia) · matlab/(MATPOWER) · pypower·pandapower·matpower
+│   └── common/           #   공유 스캐폴딩: matpower_data · eval_common · run_benchmark · aggregate_results
+├── prepare_datasets/     # MATPOWER .m → 기준 PF 풀이 → cuPF 덤프 / Newton 선형계 작성
+├── tutorial/             # 입문용 라이브 노트북 6종
+├── Dockerfile            # CUDA 12.8 + cuDSS + SuiteSparse + torch 환경
+└── requirements.txt
 ```
 
----
+핵심 진입점 한눈에:
 
-## 1. cuPF — 핵심 솔버
-
-GPU NR 전력조류 솔버. 자세한 소개·빌드·사용은 [`cuPF/README.md`](cuPF/README.md), 설계는
-[`cuPF/docs/system_architecture.md`](cuPF/docs/system_architecture.md).
-
-- **단계 파이프라인**: `Ibus = Ybus·V` → mismatch `F = V·conj(Ibus) − Sbus` → Jacobian
-  `J·dx = F` → 전압 업데이트.
-- **백엔드/정밀도**: CPU(SuiteSparse KLU/UMFPACK FP64), CUDA(cuDSS) FP64/FP32/Mixed.
-- **배치**: batch-major + cuDSS uniform-batch로 다수 시나리오 동시 풀이(CUDA 세 프로파일).
-- **미분 가능**: 수렴 상태에서 `J^T λ = dL/dx`를 풀어 부하 gradient(implicit function theorem).
-- **PyTorch zero-copy**: device 텐서를 호스트 복사 없이 forward/backward.
+| 목적 | 명령 |
+|------|------|
+| cuPF 실행/측정 | `python3 cuPF/tests/run_cupf.py …` |
+| PINN 훈련 벤치 | `python3 -m benchmark.pinn.train …` |
+| 기준선 교차비교 | `python3 -m benchmark.common.run_benchmark …` |
+| 데이터셋 준비 | `python3 -m prepare_datasets.prepare …` |
+| 선형 솔버 단독 벤치 | `custom_linear_solver/tests/scripts/build_custom.sh` |
 
 ---
 
-## 2. Python / Torch 연동
+## 2. 요구 사항
 
-파이썬 모듈은 `_cupf`(numpy API + 선택적 torch zero-copy 확장). 진입점 요약:
+- **CUDA 12.x** + **cuDSS** (GPU 백엔드), C++17, **CMake ≥ 3.22**
+- **SuiteSparse** KLU/UMFPACK (CPU 백엔드)
+- **Python 3.10**, **PyTorch 2.9**(+cu12), pybind11, pandapower 3.2 — `requirements.txt` 참조
+- (선택) GoogleTest(C++ 단위 테스트), Julia+ExaPF·MATLAB+MATPOWER(해당 기준선 백엔드)
 
-| 진입점 | 메서드 | 입력 | dtype | 배치 | 비고 |
-|--------|--------|------|-------|------|------|
-| numpy 단일 | `solve` | CSR Ybus + Sbus/V0 (FP64 complex) | float64 | B=1 | 단일 시나리오 |
-| numpy 배치 | `solve_batch` | `[B, n_bus]` Sbus/V0 | float64 | ✅ | 다중 시나리오 |
-| numpy adjoint | `solve_adjoint` | dL/dVa, dL/dVm (1D 또는 `[B,n_bus]`) | float64 | ✅ | gradient(역전파) |
-| torch forward | `solve_torch` | CUDA 텐서 `[B,n_bus]`(load/out)·`[n_bus]`(base·V0) | FP64→float64, FP32·Mixed→float32 | ✅ | zero-copy, 현재 CUDA 스트림 |
-| torch backward | `solve_adjoint_torch` | CUDA grad 텐서 `[B,n_bus]` | (forward와 동일) | ✅ | zero-copy autograd |
-
-- torch 경로는 호스트 복사 없이 torch의 **현재 CUDA 스트림**에서 실행
-  (`CUPF_WITH_TORCH=ON` 빌드 필요). Mixed는 비-torch의 FP64 complex 입력과 달리 **float32
-  텐서**를 받는다.
-- `AdjointResult.lambda`는 파이썬 예약어 → `lambda_` / `lambda_numpy`로 접근.
-
-```python
-import numpy as np, _cupf as c
-opts = c.NewtonOptions(); opts.backend = c.BackendKind.CUDA; opts.compute = c.ComputePolicy.Mixed
-s = c.NewtonSolver(opts)
-s.initialize(indptr, indices, data, n_bus, n_bus, pv, pq)   # CSR Ybus + PV/PQ
-rb = s.solve_batch(indptr, indices, data, n_bus, n_bus, sbus_B, v0_B, pv, pq)
-Vb = rb.V_numpy                                             # [B, n_bus]
-```
-
-API 상세는 [`cuPF/docs/newton_solver.md`](cuPF/docs/newton_solver.md),
-바인딩은 [`cuPF/docs/bindings.md`](cuPF/docs/bindings.md).
+가장 간단한 길은 **Docker**다(아래 §3).
 
 ---
 
-## 3. 성능 지표 (대표 실측)
+## 3. 설치
 
-아래는 한 환경(**NVIDIA RTX 3090, CUDA 12.8, Release, `ENABLE_TIMING=ON`**)에서의
-대표값이다. 절대 수치는 하드웨어/케이스에 민감하므로, 재현 명령으로 직접 측정하는 것을
-권장한다.
-
-| 항목 | 케이스 | 대표값 |
-|------|--------|--------|
-| FP64 단일 solve 수렴 | case9241pegase | 7 iter, `mismatch_norm` ≈ 98 µs |
-| 배치 처리량 (B=64, solve_total) | case9241pegase | Mixed ≈ 101 ms vs FP64 ≈ 150 ms |
-| 정확도 `max\|V − Vref\|` (FP64/Mixed) | case1354/2869/9241 | ~1e-13 |
-| FP64 배치 정확성 (batch vs 단일해) | case9241pegase | `max\|ΔV\|` ~1e-12 |
-| FP64 batched adjoint (grad vs 단일해) | case2869pegase | ~1e-11 |
-
-> 처리량은 보통 **Mixed < FP64**(FP64 cuDSS 분해가 무거움), FP32가 가장 싸지만 대형
-> ill-conditioned 계통에서 수렴 불안정. 단계별 정밀 측정은 `ENABLE_TIMING=ON` 빌드에서.
-
-재현:
+### Docker (권장)
 
 ```bash
-# C++ 마이크로 벤치(단계별 µs): <case_dir> <fp32|mixed|fp64> <B1,B2,...> [repeats]
-./build/cupf_batch_bench <case_dir> mixed 1,16,64 5
-# 파이썬 엔드투엔드 벤치 + 집계
-python3 -m python.tests.run_benchmark --cases case9241pegase --repeats 5
-python3 -m python.tests.aggregate_results benchmark/results/<run-name>
-```
-
----
-
-## 4. python/ — 준비·벤치마크·튜토리얼
-
-세 책임으로 분리(자세히는 [`python/README.md`](python/README.md)):
-
-- **`python/prepare/`** — MATPOWER `.m` 파싱 → 기준 PF 풀이 → cuPF 덤프 작성(`prepare.py`),
-  Newton 선형계 생성(`convert_linear_system.py`), `.m`→`.mat` 변환(`convert_m_to_mat.py`).
-- **`python/tests/`** — 단일 벤치마크 패키지: 케이스 로딩(`matpower_data.py`),
-  기준선(`run_pypower.py`, `run_matpower.py`), cuPF 러너(`run_cupf_pybind.py`,
-  `run_cupf_native.py`), 오케스트레이션(`run_benchmark.py`), 집계(`aggregate_results.py`).
-- **`python/tutorial/`** — 입문용 라이브 노트북 6종([README](python/tutorial/README.md)):
-  ① 전력계통 기초·case9·Ybus ② MATPOWER/pandapower 기준선·병목 ③ cuPF CPU 경로
-  ④ cuPF GPU 경로(cuDSS·Edge/EdgeAtomic/VertexWarp·custom) ⑤ pybind `solve_batch`·
-  **Torch autograd** ⑥ 남은 병목·향후 연구.
-
-> 사용자용 파이썬 패키지 코드는 [`cuPF/python/`](cuPF/python/)(`cupf`), 벤치마크 평가기는
-> `python/tests/`에 둔다(분리 유지).
-
----
-
-## 5. custom_linear_solver/
-
-- **[`custom_linear_solver/`](custom_linear_solver/README.md)**: cuDSS와 동일한 phase
-  모델(`set_data → analyze → factorize → solve`)을 따르는 CUDA multifrontal 직접 솔버
-  래퍼(GPU multifrontal 커널 + 심볼릭 분석 + METIS nested-dissection 정렬 + 최소 상태).
-  cuPF를 `CUPF_ENABLE_CUSTOM_SOLVER=ON`으로 빌드하면 CUDA FP64 직접 솔버로 쓸 수 있다
-  ([linear_solve](cuPF/docs/ops/linear_solve.md)).
-
----
-
-## 6. benchmark/ · matlab/
-
-- **`benchmark/`**: 평가기 빌드/실행 하니스(`build_eval.bash`, `run_benchmark.bash`),
-  실행 결과(`results/`, 덤프 케이스 포함), 분석 문서(`docs/`).
-- **`matlab/`**: MATPOWER `runpf` 기준선 실행 경로(`login_online.bash`,
-  `run_matpower_case.bash`, `run_matpower_case.m`). Python 벤치마크의
-  `run_matpower.py`도 같은 `.m` 파일을 호출해 cuPF 결과를 MATPOWER와 대조.
-
----
-
-## 7. 빌드 · 환경
-
-```bash
-cmake -S cuPF -B build \
-  -DWITH_CUDA=ON -DBUILD_PYTHON_BINDINGS=ON \
-  -DCUPF_WITH_TORCH=ON -DENABLE_TIMING=ON \
-  -DCMAKE_PREFIX_PATH=$(python3 -c "import torch;print(torch.utils.cmake_prefix_path)")
-cmake --build build -j
-```
-
-주요 플래그: `WITH_CUDA`(CUDA/cuDSS), `BUILD_PYTHON_BINDINGS`(`_cupf`),
-`CUPF_WITH_TORCH`(torch zero-copy), `ENABLE_TIMING`(단계 타이밍),
-`CUPF_ENABLE_CUSTOM_SOLVER`(custom 직접 솔버). 상세는
-[`cuPF/docs/system_architecture.md`](cuPF/docs/system_architecture.md) §6.
-
-**컨테이너**: `Dockerfile`로 CUDA·cuDSS·SuiteSparse·torch·pandapower
-환경 구성. 파이썬 의존성은 [`requirements.txt`](requirements.txt)(numpy/scipy/pandas,
-pandapower 3.2, matpower, torch 2.9, cupy-cu12, pybind11, jupyterlab 등).
-
-```bash
-# Docker 이미지 빌드
 docker build -t gpu-powerflow:latest .
 
-# 컨테이너 실행
-docker run --gpus all --rm -it gpu-powerflow:latest
-
-# 현재 체크아웃을 컨테이너에 마운트해서 실행
+# 현재 체크아웃을 컨테이너에 마운트해 실행
 docker run --gpus all --rm -it \
-  -v "$PWD":/workspace/gpu-powerflow \
-  -w /workspace/gpu-powerflow \
+  -v "$PWD":/workspace/gpu-powerflow -w /workspace/gpu-powerflow \
   gpu-powerflow:latest
 ```
 
+`Dockerfile`은 `nvidia/cuda:12.8.1-devel-ubuntu22.04` 위에 cuDSS·SuiteSparse·Nsight,
+그리고 `requirements.txt`의 파이썬 의존성을 설치한다.
+
+### 로컬
+
+```bash
+pip install -r requirements.txt
+```
+
+CUDA 12.x·cuDSS·SuiteSparse는 시스템에 별도 설치한다(경로는 Dockerfile 참고:
+cuDSS 헤더 `/usr/include/libcudss/12`, 라이브러리 `/usr/local/cuda/lib64` 등).
+
 ---
 
-## 8. 시작하기
+## 4. 빌드
 
-1. 컨테이너 또는 `requirements.txt`로 환경 구성.
-2. cuPF 빌드(§7) → `_cupf` 모듈 생성.
-3. 입문은 [`python/tutorial/`](python/tutorial/README.md) 노트북 1번부터.
-4. 벤치마크는 `python -m python.tests.run_benchmark ...` → `aggregate_results`.
-5. 솔버 내부·API는 [`cuPF/docs/`](cuPF/docs/system_architecture.md).
+### cuPF (라이브러리 + 바인딩 + 벤치 + 테스트)
+
+```bash
+bash cuPF/tests/scripts/build_cupf.sh          # 단일 cmake 빌드 래퍼
+# 또는 직접:
+cmake -S cuPF -B cuPF/build \
+  -DWITH_CUDA=ON -DBUILD_PYTHON_BINDINGS=ON -DCUPF_WITH_TORCH=ON \
+  -DENABLE_TIMING=ON -DCUPF_ENABLE_CUSTOM_SOLVER=ON \
+  -DCMAKE_PREFIX_PATH=$(python3 -c "import torch;print(torch.utils.cmake_prefix_path)")
+cmake --build cuPF/build -j
+```
+
+한 번의 빌드가 `_cupf`(pybind)·torch 확장·`cupf_bench`(C++)·단위/스모크 테스트를 모두 만든다.
+주요 플래그: `WITH_CUDA`(CUDA/cuDSS), `BUILD_PYTHON_BINDINGS`(`_cupf`),
+`CUPF_WITH_TORCH`(torch zero-copy), `ENABLE_TIMING`(단계 타이밍),
+`CUPF_ENABLE_CUSTOM_SOLVER`(자체 직접 솔버). 자세히는
+[`cuPF/docs/system_architecture.md`](cuPF/docs/system_architecture.md).
+
+### custom_linear_solver (선택)
+
+cuPF의 CUDA 백엔드로 쓰는 multifrontal 직접 솔버. 단독 벤치는 외부 라이브러리별 스크립트로
+빌드한다(서로 다른 lib을 링크하므로 분리):
+
+```bash
+custom_linear_solver/tests/scripts/build_custom.sh      # 자체 솔버
+custom_linear_solver/tests/scripts/build_cudss.sh       # cuDSS 기준
+custom_linear_solver/tests/scripts/build_strumpack.sh   # STRUMPACK 기준
+```
+
+### 테스트 (ctest)
+
+```bash
+ctest --test-dir cuPF/build --output-on-failure   # 단위(gtest) + 파이썬 스모크
+```
+
+---
+
+## 5. 실행
+
+### 5.1 데이터셋 준비
+
+MATPOWER `.m` 케이스를 풀어 cuPF 덤프 / Newton 선형계를 만든다.
+
+```bash
+# cuPF 덤프 디렉터리(Ybus/Sbus/V0/pv/pq)
+python3 -m prepare_datasets.prepare --dataset-root /datasets/matpower --cases case9 case118
+# custom_linear_solver용 선형계 (J.mtx / F.mtx)
+python3 -m prepare_datasets.convert_linear_system --dataset-root /datasets/matpower --cases case118
+```
+
+### 5.2 cuPF 실행·측정 — `cuPF/tests/run_cupf.py`
+
+세 실행 경로(C++ / Python pybind / PyTorch) × 세 측정 모드를 하나의 진입점에서.
+
+```bash
+# C++ 벤치: 최적화 init+solve 시간
+python3 cuPF/tests/run_cupf.py --path cpp    --backend cuda-custom --precision tf32 --mode solve
+# CPU(KLU/UMFPACK) 디버깅(시스템별 잔차)
+python3 cuPF/tests/run_cupf.py --path python --backend cpu-klu     --precision fp64 --mode debug
+# PyTorch autograd: forward+backward
+python3 cuPF/tests/run_cupf.py --path torch  --backend cuda-cudss  --precision mixed --grad
+```
+
+옵션: `--path {cpp,python,torch}`, `--backend {cuda-custom,cuda-cudss,cpu-klu,cpu-umfpack}`,
+`--precision {fp64,fp32,mixed,tf32}`, `--mode {solve,operators,debug}`, `--jacobian`,
+`--cases --batch --repeats`. `--help` 참조.
+
+### 5.3 PINN 훈련 벤치 — `benchmark/pinn/`
+
+각 백엔드 앞에 더미 레이어를 두고 상태예측 PINN(손실 = 전력조류 잔차 ‖F(V)‖)을 5에폭 훈련.
+`cupf-torch`는 NR을 통과하는 미분가능 경로, 나머지는 forward physics oracle.
+
+```bash
+python3 -m benchmark.pinn.train --case case118 --epochs 5
+python3 -m benchmark.pinn.train --backends pypower cupf-torch --case case300
+```
+
+### 5.4 기준선 교차비교 매트릭스 — `benchmark/common/`
+
+pypower·MATPOWER 기준선을 한 `runs.csv`로 모아 집계.
+
+```bash
+python3 -m benchmark.common.run_benchmark --cases case9 --warmup 0 --repeats 1
+python3 -m benchmark.common.aggregate_results benchmark/results/<run-name>
+```
+
+### 5.5 선형 솔버 단독 벤치 — `custom_linear_solver/`
+
+```bash
+custom_linear_solver/tests/scripts/build_custom.sh
+custom_linear_solver/build/custom_linear_solver_run \
+  --matrix custom_linear_solver/tests/datasets/power/case118/J.mtx \
+  --rhs    custom_linear_solver/tests/datasets/power/case118/F.mtx \
+  --precision tf32 --batch 64
+```
+
+---
+
+## 6. 튜토리얼
+
+입문용 라이브 노트북은 [`tutorial/`](tutorial/README.md)에 있다(01 전력계통 기초·case9 →
+02 NR·Jacobian → 03 MATPOWER/pandapower 기준선 → 04 cuPF CPU → 05 cuPF GPU →
+06 배치·Torch autograd·향후 연구).
+
+---
+
+## 7. 문서
+
+- 전체 설계: [`cuPF/docs/system_architecture.md`](cuPF/docs/system_architecture.md)
+- 솔버 API·바인딩: [`cuPF/docs/newton_solver.md`](cuPF/docs/newton_solver.md),
+  [`cuPF/docs/bindings.md`](cuPF/docs/bindings.md)
+- 자체 선형 솔버: [`custom_linear_solver/README.md`](custom_linear_solver/README.md),
+  [`custom_linear_solver/docs/`](custom_linear_solver/docs/)
+- 벤치마크: [`benchmark/README.md`](benchmark/README.md)
