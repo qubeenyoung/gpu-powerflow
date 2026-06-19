@@ -191,9 +191,13 @@ CsrComplex load_matrix_market_complex_csr(const fs::path& path)
 
     std::string header;
     std::getline(in, header);
-    if (header.find("MatrixMarket") == std::string::npos ||
-        header.find("coordinate") == std::string::npos ||
-        header.find("complex") == std::string::npos) {
+    std::string lowered = header;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    const bool symmetric = lowered.find("symmetric") != std::string::npos;
+    if (lowered.find("matrixmarket") == std::string::npos ||
+        lowered.find("coordinate") == std::string::npos ||
+        lowered.find("complex") == std::string::npos) {
         throw std::runtime_error("unsupported MatrixMarket header in " + path.string());
     }
 
@@ -218,7 +222,7 @@ CsrComplex load_matrix_market_complex_csr(const fs::path& path)
         Complex value{};
     };
     std::vector<Entry> entries;
-    entries.reserve(nnz);
+    entries.reserve(symmetric ? static_cast<std::size_t>(nnz) * 2 : static_cast<std::size_t>(nnz));
     for (int32_t k = 0; k < nnz; ++k) {
         if (!std::getline(in, line)) {
             throw std::runtime_error("unexpected end of MatrixMarket file " + path.string());
@@ -235,18 +239,34 @@ CsrComplex load_matrix_market_complex_csr(const fs::path& path)
         if (!(iss >> row >> col >> re >> im)) {
             throw std::runtime_error("malformed MatrixMarket entry in " + path.string());
         }
-        entries.push_back({row - 1, col - 1, Complex{re, im}});
+        const Entry entry{row - 1, col - 1, Complex{re, im}};
+        entries.push_back(entry);
+        if (symmetric && entry.row != entry.col) {
+            entries.push_back({entry.col, entry.row, entry.value});
+        }
     }
 
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
         return a.row == b.row ? a.col < b.col : a.row < b.row;
     });
 
+    std::vector<Entry> merged;
+    merged.reserve(entries.size());
+    for (const Entry& entry : entries) {
+        if (!merged.empty() &&
+            merged.back().row == entry.row &&
+            merged.back().col == entry.col) {
+            merged.back().value += entry.value;
+        } else {
+            merged.push_back(entry);
+        }
+    }
+
     CsrComplex csr;
     csr.rows = rows;
     csr.cols = cols;
     csr.indptr.assign(rows + 1, 0);
-    for (const Entry& entry : entries) {
+    for (const Entry& entry : merged) {
         if (entry.row < 0 || entry.row >= rows || entry.col < 0 || entry.col >= cols) {
             throw std::runtime_error("MatrixMarket entry out of bounds in " + path.string());
         }
@@ -255,9 +275,9 @@ CsrComplex load_matrix_market_complex_csr(const fs::path& path)
     for (int32_t row = 0; row < rows; ++row) {
         csr.indptr[row + 1] += csr.indptr[row];
     }
-    csr.indices.reserve(entries.size());
-    csr.data.reserve(entries.size());
-    for (const Entry& entry : entries) {
+    csr.indices.reserve(merged.size());
+    csr.data.reserve(merged.size());
+    for (const Entry& entry : merged) {
         csr.indices.push_back(entry.col);
         csr.data.push_back(entry.value);
     }

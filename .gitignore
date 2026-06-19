@@ -9,9 +9,7 @@ build-*/
 !.env.example
 *.yml
 
-# Datasets (too large for git)
-datasets/
-external/
+cuDSS_reproduce/
 
 # IDE / Editor
 .vscode/
@@ -32,50 +30,6 @@ dist/
 *.o
 *.a
 *.d
-*.dSYM/
-
-# Debug dumps
-dump_*.mtx
-dump_*.txt
-
-# Profiling
-*.ncu-rep
-*.nsys-rep
 
 # Logs
 *.log
-
-# Temp
-tmp/
-runs/
-python/tutorial/_runs/
-
-# OS
-.DS_Store
-Thumbs.db
-
-archive/
-
-v1/
-
-v2/
-
-
-
-exp/
-!paper/exp/
-!paper/exp/plan.md
-# root exp/: track head-to-head sources+cases, but not built binaries/logs/large data
-!/exp/
-/exp/harness/strumpack_bench
-/exp/harness/strumpack_bench_magma
-/exp/harness/cudss_bench
-/exp/harness/*.log
-# SuiteSparse downloads + extracted matrices (re-download from sparse.tamu.edu)
-/exp/cases_ss/
-# symmetric->full expansions (regenerate via exp/sym_to_full.py)
-/exp/cases_ss_full/
-# nsys/ncu profiling artifacts
-/exp/prof/
-
-refactor_docs/

@@ -77,8 +77,6 @@ cls::SolverConfig make_solver_config(const CustomSolverConfig* c, cls::Precision
         config.precision = cls::Precision::FP32;          // FP32 storage can't factor FP64
     }
     config.use_parallel_nested_dissection = !c->serial_nd;
-    config.metis_seed                     = c->metis_seed;
-    config.tier_split                     = c->tier_split;
     config.max_panel_width                = c->max_panel_width;
     config.enable_shift_retry             = c->enable_shift_retry;
     config.shift_retry_epsilon            = c->shift_retry_epsilon;

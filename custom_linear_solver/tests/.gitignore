@@ -1,9 +1,6 @@
 __pycache__/
 *.pyc
 
-# Root .gitignore ignores any "datasets/"; re-include this one so the power-grid
-# Jacobians (small, canonical benchmark set) are tracked...
-!datasets/
 # ...but keep the large SuiteSparse matrices out — fetched by
 # datasets/fetch_suitesparse.sh on demand.
 datasets/suitesparse/

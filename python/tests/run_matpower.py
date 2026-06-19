@@ -53,28 +53,28 @@ def _matpower_home(explicit: Path | None) -> Path:
 
 
 def _load_repo_env(env: dict[str, str]) -> dict[str, str]:
-    """Load simple KEY=VALUE entries from the repo-local .env without logging secrets."""
+    """Load simple KEY=VALUE entries from local .env files without logging secrets."""
     repo_root = Path(__file__).resolve().parents[2]
-    env_path = repo_root / ".env"
-    if not env_path.exists():
-        return env
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+    for env_path in (repo_root / ".env", repo_root / "matlab" / ".env"):
+        if not env_path.exists():
             continue
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
-        if "=" not in line:
-            continue
-        try:
-            parts = shlex.split(line, comments=True, posix=True)
-        except ValueError:
-            parts = [line]
-        if len(parts) != 1 or "=" not in parts[0]:
-            continue
-        key, value = parts[0].split("=", 1)
-        if key and key not in env:
-            env[key] = value
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            try:
+                parts = shlex.split(line, comments=True, posix=True)
+            except ValueError:
+                parts = [line]
+            if len(parts) != 1 or "=" not in parts[0]:
+                continue
+            key, value = parts[0].split("=", 1)
+            if key and key not in env:
+                env[key] = value
     return env
 
 

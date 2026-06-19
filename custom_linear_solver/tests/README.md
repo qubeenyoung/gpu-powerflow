@@ -16,11 +16,10 @@ tests/
 │   ├── build_custom.sh        → custom_linear_solver/build/custom_linear_solver_run
 │   ├── build_cudss.sh         → scripts/cudss_bench
 │   └── build_strumpack.sh     → scripts/strumpack_bench_{magma,nomagma}  (both GPU)
-├── datasets/
-│   ├── power/                 power-grid Jacobians (tracked; the primary domain)
-│   ├── suitesparse/           SuiteSparse matrices (git-ignored, fetched on demand)
-│   └── fetch_suitesparse.sh   download SuiteSparse matrices
-└── tools/cholmod_fronts.cpp   offline front-analysis helper (not a runner)
+└── datasets/        # see datasets/README.md
+    ├── power/                 power-grid Jacobians (tracked; the primary domain)
+    ├── suitesparse/           SuiteSparse matrices (git-ignored, fetched on demand)
+    └── fetch_suitesparse.sh   download SuiteSparse matrices
 ```
 
 ## Build
