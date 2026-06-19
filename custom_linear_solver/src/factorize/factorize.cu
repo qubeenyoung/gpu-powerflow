@@ -42,15 +42,9 @@ void RegisterFactorAttributes(Precision precision) {
   cudaFuncSetAttribute(FactorMid<double, false>,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        kDynamicSharedMemoryOptInBytes);
-  cudaFuncSetAttribute(FactorBig<double, false>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       kDynamicSharedMemoryOptInBytes);
-  cudaFuncSetAttribute(FactorBig<float, false>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       kDynamicSharedMemoryOptInBytes);
-  cudaFuncSetAttribute(FactorBig<float, true>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       kDynamicSharedMemoryOptInBytes);
+  // Big-tier kernels (FactorBigPivot/Panels/Trail and the per-tile TF32
+  // FactorBigTrailTf32) all stage only a small tile, staying under the 48 KB
+  // default — no dynamic-shared opt-in needed.
 }
 
 void IssueFactor(const MultifrontalPlan& plan, State& st, void* stream) {

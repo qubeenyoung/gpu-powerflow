@@ -26,7 +26,7 @@ src/
 │   ├── assemble.cuh          입력 CSR 값을 front arena로 scatter
 │   ├── small.cuh             tier 커널: warp-packed sub-group (FactorSmall)
 │   ├── mid.cuh               tier 커널: whole-front shared (FactorMid)
-│   ├── big.cuh               tier 커널: global multi-block (FactorBig)
+│   ├── big.cuh               tier 커널: global multi-block 트리플 (FactorBigPivot/Panels/Trail[Tf32])
 │   └── single.cuh            B=1 단일 시스템 융합 커널 + selinv(pivot 역행렬화)
 │
 ├── solve/               ── 스테이지 3: 삼각 대입 (값 사용, 매 반복)
@@ -73,7 +73,7 @@ src/
 | `assemble.cuh` | `AssembleFrontValues` | 배치별 CSR 값을 `a_pos` 맵 따라 front arena로 scatter |
 | `small.cuh` | `FactorSmall`, `LuSmallWarp`, `DispatchFactorSmall` | warp당 1 front(sub-group 8/16/32 lane) packing, 8 warp/block |
 | `mid.cuh` | `FactorMid`, `StageInAsync`, `FactorizeFrontBlockedTf32`, `DispatchFactorMid` | front 전체 shared staging, 1 block/front; TF32 blocked TC trailing |
-| `big.cuh` | `FactorBig`, `TrailingUpdateStaged[Tiled]`, `TrailingUpdateTf32Tc`, `FactorBigPivot/Panels/Trail`, `DispatchFactorBig` | global 상주 multi-block; FP64 거대 separator는 pivot/panel/trail 3-launch |
+| `big.cuh` | `FactorBigPivot/Panels/Trail`, `FactorBigTrailTf32`, `DispatchFactorBig` | global 상주 multi-block 3-launch 트리플(전 정밀도); TF32 trailing은 per-tile 텐서코어(`FactorBigTrailTf32`) |
 | `single.cuh` | `FactorSingleLevel`, `FactorSingleBig*`, `FactorSingleInvertPivot`, `IssueFactorSingle*` | B=1 융합 커널 + partitioned-inverse(selinv) |
 
 ### `solve/` — 삼각 대입

@@ -34,7 +34,9 @@ trailing(Schur GEMM `CB = A22 − L21·U12`)은 factor FLOP의 대부분이라, 
 - mma 호출은 `front_ops.cuh`의 인라인 PTX 매크로 `CLS_MMA_TF32_M16N8K8`(한 mma) / `CLS_MMA_TF32_OZAKI2`(위 4-pass).
   이건 내부 헬퍼지 사용자 노브가 아니다.
 - Ozaki 4-pass는 TF32 경로에 **상시 컴파일**(별도 빌드 플래그 없음). no-pivot factor + selinv라 이 보정이 필수다.
-- mid는 `BlockUpdateTf32Tc`, big은 `TrailingUpdateTf32Tc`, B=1 big은 전용 `FactorSingleBigTrailTf32`가 같은 mma를 쓴다.
+- mid는 `BlockUpdateTf32Tc`, big(B>1)은 per-tile `FactorBigTrailTf32`, B=1 big은 전용 `FactorSingleBigTrailTf32`가
+  같은 mma 매크로(`CLS_MMA_TF32_OZAKI2`)를 쓴다. big(B>1)의 TC trailing은 레벨이 TC 적격일 때만 쓰이고(§4), 부적격
+  레벨은 스칼라 `FactorBigTrail`로 폴백한다.
 
 ## 3. 비-TF32 커널엔 TC 코드가 없다 — `template<bool UseTC> + if constexpr`
 
@@ -62,8 +64,10 @@ TF32 → FactorMid<float , true >   →  TC 경로 활성
 ```
 
 `if constexpr`이므로 FP32/FP64 커널 바이너리엔 TF32 mma 코드가 **물리적으로 들어가지 않는다**(런타임 `if`였다면
-dead-path 레지스터를 예약했겠지만 그렇지 않다). `FactorBig`(`big.cuh`)도 동일한 `if constexpr (UseTC)` 패턴이다.
-즉 정밀도별 분리는 [10] 같은 매크로가 아니라 이 템플릿 + `if constexpr`이 한다.
+dead-path 레지스터를 예약했겠지만 그렇지 않다). 이 `template<bool UseTC>` + `if constexpr` 분리는 **mid 커널
+(`FactorMid`)**이 쓴다. big tier는 형태가 다르다 — trailing이 **별도 launch**라, 디스패처(`DispatchFactorBig`)가
+정밀도로 **커널 자체를 고른다**: FP32/FP64는 스칼라 `FactorBigTrail`, TF32(적격 레벨)는 텐서코어
+`FactorBigTrailTf32`. 어느 경로든 비-TF32 바이너리엔 mma 코드가 들어가지 않는다.
 
 ## 4. TF32 적격 — 모양이 staging 예산에 맞는가 (`kTensorCoreUcCap`)
 
@@ -78,8 +82,19 @@ nc <= kTensorCorePivotColumnCap (=32)   &&   uc <= kTensorCoreUcCap (=512)
   `uc_pad·nc_pad ≤ ~12.6K`. nc cap 32에서 512가 안전. **shared 예산이 바뀌면 재유도해야 한다**(주석 명시).
 - 과거의 `fsz>32`/`nc≥1`/`uc≥1` 하한 게이트는 제거됐다(mid는 이미 fsz∈[33,64], nc≥1; uc=0 front는 TC 경로에서
   trailing 0회 no-op라 scalar와 동일). 정리 이력은 [03 §4](03-api-config-build.md).
+- mid는 **front 단위**로 이 cap을 판정하지만, big(B>1)은 trailing이 별도 launch라 **레벨 단위**로 판정한다:
+  per-tile `FactorBigTrailTf32`는 출력을 16×64 타일로 멀티블록 분산하므로 **uc 상한이 없다** — 게이트는
+  `level_max_nc ≤ kTensorCorePivotColumnCap(32)` 하나뿐(staged K + per-tile shared를 bound). 적격이면
+  `FactorBigTrailTf32`(텐서코어), 아니면 그 레벨 전체를 스칼라 `FactorBigTrail`로 보낸다(`DispatchFactorBig`).
+  ⇒ `kTensorCoreUcCap`은 mid/B=1 의 whole-front staging 에만 적용되고, batched big 에는 쓰이지 않는다.
+- **정직한 천장(성능 게이팅 없음)**: TF32 를 고르면 big trailing 은 그대로 텐서코어로 돈다. 단, 전력망 big-front 는
+  K=nc≈8(단일 mma K-타일)이라 ncu 상 tensor pipe ~7%(shared-load bound)로 **FP32 대비 이득이 없다** — fronts 가
+  너무 작아 텐서코어가 못 이긴다. (시도: L/U head/tail pre-split 으로 mma 루프 cvt 제거 → shared 로드 2배로 bank
+  conflict 악화, 무이득이라 revert. front 크기로 스칼라에 빼돌리는 게이팅도 제거 — 그건 수치를 가리는 것일 뿐
+  텐서코어 자체의 한계는 그대로다.) 큰 fronts(비-전력망 대형 separator)에서만 TC 가 fragment 로드를 amortize 한다.
 
 ## 5. 단일 시스템(B=1)의 TF32
 
-B=1 big trailing은 배치 커널을 재사용하지 않고 전용 `FactorSingleBigTrailTf32`(shared-staged Ozaki mma)를 쓴다. front당
-1 block 융합 체제([08 §4](08-runtime-and-batching.md))에 맞춰진 형태다. small/mid는 B>1과 같은 mma 프리미티브를 공유한다.
+B=1 big trailing은 배치용 `FactorBigTrailTf32`를 재사용하지 않고 전용 `FactorSingleBigTrailTf32`(nc≤8 특화,
+shared-staged Ozaki mma)를 쓴다. front당 1 block 융합 체제([08 §4](08-runtime-and-batching.md))에 맞춰진 형태다.
+small/mid는 B>1과 같은 mma 프리미티브를 공유한다.

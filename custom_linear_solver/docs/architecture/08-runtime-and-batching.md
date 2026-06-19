@@ -68,7 +68,7 @@ spine: 남은 spine 레벨(cnt=1 직렬 체인)을 main 스트림이 처리
 | factor 진입 | `IssueFactorSingleSchedule` (`single.cuh`) | `IssueFactorBatched` (`schedule.cuh`) |
 | 매핑 | 1 block/front, factor+extend-add 융합 | 레벨별 tier-split, `grid.y = batch` |
 | 멀티스트림 | 없음(단일 시스템) | 독립 서브트리 fork/join(num_subtrees∈[2,8]) |
-| big front | `FactorSingleBigPanel/Trail[Tf32]/Extend` 멀티블록 | `FactorBig`(FP32/TF32) / pivot·panel·trail 3-launch(FP64) |
+| big front | `FactorSingleBigPanel/Trail[Tf32]/Extend` 멀티블록 | `FactorBigPivot·Panels·Trail` 3-launch 트리플(전 정밀도); TF32는 trailing이 `FactorBigTrailTf32`(텐서코어) |
 | **solve 준비** | factor 후 **pivot 블록 partitioned-inverse**(selinv, `FactorSingleInvertPivot`) | 없음 |
 | solve | 역행렬화된 pivot으로 **병렬 GEMV**(`solve/single.cuh`) | 레벨별 전진/후진 대입(`solve/dispatch.cuh`) |
 

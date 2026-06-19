@@ -22,8 +22,10 @@ inline constexpr int kWarpSize = 32;
 //
 //   small (fsz <= 32) -> warp-packed sub-group kernel (FactorSmall)
 //   mid   (fsz <= 64) -> whole-front shared-resident, 1 block/front (FactorMid)
-//   big   (fsz >  64) -> global-resident; L/U panel tiles staged; ONE front
-//                        spread across MANY blocks (FactorBig)
+//   big   (fsz >  64) -> global-resident; ONE front spread across MANY blocks
+//                        via the multi-block triple FactorBigPivot ->
+//                        FactorBigPanels -> FactorBigTrail (TF32: the trailing
+//                        runs on tensor cores, FactorBigTrailTf32)
 //
 // Boundary rationale (both physical):
 //   small|mid = warp width (32): sub-group packing (8/16/32 lanes per front)

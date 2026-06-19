@@ -54,13 +54,20 @@ front 내 목적지를 미리 계산해 뒀으므로([04 §2](04-memory-layout.m
 - TF32(`UseTC`)면 trailing이 텐서코어(`FactorizeFrontBlockedTf32`/`BlockUpdateTf32Tc`). [09](09-precision-and-tensor-cores.md).
 - L|U write-back 후, 부모 있으면 `ExtendAdd`. block thread 수는 GPU fill로 512/256/128(`DispatchFactorMid`).
 
-### big (`big.cuh` · `FactorBig`) — global-resident multi-block
-- front를 **global에 두고** L/U 패널 타일만 shared로 staging, **한 front를 여러 block에 분산**.
-- trailing+extend-add를 **융합**할 수 있다(`FuseExtend`: CB를 global에 썼다 다시 읽어 scatter하는 왕복 제거).
-- 거대 separator의 full 2·nc·uc staging이 99 KiB를 넘으면 **bounded-shared tiled**(`TrailingUpdateStagedTiled`)로 떨어짐.
-- **FP64 거대 front**는 단일 block으론 점유가 near-zero라 pivot/panel/trailing **3-launch 멀티블록**:
-  `FactorBigPivot`(pivot nc×nc) → `FactorBigPanels`(L21/U12를 uc로 multi-block) → `FactorBigTrail`(uc×uc 타일 multi-block,
-  extend-add 융합). 라우팅은 `DispatchFactorBig`.
+### big (`big.cuh`) — global-resident, multi-block triple
+- big front는 shared-resident가 불가능할 만큼 크다(fsz>64). front를 **global에 두고**, 한 front의 작업을 **여러
+  block에 분산**해 GPU를 채운다. 단일 block/front은 점유가 near-zero라 쓰지 않는다.
+- **전 정밀도 공통**으로 **3-launch 멀티블록 트리플**(`DispatchFactorBig`):
+  `FactorBigPivot`(pivot nc×nc, 1 block/front) → `FactorBigPanels`(L21/U12를 uc로 multi-block) →
+  `FactorBigTrail`(uc×uc를 TM×TN 타일로 multi-block, extend-add 융합). launch 간 순서는 graph edge로 보장.
+- **TF32**면 trailing만 텐서코어로 교체: `FactorBigTrailTf32`(per-tile Ozaki mma, 블록당 16×64 출력 타일,
+  grid=(tile,front,batch) — 스칼라와 같은 멀티블록 fill)가 스칼라 `FactorBigTrail`을 대신한다. 게이트는 pivot 차원
+  하나뿐(`nc ≤ kTensorCorePivotColumnCap`로 staged K + per-tile shared를 bound; **uc는 무제한**); 그 외(FP32/FP64,
+  또는 nc 초과)는 스칼라 trailing. [09](09-precision-and-tensor-cores.md).
+  - 정직한 천장: 전력망 big-front는 K=nc≈8(단일 mma K-타일)이라 텐서 pipe ~7%(shared-load bound)로, 여기서 TF32는
+    FP32보다 빠르지 않다 — fronts가 너무 작아 텐서코어가 못 이긴다(small tier가 TC를 건너뛰는 것과 같은 이유,
+    [`../README.md` §8](../README.md)).
+- 전력망 Jacobian은 big tier가 드물고, circuit·2D/3D-FEM의 큰 separator에서 주로 쓰인다.
 
 ## 4. 스케줄 — 누가 언제 launch되나 (`schedule.cuh`)
 
@@ -87,8 +94,8 @@ small tier 라우팅에만 붙는 예외: 좁은 레벨이라 small 커널이 GP
 |---|---|---|
 | Panel LU | `LuMidFront`(융합) / `LuPanelFactor`(row-fused vs 2-phase, nc≤12/16 분기) | barrier 수 vs thread당 직렬 작업 trade-off |
 | U-panel solve | `UPanelSolve`(row-parallel) / `UPanelSolveFewsync`(col-parallel, barrier 1회) | 점유 낮은 레벨선 few-sync 우세 |
-| Schur GEMM(trailing) | `TrailingUpdateScalar` / `…Rb`(register-block) / `…Staged[Tiled]` / `…Tf32Tc` | staging·정밀도·융합 여부의 곱 |
-| extend-add | `ExtendAdd`(분리) / trailing에 `FuseExtend` 융합 | CB global 왕복 제거 |
+| Schur GEMM(trailing) | mid: `TrailingUpdateScalar` / `…Rb`(register-block) / `BlockUpdateTf32Tc` · big: `FactorBigTrail`(타일 multi-block) / `FactorBigTrailTf32`(per-tile 텐서코어) | tier·staging·정밀도·융합 여부의 곱 |
+| extend-add | `ExtendAdd`(분리) / trailing에 융합(`FactorBigTrail`·`FactorBigTrailTf32`의 fused drain) | CB global 왕복 제거 |
 
 이 변종 폭증은 표준 "Schur GEMM(staging·정밀도·출력 파라미터화)" 하나로 합칠 여지가 있다(현 코드는 의도적
 손튜닝 상태). solve 쪽 변종은 [07 §5](07-solve.md).

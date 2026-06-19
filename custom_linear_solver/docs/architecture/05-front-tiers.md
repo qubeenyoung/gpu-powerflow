@@ -32,7 +32,7 @@ inline FrontTier ClassifyFrontTier(int front_size, bool /*fp64*/) {
 |---|---|---|---|
 | **small** | `fsz ≤ 32` (`kSmallFrontMax = kWarpSize`) | `FactorSmall` (`small.cuh`) | warp당 1 front(sub-group 8/16/32 lane), 8 warp/block, `__syncwarp`만 |
 | **mid** | `33 ≤ fsz ≤ 64` (`kMidFrontMax`) | `FactorMid` (`mid.cuh`) | front 전체 shared, 1 block/front |
-| **big** | `fsz > 64` | `FactorBig` (`big.cuh`) | global 상주, L/U 패널 타일만 staging, 한 front를 여러 block에 분산 |
+| **big** | `fsz > 64` | `FactorBigPivot`→`Panels`→`Trail`[`Tf32`] (`big.cuh`) | global 상주, 한 front를 여러 block에 분산하는 3-launch 트리플(TF32 trailing은 텐서코어) |
 
 ## 3. 경계 근거 (둘 다 물리적)
 
