@@ -17,7 +17,7 @@ Measurement modes (the test is about *what* we measure, not batch vs single):
 
 Backends/precision are a single option surface; only what a path supports is applied
 (CPU is python-only; tf32 is the custom backend only; per-operator timing is cpp-only).
-Cases are resolved + preprocessed with python/tests/matpower_data (pandapower).
+Cases are resolved + preprocessed with benchmark/common/matpower_data (pandapower).
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from python.tests import matpower_data  # noqa: E402  (reuse case loading / dump writing)
+from benchmark.common import matpower_data  # noqa: E402  (reuse case loading / dump writing)
 
 CUPF_BUILD = REPO_ROOT / "cuPF" / "build"
 CPP_BENCH = CUPF_BUILD / "tests" / "cupf_bench"
