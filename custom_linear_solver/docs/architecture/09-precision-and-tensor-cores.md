@@ -80,7 +80,7 @@ nc <= kTensorCorePivotColumnCap (=32)   &&   uc <= kTensorCoreUcCap (=512)
 - `kTensorCoreUcCap`은 매크로가 아니라 `types.hpp`의 **HW 유도 constexpr**다: whole-front staging
   `(2·uc_pad·nc_pad + 4·nc_pad)·4B`가 99 KiB opt-in shared(`kDynamicSharedMemoryOptInBytes`)에 들어가야 하므로
   `uc_pad·nc_pad ≤ ~12.6K`. nc cap 32에서 512가 안전. **shared 예산이 바뀌면 재유도해야 한다**(주석 명시).
-- 과거의 `fsz>32`/`nc≥1`/`uc≥1` 하한 게이트는 제거됐다(mid는 이미 fsz∈[33,64], nc≥1; uc=0 front는 TC 경로에서
+- 과거의 `fsz>32`/`nc≥1`/`uc≥1` 하한 게이트는 제거됐다(mid는 이미 fsz∈[33,128](float), nc≥1; uc=0 front는 TC 경로에서
   trailing 0회 no-op라 scalar와 동일). 정리 이력은 [03 §4](03-api-config-build.md).
 - mid는 **front 단위**로 이 cap을 판정하지만, big(B>1)은 trailing이 별도 launch라 **레벨 단위**로 판정한다:
   per-tile `FactorBigTrailTf32`는 출력을 16×64 타일로 멀티블록 분산하므로 **uc 상한이 없다** — 게이트는

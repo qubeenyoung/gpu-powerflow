@@ -89,7 +89,7 @@ src/
 ### `internal/` — 공용 코어
 | 파일 | 핵심 심볼 | 책임 |
 |---|---|---|
-| `types.hpp` | `ClassifyFrontTier`, `kSmallFrontMax=32`, `kMidFrontMax=64`, `kTensorCoreUcCap`, shared 예산 상수 | tier 분류·HW 상수의 **단일 진실원**(analyze/factorize/solve가 전부 합의) |
+| `types.hpp` | `ClassifyFrontTier`, `kSmallFrontMax=32`, `kMidFrontMax=64`/`kMidFrontMaxFloat=128`, `kTensorCoreUcCap`, shared 예산 상수 | tier 분류·HW 상수의 **단일 진실원**(analyze/factorize/solve가 전부 합의) |
 | `matrix_view.hpp` | `CsrMatrixView`, `DenseVectorView` | 사용자 device 버퍼의 비소유 뷰 |
 | `plan/multifrontal_plan.{hpp,cu}` | `MultifrontalPlan` | symbolic+numeric plan(device arena + host mirror). move-only, 소멸자에서 device free |
 | `plan/front_range_caps.hpp` | `ScanFrontRange`, `FrontRangeCaps` | 패널 구간의 max fsz/uc/nc 스캔(커널 thread/shared sizing) |

@@ -20,10 +20,15 @@ inline constexpr int kWarpSize = 32;
 // deterministic function of front size; no occupancy/opt-in gating decides
 // which kernel runs.
 //
-//   small (fsz <= 32) -> warp-packed sub-group kernel (FactorSmall)
-//   mid   (fsz <= 64) -> whole-front shared-resident, 1 block/front (FactorMid)
-//   big   (fsz >  64) -> global-resident; ONE front spread across MANY blocks
-//                        via the multi-block triple FactorBigPivot ->
+//   small (fsz <= 32)          -> warp-packed sub-group kernel (FactorSmall)
+//   mid   (fsz <= 64 fp64 /    -> whole-front shared-resident, 1 block/front
+//          fsz <= 128 float)      (FactorMid). Float fronts up to 128 fit shared
+//                                 (128²·4 = 64 KiB); one shared-resident kernel
+//                                 beats the 3-launch big triple here (measured
+//                                 ~-11% factor time). fp64 caps at 64 (128²·8 >
+//                                 budget).
+//   big   (else)               -> global-resident; ONE front spread across MANY
+//                        blocks via the multi-block triple FactorBigPivot ->
 //                        FactorBigPanels -> FactorBigTrail (TF32: the trailing
 //                        runs on tensor cores, FactorBigTrailTf32)
 //
@@ -32,23 +37,38 @@ inline constexpr int kWarpSize = 32;
 //                lives inside one warp; below it, warp-per-front + __syncwarp
 //                beats a block-per-front kernel that idles most threads and pays
 //                a full block barrier on the many Leaf fronts.
-//   mid|big   = whole-front shared occupancy crossover (64): whole-front
-//                staging costs fsz²·elem of shared, so beyond ~64 the footprint
-//                drops occupancy below ~2 blocks/SM. The big tier keeps the
-//                front in global and stages only small tiles, spreading one
-//                front's work across many blocks — fills the GPU when fronts are
-//                few/large and absorbs fronts too large to be shared-resident at
-//                all (FEM/circuit root separators).
+//   mid|big   = whole-front shared-residency limit. The mid kernel factors the
+//                whole front in shared in ONE launch; the big tier splits each
+//                front into the 3-launch global triple (pivot/panels/trailing).
+//                For moderate fronts (65..128) in the BATCHED path the triple is
+//                inefficient — it fires ~3 launches per level, each low-occupancy
+//                and latency-bound when a level holds only a few big fronts — so
+//                the single shared-resident kernel (front cached in shared across
+//                all phases, occupancy filled by the batch) is faster (measured
+//                ~-11% factor time; total DRAM bytes barely move, so the win is
+//                launch-consolidation + shared reuse + occupancy, not bandwidth).
+//                The boundary is PRECISION-dependent only because of the shared
+//                budget: float fronts fit to 128 (64 KiB), fp64 caps at 64
+//                (128²·8 KiB > budget). The big tier still absorbs fronts too
+//                large to be shared-resident at all (FEM/circuit root separators).
 //
-// 65–111 fronts run the global big kernel (faster than a panel-resident tier);
-// WholeFrontSharedMax() survives only as the big kernel's bounded-shared
-// staging threshold.
+// WholeFrontSharedMax() is the absolute shared-residency ceiling (159 float /
+// 111 double) and bounds kMidFrontMaxFloat; it also serves as the big kernel's
+// bounded-shared staging threshold.
 
 // small|mid boundary = warp width.
 inline constexpr int kSmallFrontMax = kWarpSize;  // 32
 
-// mid|big boundary = whole-front shared occupancy crossover.
-inline constexpr int kMidFrontMax = 64;
+// mid|big boundary. FP64 stays at 64 (128² double = 128 KiB > the 99 KiB shared
+// budget). Float (FP32/TF32) fronts fit shared past 64 (128² float = 64 KiB), so
+// the batched path routes the smaller big fronts (65..128) to the single
+// shared-resident mid kernel instead of the 3-launch big triple. The triple is
+// launch-heavy and low-occupancy on these moderate fronts; consolidating them
+// into one shared-resident launch cuts factor time ~1-11% (case-dependent, more
+// where 65..128 fronts are common). Precision-agnostic (helps FP32 and TF32
+// equally); not a tensor-core effect.
+inline constexpr int kMidFrontMax = 64;             // FP64
+inline constexpr int kMidFrontMaxFloat = 128;       // FP32/TF32
 
 // Small-tier kernel packs this many warps per block.
 inline constexpr int kSmallTierWarpsPerBlock = 8;
@@ -113,10 +133,10 @@ inline constexpr int kArenaAlignmentBytes = 256;
 enum class FrontTier { kSmall, kMid, kBig };
 
 inline FrontTier ClassifyFrontTier(int front_size, bool fp64) {
-  (void)fp64;
   if (front_size <= kSmallFrontMax) return FrontTier::kSmall;
-  if (front_size <= kMidFrontMax) return FrontTier::kMid;
-  return FrontTier::kBig;  // fsz > 64: global-resident multi-block
+  if (front_size <= (fp64 ? kMidFrontMax : kMidFrontMaxFloat))
+    return FrontTier::kMid;
+  return FrontTier::kBig;  // global-resident multi-block
 }
 
 // Number of dispatch tiers (== number of dedicated kernels). The Analyze-time
