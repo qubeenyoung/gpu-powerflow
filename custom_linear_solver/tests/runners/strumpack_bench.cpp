@@ -49,8 +49,16 @@ int main(int argc, char* argv[]){
 
   // batched emulation: B same-pattern systems = reorder once + B*(refactor + solve).
   // per-system cost = avg over B (and over `repeat` outer reps for stability).
-  double per_sys_fac=0, per_sys_sol=0;
+  double per_sys_fac=0, per_sys_sol=0, per_sys_update=0;
   {
+    // (a) update-only cost (H2D value re-upload / re-marshal, no factor)
+    cudaDeviceSynchronize();
+    auto u0=clk::now();
+    for(int r=0;r<repeat;++r)
+      for(int k=0;k<B;++k){ spss.update_matrix_values(A); }
+    cudaDeviceSynchronize(); auto u1=clk::now();
+    per_sys_update = ms(u0,u1)/(repeat*(double)B);
+
     cudaDeviceSynchronize();
     auto bf0=clk::now();
     for(int r=0;r<repeat;++r)
@@ -71,6 +79,8 @@ int main(int argc, char* argv[]){
   std::printf("solve_ms=%.6f\n", solve_ms);
   std::printf("batch=%d\n", B);
   std::printf("batch_factor_per_sys_ms=%.6f\n", per_sys_fac);
+  std::printf("batch_update_per_sys_ms=%.6f\n", per_sys_update);
+  std::printf("batch_factor_only_per_sys_ms=%.6f\n", per_sys_fac - per_sys_update);
   std::printf("batch_solve_per_sys_ms=%.6f\n", per_sys_sol);
   std::printf("max_scaled_residual=%.3e\n", resid);
   return 0;
