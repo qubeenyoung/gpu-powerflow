@@ -1,21 +1,22 @@
 # custom_linear_solver / tests
 
-Head-to-head benchmark harness: the **custom** solver vs two baselines (**cuDSS**,
-**STRUMPACK**) on the same matrices. Everything needed to build a runner, fetch a
-dataset, and run a comparison lives under this directory.
+Head-to-head benchmark harness: the **custom** solver vs three baselines (**cuDSS**,
+**STRUMPACK**, **GLU**) on the same matrices. Everything needed to build a runner, fetch
+a dataset, and run a comparison lives under this directory.
 
 ```
 tests/
 ├── runners/        # benchmark source (one self-contained file per solver)
 │   ├── run_custom_solver.cu   custom solver (analyze→factorize→solve, B=1 & batch)
 │   ├── io.{cpp,hpp}           MatrixMarket I/O for the custom runner
-│   ├── cudss_bench.cpp        NVIDIA cuDSS (GPU sparse direct LU)
-│   ├── cudss_bench2.cpp       cuDSS refactorization variant
-│   └── strumpack_bench.cpp    STRUMPACK (GPU multifrontal)
+│   ├── cudss_bench.cpp        NVIDIA cuDSS (GPU sparse direct LU; fp32/fp64, batch)
+│   ├── strumpack_bench.cpp    STRUMPACK (GPU multifrontal)
+│   └── glu_bench.cpp          GLU v3.0 (UC Riverside GPU sparse LU; fp32, B=1)
 ├── scripts/          # one build script per solver
 │   ├── build_custom.sh        → custom_linear_solver/build/custom_linear_solver_run
 │   ├── build_cudss.sh         → scripts/cudss_bench
-│   └── build_strumpack.sh     → scripts/strumpack_bench_{magma,nomagma}  (both GPU)
+│   ├── build_strumpack.sh     → scripts/strumpack_bench_{magma,nomagma}  (both GPU)
+│   └── build_glu.sh           → scripts/glu_bench
 └── datasets/        # see datasets/README.md
     ├── power/                 power-grid Jacobians (tracked; the primary domain)
     ├── suitesparse/           SuiteSparse matrices (git-ignored, fetched on demand)
@@ -32,6 +33,7 @@ overridable — see the header comment of each script.
 tests/scripts/build_custom.sh         # uses the project CMake
 tests/scripts/build_cudss.sh          # needs cuDSS  (CUDSS_INC / CUDSS_LIB)
 tests/scripts/build_strumpack.sh      # needs STRUMPACK ×2 + MAGMA (STRUMPACK_BUILD_{MAGMA,NOMAGMA}, MAGMA_PREFIX)
+tests/scripts/build_glu.sh            # needs GLU v3.0 source tree (GLU_SRC); builds it via its own Makefile
 ```
 
 **STRUMPACK has two GPU variants** from one source:
@@ -44,6 +46,7 @@ tests/scripts/build_strumpack.sh      # needs STRUMPACK ×2 + MAGMA (STRUMPACK_B
 | custom | CUDA, METIS | toolchain |
 | cuDSS | cuDSS 0.7 | `/usr/{include,lib/x86_64-linux-gnu}/libcudss/12` |
 | STRUMPACK | STRUMPACK (CUDA) ×2 builds + MAGMA 2.8 | `/root/baselines/STRUMPACK/build{,_nomagma}`, `/opt/magma` |
+| GLU | GLU v3.0 source (bundles NICSLU) | `/root/baselines/GLU_public/src` |
 
 ## Datasets
 
@@ -78,7 +81,13 @@ LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libcudss/12 \
 # STRUMPACK (MAGMA path; depth-matched reordering)
 LD_LIBRARY_PATH=/opt/magma/lib \
     scripts/strumpack_bench_magma $CASE/J.mtx 1 10 --sp_reordering_method metis
+
+# GLU  (fp32, B=1; -p adds GESP diagonal perturbation)
+scripts/glu_bench $CASE/J.mtx 10 5
 ```
+
+Each baseline prints `key=value` lines including `analysis_ms`, `factor_per_sys_ms`,
+`solve_per_sys_ms`, and `relres`.
 
 ## Custom runner flags (`run_custom_solver`)
 
@@ -111,5 +120,13 @@ batch_solve_per_sys_ms, batch_relres`.
 - Accuracy (conditioning-dependent): fp64 ≈ 1e-13..1e-16; fp32 ≈ 1e-4; tf32 ≈ 1e-4
   on well-conditioned cases up to ≈ 1e-2 on large stiff grids — the TF32/Ozaki floor,
   not a bug.
-- The cuDSS / STRUMPACK baselines link **external GPU libraries** whose paths are
-  machine-specific; override them via the env vars documented in each build script.
+- The cuDSS / STRUMPACK / GLU baselines link **external GPU libraries / source trees**
+  whose paths are machine-specific; override them via the env vars documented in each
+  build script.
+- **GLU is fp32-only and B=1** (single precision `REAL=float`, no micro-batch). It is a
+  circuit-simulation solver (static GESP pivoting), so on power-flow Jacobians its fp32
+  residual is looser than cuDSS fp32 — `relres` ≈ 1e-5 on small grids degrading to ≈ 1e-2
+  on large stiff grids; `-p` (diagonal perturbation) usually makes it *worse* here, not
+  better. The harness feeds GLU from an in-memory CSC built by its own MatrixMarket reader,
+  because NICSLU's file reader expects column-major triplets and rejects our row-major
+  `J.mtx`.

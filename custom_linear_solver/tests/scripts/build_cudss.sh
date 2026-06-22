@@ -10,7 +10,7 @@
 #   CXX        host compiler          (default g++)
 #
 # Run (cuDSS is not on the default loader path):
-#   LD_LIBRARY_PATH=$CUDSS_LIB ./cudss_bench <A.mtx> [repeat]
+#   LD_LIBRARY_PATH=$CUDSS_LIB ./cudss_bench <A.mtx> [repeat] [B] [fp32|fp64] [warmup]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
